@@ -152,6 +152,22 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 FOREIGN KEY (slide_id) REFERENCES ppt_slides(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS api_providers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                provider_type TEXT NOT NULL,
+                base_url TEXT DEFAULT '',
+                model TEXT DEFAULT '',
+                api_key_env TEXT DEFAULT '',
+                auth_type TEXT NOT NULL DEFAULT 'bearer',
+                extra_headers_json TEXT DEFAULT '{}',
+                request_template_json TEXT DEFAULT '',
+                response_path TEXT DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );
             """
         )
 

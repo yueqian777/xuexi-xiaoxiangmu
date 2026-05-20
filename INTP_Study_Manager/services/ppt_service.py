@@ -10,11 +10,36 @@ from db import DATA_DIR, execute, insert_and_get_id
 UPLOAD_DIR = DATA_DIR / "uploads"
 
 
-def import_pptx(uploaded_file: BinaryIO, *, subject: str, title: str) -> int:
-    saved_path = save_uploaded_pptx(uploaded_file)
-    slides = extract_pptx_slides(saved_path)
-    deck_title = title.strip() or saved_path.stem
+def import_deck(uploaded_file: BinaryIO, *, subject: str, title: str) -> int:
+    original_name = getattr(uploaded_file, "name", "")
+    suffix = Path(original_name).suffix.lower()
+    if suffix == ".pptx":
+        return import_pptx(uploaded_file, subject=subject, title=title)
+    if suffix == ".pdf":
+        return import_pdf(uploaded_file, subject=subject, title=title)
+    raise RuntimeError("仅支持 PPTX 或 PDF 文件。")
 
+
+def import_pptx(uploaded_file: BinaryIO, *, subject: str, title: str) -> int:
+    saved_path = save_uploaded_deck(uploaded_file)
+    slides = extract_pptx_slides(saved_path)
+    return _save_deck_records(saved_path, slides, subject=subject, title=title)
+
+
+def import_pdf(uploaded_file: BinaryIO, *, subject: str, title: str) -> int:
+    saved_path = save_uploaded_deck(uploaded_file)
+    slides = extract_pdf_pages(saved_path)
+    return _save_deck_records(saved_path, slides, subject=subject, title=title)
+
+
+def _save_deck_records(
+    saved_path: Path,
+    slides: list[dict[str, str | int]],
+    *,
+    subject: str,
+    title: str,
+) -> int:
+    deck_title = title.strip() or saved_path.stem
     deck_id = insert_and_get_id(
         """
         INSERT INTO ppt_decks (filename, title, subject, file_path, slide_count)
@@ -39,11 +64,11 @@ def import_pptx(uploaded_file: BinaryIO, *, subject: str, title: str) -> int:
     return deck_id
 
 
-def save_uploaded_pptx(uploaded_file: BinaryIO) -> Path:
+def save_uploaded_deck(uploaded_file: BinaryIO) -> Path:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    original_name = getattr(uploaded_file, "name", "uploaded.pptx")
+    original_name = getattr(uploaded_file, "name", "uploaded")
     suffix = Path(original_name).suffix.lower() or ".pptx"
-    safe_stem = _safe_filename(Path(original_name).stem) or "ppt"
+    safe_stem = _safe_filename(Path(original_name).stem) or "deck"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     target = UPLOAD_DIR / f"{timestamp}_{safe_stem}{suffix}"
 
@@ -74,6 +99,28 @@ def extract_pptx_slides(path: Path) -> list[dict[str, str | int]]:
     return slides
 
 
+def extract_pdf_pages(path: Path) -> list[dict[str, str | int]]:
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise RuntimeError("未安装 pypdf，请先运行 pip install -r requirements.txt。") from exc
+
+    reader = PdfReader(str(path))
+    slides: list[dict[str, str | int]] = []
+    for index, page in enumerate(reader.pages, start=1):
+        text = (page.extract_text() or "").strip()
+        title = _first_text_line(text) or f"PDF 第 {index} 页"
+        slides.append(
+            {
+                "slide_number": index,
+                "title": title[:80],
+                "slide_text": text,
+                "notes": "source=pdf",
+            }
+        )
+    return slides
+
+
 def _extract_title(slide) -> str:
     if slide.shapes.title and getattr(slide.shapes.title, "text", "").strip():
         return slide.shapes.title.text.strip()
@@ -96,6 +143,13 @@ def _extract_text_lines(slide) -> list[str]:
     return lines
 
 
+def _first_text_line(text: str) -> str:
+    for line in text.splitlines():
+        clean = line.strip()
+        if clean:
+            return clean
+    return ""
+
+
 def _safe_filename(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "_", value).strip("._-")
-

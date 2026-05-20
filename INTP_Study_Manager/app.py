@@ -4,6 +4,7 @@ import streamlit as st
 
 from db import init_db
 from pages import (
+    api_settings,
     dashboard,
     knowledge_cards,
     mainline_branches,
@@ -14,10 +15,12 @@ from pages import (
     reviews,
     study_sessions,
 )
+from services.ai_service import ensure_default_api_providers
 
 PAGES = {
     "首页 Dashboard": dashboard.render,
     "PPT 逐页讲解": ppt_tutor.render,
+    "API 接入设置": api_settings.render,
     "学习登记": study_sessions.render,
     "知识点卡片": knowledge_cards.render,
     "闭卷测试 Prompt": quiz_prompts.render,
@@ -36,6 +39,7 @@ def main() -> None:
         initial_sidebar_state="expanded",
     )
     init_db()
+    ensure_default_api_providers()
 
     st.sidebar.title("INTP Study Manager")
     st.sidebar.caption("问题驱动 · 闭卷回忆 · 错因分析 · 间隔复习")

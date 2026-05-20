@@ -32,31 +32,81 @@ data/study_manager.db
 6. 进入“复习计划”，完成复习后标记结果，系统会自动调整掌握度和后续复习。
 7. 学习中暂时不处理的问题放进“探索停车场”，避免打断主线。
 
-## ChatGPT API 设置
+## API 接入设置
 
-“PPT 逐页讲解”页面支持直接调用 OpenAI API。API Key 不会写入 SQLite，也不会保存到项目文件。
+项目支持多种 AI API 接入，不再固定依赖 OpenAI 官方接口。进入“API 接入设置”页面后，可以选择或新增 Provider。
 
-你可以任选一种方式：
+当前内置模板包括：
+
+1. OpenAI Responses API
+2. OpenAI 兼容 Chat Completions
+3. 本地 CLIProxyAPI
+4. 幻城网安 API
+5. Anthropic Messages API
+6. Google Gemini generateContent
+7. 自定义 HTTP JSON API
+
+API Key 默认不会写入 SQLite，也不会保存到项目文件。你可以在页面中临时输入，也可以使用环境变量。
+
+例如 OpenAI：
 
 ```powershell
 setx OPENAI_API_KEY "你的 API Key"
 ```
 
-重新打开终端后启动应用，或在页面的“ChatGPT API 设置”中临时输入 API Key。
+例如本地 CLIProxyAPI：
 
-默认模型写在页面设置中，可以按你的账号权限修改。
+```powershell
+setx CLIPROXY_API_KEY "local-client-key"
+```
+
+例如幻城网安 API：
+
+```powershell
+setx IAMHC_API_KEY "你在 api.iamhc.cn 控制台创建的 sk- 令牌"
+```
+
+重新打开终端后启动应用，或在页面中临时输入 API Key。
+
+### 自定义 HTTP JSON API
+
+如果某个平台不属于内置类型，可以新增“自定义 HTTP JSON”：
+
+1. Base URL / Endpoint 填完整 POST 地址。
+2. 选择鉴权方式，例如 Bearer、x-api-key、query key 或 none。
+3. 填写额外请求头 JSON。
+4. 填写请求体模板。
+5. 填写响应文本路径。
+
+请求体模板可用变量：
+
+```text
+{prompt}
+{model}
+{max_output_tokens}
+```
+
+响应路径示例：
+
+```text
+choices.0.message.content
+candidates.0.content.parts.0.text
+content.0.text
+output_text
+```
 
 ## PPT 逐页讲解
 
 进入“PPT 逐页讲解”页面后：
 
-1. 上传 `.pptx` 文件。
+1. 上传 `.pptx` 或 `.pdf` 文件。
 2. 选择 PPT 和当前页。
-3. 左侧查看当前页解析出的文字内容。
-4. 右侧点击“生成 / 更新本页讲解”，GPT 会只围绕当前页讲解。
-5. 点击“打开插问浮窗”，提问不会覆盖当前页主线讲解，而是单独保存为本页插问记录。
+3. 在“AI API 设置”里选择 Provider。
+4. 左侧查看当前页解析出的文字内容。
+5. 右侧点击“生成 / 更新本页讲解”，AI 会只围绕当前页讲解。
+6. 点击“打开插问浮窗”，提问不会覆盖当前页主线讲解，而是单独保存为本页插问记录。
 
-当前版本优先保证本地可运行和学习流不中断，PPTX 会解析每页文本内容；如果本机没有 Office/LibreOffice 转换器，暂不渲染原始幻灯片画面。
+当前版本优先保证本地可运行和学习流不中断。PPTX 会解析每页文本内容；PDF 会按页提取文字，并在阅读区显示 PDF 原文预览。如果 PDF 是扫描版图片，可能提取不到文字，后续可继续加入 OCR。
 
 ## 每日学习流程示例
 
