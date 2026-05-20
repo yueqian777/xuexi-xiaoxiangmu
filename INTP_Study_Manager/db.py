@@ -169,6 +169,20 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_review_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                review_date TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT '已完成',
+                notes TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );
             """
         )
         _ensure_column(conn, "ppt_slides", "image_path", "TEXT DEFAULT ''")

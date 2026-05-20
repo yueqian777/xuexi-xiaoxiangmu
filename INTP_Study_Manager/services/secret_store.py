@@ -88,9 +88,22 @@ def save_secret_store(master_password: str, data: dict[str, Any]) -> None:
         "salt": _b64encode(salt),
         "nonce": _b64encode(nonce),
         "ciphertext": _b64encode(ciphertext),
+        "public_index": _build_public_index(normalized),
         "updated_at": normalized["updated_at"],
     }
     SECRET_STORE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_secret_public_index() -> list[dict[str, Any]]:
+    if not SECRET_STORE_PATH.exists():
+        return []
+    try:
+        payload = json.loads(SECRET_STORE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    index = payload.get("public_index", {})
+    providers = index.get("providers", [])
+    return providers if isinstance(providers, list) else []
 
 
 def upsert_provider_secret(
@@ -99,6 +112,9 @@ def upsert_provider_secret(
     provider_id: int,
     provider_name: str,
     api_key: str,
+    model: str = "",
+    provider_type: str = "",
+    base_url: str = "",
 ) -> dict[str, Any]:
     key = api_key.strip()
     if not key:
@@ -107,6 +123,9 @@ def upsert_provider_secret(
     providers[str(provider_id)] = {
         "provider_id": provider_id,
         "provider_name": provider_name,
+        "model": model,
+        "provider_type": provider_type,
+        "base_url": base_url,
         "api_key": key,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -130,6 +149,24 @@ def masked_secret(value: str) -> str:
     if len(value) <= 10:
         return "*" * len(value)
     return f"{value[:4]}...{value[-4:]}"
+
+
+def _build_public_index(data: dict[str, Any]) -> dict[str, Any]:
+    providers = []
+    for raw_id, item in data.get("providers", {}).items():
+        if not isinstance(item, dict):
+            continue
+        providers.append(
+            {
+                "provider_id": int(item.get("provider_id") or raw_id),
+                "provider_name": str(item.get("provider_name") or ""),
+                "model": str(item.get("model") or ""),
+                "provider_type": str(item.get("provider_type") or ""),
+                "base_url": str(item.get("base_url") or ""),
+                "updated_at": str(item.get("updated_at") or ""),
+            }
+        )
+    return {"providers": providers}
 
 
 def _derive_key(master_password: str, salt: bytes, iterations: int) -> bytes:

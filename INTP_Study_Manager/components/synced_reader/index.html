@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <script>
+    window.MathJax = {
+      tex: {
+        inlineMath: [['$', '$'], ['\\(', '\\)']],
+        displayMath: [['$$', '$$'], ['\\[', '\\]']],
+        processEscapes: true
+      },
+      options: {
+        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+      },
+      startup: {
+        typeset: false
+      }
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+  <style>
+    :root {
+      --bg: #f6f1e8;
+      --ink: #20201d;
+      --muted: #706b61;
+      --line: #ded4c5;
+      --accent: #9a4f23;
+      --panel: #fffaf0;
+      --shadow: rgba(56, 38, 18, 0.14);
+    }
+    * { box-sizing: border-box; }
+    html {
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+    }
+    body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: linear-gradient(135deg, #f7efe3, #eee5d4);
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif;
+      overscroll-behavior: none;
+    }
+    .frame {
+      height: 835px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      overflow: hidden;
+      background: var(--bg);
+      box-shadow: 0 18px 45px var(--shadow);
+    }
+    .topbar {
+      height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      background: rgba(255, 250, 240, 0.94);
+      border-bottom: 1px solid var(--line);
+    }
+    .title {
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .current {
+      color: var(--accent);
+      font-weight: 800;
+    }
+    .grid {
+      height: calc(100% - 58px);
+      display: grid;
+      grid-template-columns: minmax(0, 1.22fr) minmax(360px, 0.78fr);
+    }
+    .pages, .notes {
+      height: 100%;
+      overflow-y: auto;
+      scroll-behavior: smooth;
+      overscroll-behavior: contain;
+      touch-action: pan-y;
+    }
+    .pages {
+      padding: 22px 24px 80px;
+      background:
+        radial-gradient(circle at 10% 10%, rgba(154,79,35,.08), transparent 28%),
+        #eee6d7;
+      border-right: 1px solid var(--line);
+    }
+    .page {
+      margin: 0 auto 30px;
+      max-width: 960px;
+      padding: 12px;
+      border-radius: 14px;
+      border: 2px solid transparent;
+      background: rgba(255,255,255,.56);
+      box-shadow: 0 10px 28px rgba(48,34,17,.16);
+      transition: border-color .18s, transform .18s, box-shadow .18s;
+    }
+    .page.active {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+      box-shadow: 0 16px 38px rgba(120,70,28,.26);
+    }
+    .page-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 2px 4px 10px;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .page img {
+      width: 100%;
+      display: block;
+      border-radius: 8px;
+      background: #fff;
+    }
+    .notes {
+      padding: 22px 20px 80px;
+      background: var(--panel);
+    }
+    .note {
+      min-height: 260px;
+      margin: 0 0 22px;
+      padding: 18px 18px 20px;
+      border: 1px solid var(--line);
+      border-left: 5px solid transparent;
+      border-radius: 16px;
+      background: #fffdf7;
+      box-shadow: 0 8px 18px rgba(70,45,18,.08);
+      transition: border-color .18s, background .18s;
+      line-height: 1.72;
+      font-size: 15px;
+    }
+    .note.active {
+      border-left-color: var(--accent);
+      background: #fff7e8;
+    }
+    .note h3 {
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 18px;
+    }
+    .note-meta {
+      margin-bottom: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .note-body {
+      overflow-wrap: anywhere;
+    }
+    .note-body h1,
+    .note-body h2,
+    .note-body h3,
+    .note-body h4 {
+      margin: 16px 0 8px;
+      color: #7f3f1a;
+      line-height: 1.35;
+    }
+    .note-body h1 { font-size: 21px; }
+    .note-body h2 { font-size: 19px; }
+    .note-body h3 { font-size: 17px; }
+    .note-body p { margin: 8px 0; }
+    .note-body ul,
+    .note-body ol {
+      margin: 8px 0 10px;
+      padding-left: 24px;
+    }
+    .note-body li { margin: 4px 0; }
+    .note-body blockquote {
+      margin: 12px 0;
+      padding: 8px 12px;
+      border-left: 4px solid #c98245;
+      background: #fff3df;
+      color: #5c5144;
+    }
+    .note-body pre {
+      margin: 12px 0;
+      padding: 12px;
+      overflow-x: auto;
+      border-radius: 10px;
+      background: #28231d;
+      color: #f9efe0;
+      line-height: 1.55;
+    }
+    .note-body code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: #efe2cd;
+      color: #6f3718;
+      font-family: "Cascadia Code", "Consolas", monospace;
+      font-size: 0.92em;
+    }
+    .note-body pre code {
+      padding: 0;
+      background: transparent;
+      color: inherit;
+    }
+    .note-body table {
+      width: 100%;
+      margin: 12px 0;
+      border-collapse: collapse;
+      display: block;
+      overflow-x: auto;
+      font-size: 14px;
+    }
+    .note-body th,
+    .note-body td {
+      border: 1px solid #dbc8ac;
+      padding: 7px 9px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .note-body th {
+      background: #f2dfbf;
+      color: #653314;
+    }
+    .note-body hr {
+      border: 0;
+      border-top: 1px solid var(--line);
+      margin: 16px 0;
+    }
+    .note-body mjx-container {
+      overflow-x: auto;
+      overflow-y: hidden;
+      max-width: 100%;
+      padding: 2px 0;
+    }
+    .selection-toolbar {
+      position: fixed;
+      z-index: 9999;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      max-width: min(560px, calc(100vw - 24px));
+      padding: 9px 10px;
+      border: 1px solid rgba(86, 48, 18, 0.18);
+      border-radius: 999px;
+      background: rgba(38, 27, 16, 0.94);
+      color: #fff8ea;
+      box-shadow: 0 12px 34px rgba(24, 14, 5, 0.28);
+      font-size: 13px;
+    }
+    .selection-toolbar.show { display: flex; }
+    .selection-toolbar button {
+      border: 0;
+      border-radius: 999px;
+      padding: 7px 11px;
+      background: #f0b35f;
+      color: #2d1a0c;
+      font-weight: 800;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .selection-toolbar button.secondary {
+      background: rgba(255, 255, 255, 0.14);
+      color: #fff8ea;
+    }
+    .selection-toolbar span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #e8d8bf;
+    }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+      .notes { display: none; }
+      .pages { border-right: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="frame" id="frame">
+    <div class="topbar">
+      <div>
+        <div class="title" id="deckTitle">学习资料</div>
+        <div class="meta" id="deckMeta">未分类 · 原页面同步阅读</div>
+      </div>
+      <div class="current" id="currentPage">第 1 页</div>
+    </div>
+    <div class="grid">
+      <section class="pages" id="pages"></section>
+      <aside class="notes" id="notes"></aside>
+    </div>
+  </div>
+  <div class="selection-toolbar" id="selectionToolbar">
+    <button type="button" id="askSelectionButton">引用到插问</button>
+    <button type="button" class="secondary" id="copySelectionButton">复制引用</button>
+    <span id="selectionHint">将引用选中文本</span>
+  </div>
+  <script>
+    const Streamlit = {
+      setComponentReady() {
+        window.parent.postMessage({
+          isStreamlitMessage: true,
+          type: 'streamlit:componentReady',
+          apiVersion: 1,
+        }, '*');
+      },
+      setFrameHeight(height) {
+        window.parent.postMessage({
+          isStreamlitMessage: true,
+          type: 'streamlit:setFrameHeight',
+          height,
+        }, '*');
+      },
+      setComponentValue(value) {
+        window.parent.postMessage({
+          isStreamlitMessage: true,
+          type: 'streamlit:setComponentValue',
+          value,
+        }, '*');
+      },
+    };
+
+    const frame = document.getElementById('frame');
+    const deckTitle = document.getElementById('deckTitle');
+    const deckMeta = document.getElementById('deckMeta');
+    const pageRoot = document.getElementById('pages');
+    const noteRoot = document.getElementById('notes');
+    const current = document.getElementById('currentPage');
+    const selectionToolbar = document.getElementById('selectionToolbar');
+    const askSelectionButton = document.getElementById('askSelectionButton');
+    const copySelectionButton = document.getElementById('copySelectionButton');
+    const selectionHint = document.getElementById('selectionHint');
+
+    let pages = [];
+    let deckId = 0;
+    let activeModel = '';
+    let observer = null;
+    let currentSelectionPayload = null;
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    }
+
+    function renderMarkdown(value) {
+      const source = String(value ?? '');
+      if (!window.marked || !window.DOMPurify) {
+        return escapeHtml(source).replaceAll('\n', '<br>');
+      }
+      const rawHtml = window.marked.parse(source, {
+        gfm: true,
+        breaks: true,
+      });
+      return window.DOMPurify.sanitize(rawHtml, {
+        USE_PROFILES: { html: true },
+      });
+    }
+
+    function typesetMath() {
+      if (!window.MathJax?.typesetPromise) {
+        window.setTimeout(typesetMath, 120);
+        return;
+      }
+      window.MathJax.typesetPromise([noteRoot]).catch(error => console.error(error));
+    }
+
+    function setActive(pageNumber) {
+      document.querySelectorAll('.page.active,.note.active').forEach(el => el.classList.remove('active'));
+      const page = document.getElementById(`page-${pageNumber}`);
+      const note = document.getElementById(`note-${pageNumber}`);
+      if (page) page.classList.add('active');
+      if (note) {
+        note.classList.add('active');
+        noteRoot.scrollTo({ top: note.offsetTop - noteRoot.offsetTop, behavior: 'smooth' });
+      }
+      current.textContent = `第 ${pageNumber} 页`;
+    }
+
+    function renderReader(args) {
+      pages = Array.isArray(args.pages) ? args.pages : [];
+      deckId = Number(args.deck_id || 0);
+      activeModel = String(args.active_model || '');
+      const height = Number(args.height || 850);
+      frame.style.height = `${Math.max(360, height - 15)}px`;
+      Streamlit.setFrameHeight(height);
+
+      deckTitle.textContent = String(args.title || '学习资料');
+      deckMeta.textContent = `${String(args.subject || '未分类')} · 原页面同步阅读`;
+      selectionHint.textContent = `将引用选中文本，并用当前模型：${activeModel || '当前模型'}`;
+
+      if (observer) {
+        observer.disconnect();
+        observer = null;
+      }
+
+      pageRoot.innerHTML = pages.map(page => `
+        <article class="page" id="page-${page.slideNumber}" data-page="${page.slideNumber}">
+          <div class="page-label">
+            <span>第 ${page.slideNumber} 页</span>
+            <span>${escapeHtml(page.title)}</span>
+          </div>
+          <img src="${page.image}" alt="第 ${page.slideNumber} 页原页面" loading="lazy" />
+        </article>
+      `).join('');
+
+      noteRoot.innerHTML = pages.map(page => `
+        <article class="note" id="note-${page.slideNumber}" data-page="${page.slideNumber}">
+          <h3>第 ${page.slideNumber} 页讲解</h3>
+          <div class="note-meta">${escapeHtml(page.model || '未生成')} ${page.createdAt ? '· ' + escapeHtml(page.createdAt) : ''}</div>
+          <div class="note-body">${renderMarkdown(page.explanation)}</div>
+        </article>
+      `).join('');
+
+      observer = new IntersectionObserver((entries) => {
+        const visible = entries
+          .filter(entry => entry.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (!visible) return;
+        setActive(visible.target.dataset.page);
+      }, {
+        root: pageRoot,
+        threshold: [0.35, 0.5, 0.65, 0.8],
+      });
+
+      document.querySelectorAll('.page').forEach(page => observer.observe(page));
+      if (pages.length) setActive(pages[0].slideNumber);
+      typesetMath();
+    }
+
+    function clipText(value, limit) {
+      const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+      if (text.length <= limit) return text;
+      return text.slice(0, limit).trim() + '...';
+    }
+
+    function nodeElement(node) {
+      if (!node) return null;
+      return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    }
+
+    function buildSelectionPayload() {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+      const selectedText = selection.toString().trim();
+      if (selectedText.length < 2) return null;
+
+      const range = selection.getRangeAt(0);
+      const startElement = nodeElement(range.startContainer);
+      const endElement = nodeElement(range.endContainer);
+      const note = startElement?.closest?.('.note');
+      if (!note || !noteRoot.contains(note) || !endElement || !note.contains(endElement)) return null;
+
+      const noteBody = note.querySelector('.note-body');
+      const fullText = noteBody?.innerText || note.innerText || '';
+      const normalizedFullText = fullText.replace(/\s+/g, ' ');
+      const normalizedSelected = selectedText.replace(/\s+/g, ' ');
+      const start = normalizedFullText.indexOf(normalizedSelected);
+      const before = start >= 0 ? normalizedFullText.slice(Math.max(0, start - 700), start) : '';
+      const after = start >= 0
+        ? normalizedFullText.slice(start + normalizedSelected.length, start + normalizedSelected.length + 700)
+        : '';
+      const slideNumber = Number(note.dataset.page);
+      const page = pages.find(item => Number(item.slideNumber) === slideNumber) || {};
+      return {
+        action: 'branch_quote',
+        token: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        deckId,
+        slideNumber,
+        slideTitle: page.title || `第 ${slideNumber} 页`,
+        selectedText: clipText(selectedText, 1200),
+        contextBefore: clipText(before, 700),
+        contextAfter: clipText(after, 700),
+      };
+    }
+
+    function showSelectionToolbar() {
+      const payload = buildSelectionPayload();
+      if (!payload) {
+        hideSelectionToolbar();
+        return;
+      }
+      currentSelectionPayload = payload;
+      const selection = window.getSelection();
+      const rect = selection.getRangeAt(0).getBoundingClientRect();
+      const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - 570));
+      const top = Math.max(8, rect.top - 52);
+      selectionToolbar.style.left = `${left}px`;
+      selectionToolbar.style.top = `${top}px`;
+      selectionHint.textContent = `第 ${payload.slideNumber} 页：${clipText(payload.selectedText, 42)}`;
+      selectionToolbar.classList.add('show');
+    }
+
+    function hideSelectionToolbar() {
+      currentSelectionPayload = null;
+      selectionToolbar.classList.remove('show');
+    }
+
+    function quoteTextForClipboard(payload) {
+      return [
+        `引用自第 ${payload.slideNumber} 页：${payload.slideTitle}`,
+        '',
+        payload.selectedText,
+        '',
+        '前文上下文：',
+        payload.contextBefore || '无',
+        '',
+        '后文上下文：',
+        payload.contextAfter || '无',
+      ].join('\n');
+    }
+
+    function sendSelectionToBranch() {
+      const payload = currentSelectionPayload || buildSelectionPayload();
+      if (!payload) return;
+      Streamlit.setComponentValue(payload);
+      selectionHint.textContent = '已引用到下方插问区';
+      selectionToolbar.classList.remove('show');
+    }
+
+    function copyCurrentSelection() {
+      const payload = currentSelectionPayload || buildSelectionPayload();
+      if (!payload) return;
+      navigator.clipboard?.writeText(quoteTextForClipboard(payload));
+      selectionHint.textContent = '引用内容已复制';
+      window.setTimeout(showSelectionToolbar, 800);
+    }
+
+    askSelectionButton.addEventListener('mousedown', event => event.preventDefault());
+    copySelectionButton.addEventListener('mousedown', event => event.preventDefault());
+    askSelectionButton.addEventListener('click', sendSelectionToBranch);
+    copySelectionButton.addEventListener('click', copyCurrentSelection);
+    noteRoot.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
+    noteRoot.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
+    document.addEventListener('mousedown', (event) => {
+      if (!selectionToolbar.contains(event.target)) {
+        window.setTimeout(() => {
+          const selection = window.getSelection();
+          if (!selection || selection.isCollapsed) hideSelectionToolbar();
+        }, 80);
+      }
+    });
+
+    function nearestScrollPanel(target) {
+      const element = target?.closest?.('.pages, .notes');
+      if (element) return element;
+      return pageRoot;
+    }
+
+    function containedWheelScroll(event) {
+      const panel = nearestScrollPanel(event.target);
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      panel.scrollBy({ top: event.deltaY, left: event.deltaX, behavior: 'auto' });
+    }
+
+    window.addEventListener('wheel', containedWheelScroll, { capture: true, passive: false });
+    document.addEventListener('wheel', containedWheelScroll, { capture: true, passive: false });
+
+    window.addEventListener('message', (event) => {
+      if (event.data?.type !== 'streamlit:render') return;
+      renderReader(event.data.args || {});
+    });
+
+    Streamlit.setComponentReady();
+    Streamlit.setFrameHeight(850);
+  </script>
+</body>
+</html>

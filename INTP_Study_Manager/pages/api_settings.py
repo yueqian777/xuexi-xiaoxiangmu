@@ -14,6 +14,8 @@ from services.ai_service import (
     provider_label,
     save_api_provider,
 )
+from services.api_key_ui import render_local_secret_unlock
+from services.api_runtime import ensure_provider_model, provider_model_state_key
 from services.secret_store import (
     CRYPTOGRAPHY_AVAILABLE,
     SECRET_STORE_PATH,
@@ -199,6 +201,19 @@ def _render_test_provider(providers: list[dict]) -> None:
     )
     provider = next(p for p in enabled if p["id"] == provider_id)
     key_name = f"api_key_provider_{provider_id}"
+    ensure_provider_model(provider)
+    model = st.text_input(
+        "当前 API 临时模型",
+        key=provider_model_state_key(provider_id),
+        help="这个模型跟随当前 Provider 保存；切换测试 API 后会恢复该 API 自己的临时模型。",
+    )
+    active_model = model.strip() or provider.get("model") or DEFAULT_MODEL
+    render_local_secret_unlock(
+        provider,
+        model=active_model,
+        target_session_key=key_name,
+        key_prefix=f"test_provider_{provider_id}",
+    )
     api_key = st.text_input(
         "临时 API Key",
         value=st.session_state.get(key_name, ""),
@@ -219,7 +234,7 @@ def _render_test_provider(providers: list[dict]) -> None:
                     prompt,
                     provider_id=provider_id,
                     api_key=api_key,
-                    model_override=provider.get("model") or DEFAULT_MODEL,
+                    model_override=active_model,
                     max_output_tokens=int(max_tokens),
                 )
             st.success("调用成功。")
@@ -275,6 +290,7 @@ def _render_locked_secret_vault(providers: list[dict]) -> None:
     try:
         if exists:
             data = load_secret_store(master_password)
+            save_secret_store(master_password, data)
         else:
             data = {"providers": {}}
             save_secret_store(master_password, data)
@@ -332,6 +348,9 @@ def _render_unlocked_secret_vault(providers: list[dict]) -> None:
                 provider_id=int(provider_id),
                 provider_name=provider["name"],
                 api_key=api_key,
+                model=provider.get("model") or "",
+                provider_type=provider.get("provider_type") or "",
+                base_url=provider.get("base_url") or "",
             )
             save_secret_store(st.session_state["secret_vault_master_password"], updated)
         except SecretStoreError as exc:

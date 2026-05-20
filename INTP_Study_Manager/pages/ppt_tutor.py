@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-from db import fetch_all, fetch_one, insert_and_get_id
+from db import BASE_DIR, fetch_all, fetch_one, insert_and_get_id
 from services.ai_service import (
     AIServiceError,
     DEFAULT_MODEL,
@@ -18,9 +18,27 @@ from services.ai_service import (
     list_api_providers,
     provider_label,
 )
+from services.api_key_ui import render_local_secret_unlock
+from services.api_runtime import ensure_provider_model, provider_model_state_key, set_active_provider
 from services.ppt_service import import_deck, refresh_pdf_slide_text, render_missing_page_images
 from services.prompt_service import render_template
 from services.study_asset_service import parse_study_assets, save_study_assets
+
+SYNCED_READER_COMPONENT_PATH = BASE_DIR / "components" / "synced_reader"
+SYNCED_READER_COMPONENT = None
+
+
+def _get_synced_reader_component():
+    global SYNCED_READER_COMPONENT
+    if SYNCED_READER_COMPONENT is not None:
+        return SYNCED_READER_COMPONENT
+    if not SYNCED_READER_COMPONENT_PATH.exists():
+        return None
+    SYNCED_READER_COMPONENT = components.declare_component(
+        "intp_synced_reader",
+        path=str(SYNCED_READER_COMPONENT_PATH),
+    )
+    return SYNCED_READER_COMPONENT
 
 
 def render() -> None:
@@ -28,9 +46,9 @@ def render() -> None:
     st.caption("边看 PPT 边让 GPT 按页讲解；插问单独进入浮窗，不覆盖当前页主线讲解。")
 
     _render_api_settings()
-    _render_upload_form()
-
     decks = fetch_all("SELECT * FROM ppt_decks ORDER BY created_at DESC, id DESC")
+    _render_upload_form(expanded=not bool(decks))
+
     if not decks:
         st.info("请先上传一个 PPTX 或 PDF 文件。当前版本会解析每页文字内容，后续可继续增强真实页面渲染和 OCR。")
         return
@@ -52,8 +70,8 @@ def render() -> None:
 
     st.divider()
     _render_deck_actions(deck, slides)
-    _render_study_asset_generator(deck)
-    _render_synced_reader(deck, slides)
+    reader_quote = _render_synced_reader(deck, slides)
+    selection_quote = selection_quote or reader_quote
 
     st.divider()
     st.markdown('<div id="ppt-branch-question"></div>', unsafe_allow_html=True)
@@ -72,6 +90,9 @@ def render() -> None:
         quote_for_slide = active_quote if active_quote and active_quote.get("slide_id") == branch_slide["id"] else None
         _render_branch_popover(deck, branch_slide, quote_for_slide)
         _render_question_history(branch_slide["id"])
+
+    st.divider()
+    _render_study_asset_generator(deck)
 
 
 def _render_api_settings() -> None:
@@ -92,9 +113,22 @@ def _render_api_settings() -> None:
             format_func=lambda item_id: provider_label(next(p for p in providers if p["id"] == item_id)),
         )
         provider = next(p for p in providers if p["id"] == provider_id)
-        st.session_state["active_api_provider_id"] = provider_id
+        ensure_provider_model(provider)
 
+        model = st.text_input(
+            "当前 API 临时模型",
+            key=provider_model_state_key(provider_id),
+            help="这个模型跟随当前 Provider 保存；切换 API 后会恢复该 API 自己的临时模型。",
+        )
+        active_model = model.strip() or provider.get("model") or DEFAULT_MODEL
+        set_active_provider(provider_id, active_model)
         key_name = f"api_key_provider_{provider_id}"
+        render_local_secret_unlock(
+            provider,
+            model=active_model,
+            target_session_key=key_name,
+            key_prefix=f"ppt_provider_{provider_id}",
+        )
         api_key = st.text_input(
             "临时 API Key",
             value=st.session_state.get(key_name, ""),
@@ -102,13 +136,6 @@ def _render_api_settings() -> None:
             placeholder=f"不填写则读取环境变量 {provider.get('api_key_env') or '未设置'}",
         )
         st.session_state[key_name] = api_key
-
-        model = st.text_input(
-            "本页临时模型",
-            value=st.session_state.get("active_api_model", provider.get("model") or DEFAULT_MODEL),
-            help="默认读取 Provider 配置；这里可以临时覆盖。",
-        )
-        st.session_state["active_api_model"] = model.strip() or provider.get("model") or DEFAULT_MODEL
         max_tokens = st.number_input(
             "最大输出 token",
             min_value=512,
@@ -122,14 +149,15 @@ def _render_api_settings() -> None:
         st.caption("如果使用本地 CLIProxyAPI，默认客户端 Key 是 local-client-key；真实上游 Key 由代理服务保存。")
 
 
-def _render_upload_form() -> None:
-    with st.form("upload_pptx"):
-        st.subheader("上传 PPT / PDF")
-        cols = st.columns(2)
-        subject = cols[0].text_input("科目", placeholder="例如：信号与系统")
-        title = cols[1].text_input("资料标题", placeholder="例如：第 3 章 Z 变换")
-        uploaded = st.file_uploader("选择 PPTX 或 PDF 文件", type=["pptx", "pdf"])
-        submitted = st.form_submit_button("导入资料")
+def _render_upload_form(*, expanded: bool = False) -> None:
+    with st.expander("上传 PPT / PDF", expanded=expanded):
+        st.caption("已有资料时默认折叠，减少逐页阅读和插问时的页面干扰。")
+        with st.form("upload_pptx"):
+            cols = st.columns(2)
+            subject = cols[0].text_input("科目", placeholder="例如：信号与系统")
+            title = cols[1].text_input("资料标题", placeholder="例如：第 3 章 Z 变换")
+            uploaded = st.file_uploader("选择 PPTX 或 PDF 文件", type=["pptx", "pdf"])
+            submitted = st.form_submit_button("导入资料")
 
     if submitted:
         if uploaded is None:
@@ -187,14 +215,71 @@ def _render_deck_actions(deck: dict, slides: list[dict]) -> None:
         )
 
 
-def _render_synced_reader(deck: dict, slides: list[dict]) -> None:
+def _render_synced_reader(deck: dict, slides: list[dict]) -> dict | None:
     st.subheader("同步阅读器")
     st.caption("提示：在右侧 AI 讲解里选中一段文字，会出现“引用到插问”按钮，可把选中文本和前后文带到下方插问区。")
     payload = _build_reader_payload(slides)
     if not payload:
         st.warning("当前资料还没有可显示的原页面图片。请先点击“生成 / 修复原页面图片”。")
-        return
-    components.html(_build_synced_reader_html(deck, payload), height=850, scrolling=False)
+        return None
+
+    synced_reader_component = _get_synced_reader_component()
+    if synced_reader_component is None:
+        st.error(f"同步阅读器组件目录缺失：{SYNCED_READER_COMPONENT_PATH}")
+        st.caption("请确认项目里的 components/synced_reader/index.html 存在，然后重启 Streamlit。")
+        return None
+
+    selection_payload = synced_reader_component(
+        deck_id=int(deck["id"]),
+        title=deck.get("title") or "学习资料",
+        subject=deck.get("subject") or "未分类",
+        active_model=_active_model_label(),
+        pages=payload,
+        height=850,
+        default=None,
+        key=f"synced_reader_{deck['id']}",
+    )
+    if isinstance(selection_payload, dict):
+        return _consume_branch_selection_from_component(deck, slides, selection_payload)
+    return None
+
+
+def _consume_branch_selection_from_component(deck: dict, slides: list[dict], payload: dict) -> dict | None:
+    if payload.get("action") != "branch_quote":
+        return None
+    try:
+        query_deck_id = int(payload.get("deckId", 0))
+        slide_number = int(payload.get("slideNumber", 0))
+    except (TypeError, ValueError):
+        return None
+    if query_deck_id != int(deck["id"]):
+        return None
+
+    token = str(payload.get("token") or "").strip()
+    last_token_key = f"ppt_branch_quote_last_token_{deck['id']}"
+    quote_key = _branch_quote_state_key(deck["id"])
+    if token and st.session_state.get(last_token_key) == token:
+        return st.session_state.get(quote_key)
+
+    slide = next((item for item in slides if int(item["slide_number"]) == slide_number), None)
+    selected_text = str(payload.get("selectedText", "")).strip()
+    if not slide or not selected_text:
+        return None
+
+    quote = {
+        "deck_id": int(deck["id"]),
+        "slide_id": int(slide["id"]),
+        "slide_number": slide_number,
+        "slide_title": str(payload.get("slideTitle") or slide.get("title") or f"第 {slide_number} 页"),
+        "selected_text": selected_text,
+        "context_before": str(payload.get("contextBefore", "")).strip(),
+        "context_after": str(payload.get("contextAfter", "")).strip(),
+        "token": token or f"{slide['id']}_{len(selected_text)}_{abs(hash(selected_text))}",
+    }
+    st.session_state[quote_key] = quote
+    if token:
+        st.session_state[last_token_key] = token
+    return quote
 
 
 def _consume_branch_selection_from_query(deck: dict, slides: list[dict]) -> dict | None:
@@ -278,7 +363,11 @@ def _group_label(group: list[dict]) -> str:
 
 
 def _render_study_asset_generator(deck: dict) -> None:
-    st.subheader("从今日阅读内容生成学习登记和知识卡片")
+    with st.expander("学习沉淀：从今日阅读内容生成学习登记和知识卡片", expanded=False):
+        _render_study_asset_generator_inner(deck)
+
+
+def _render_study_asset_generator_inner(deck: dict) -> None:
     st.caption("根据当前资料里已识别文字和已生成讲解，调用当前 API 生成草稿；确认后写入学习登记、知识点卡片和 1-3-7-14 复习计划。")
 
     slides = _slides_with_latest_explanations(deck["id"])

@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from services.review_service import get_today_review_tasks
+from services.reminder_service import get_daily_reminder_config, get_today_review_log, is_daily_review_due_now
 from services.stats_service import low_mastery_cards, open_parking_questions, recent_blockers
 
 
@@ -21,12 +22,25 @@ def render() -> None:
     low_cards = low_mastery_cards()
     blockers = recent_blockers()
     parking = open_parking_questions()
+    reminder_config = get_daily_reminder_config()
+    review_log = get_today_review_log()
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("今日待复习", len(today_tasks))
     col2.metric("低于 70% 知识点", len(low_cards))
     col3.metric("最近卡点", len(blockers))
     col4.metric("停车场未解决", len(parking))
+
+    with st.container(border=True):
+        st.subheader("每日复盘提醒")
+        if review_log:
+            st.success(f"今日复盘已完成：{review_log['created_at']}")
+        elif is_daily_review_due_now(reminder_config):
+            st.warning("已经到每日复盘时间。请进入“每日复盘提醒”页面完成今日复盘。")
+        elif reminder_config["enabled"]:
+            st.info(f"今日 {reminder_config['time']} 会提醒你进行每日复盘。")
+        else:
+            st.caption("每日复盘提醒当前未启用。")
 
     st.subheader(f"今天需要复习什么：{date.today().isoformat()}")
     if today_tasks:
@@ -78,4 +92,3 @@ def render() -> None:
         )
     else:
         st.caption("暂无未解决的扩展问题。")
-

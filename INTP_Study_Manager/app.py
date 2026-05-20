@@ -13,6 +13,7 @@ from pages import (
     parking_lot,
     ppt_tutor,
     quiz_prompts,
+    reminders,
     reviews,
     study_sessions,
 )
@@ -21,6 +22,7 @@ from services.ai_service import ensure_default_api_providers
 PAGES = {
     "首页 Dashboard": dashboard.render,
     "PPT 逐页讲解": ppt_tutor.render,
+    "每日复盘提醒": reminders.render,
     "API 接入设置": api_settings.render,
     "学习登记": study_sessions.render,
     "知识点卡片": knowledge_cards.render,
