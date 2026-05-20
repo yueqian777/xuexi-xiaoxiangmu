@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from db import init_db
 from pages import (
@@ -31,6 +32,45 @@ PAGES = {
 }
 
 
+def _install_copy_shortcut_guard() -> None:
+    components.html(
+        """
+        <script>
+        (() => {
+          let rootWindow;
+          try {
+            rootWindow = window.parent || window;
+            void rootWindow.document;
+          } catch {
+            rootWindow = window;
+          }
+          if (rootWindow.__intpCopyShortcutGuardInstalled) return;
+          rootWindow.__intpCopyShortcutGuardInstalled = true;
+
+          const isCopyShortcut = (event) =>
+            (event.ctrlKey || event.metaKey) &&
+            !event.altKey &&
+            String(event.key || '').toLowerCase() === 'c';
+
+          const stopStreamlitCacheShortcut = (event) => {
+            if (!isCopyShortcut(event)) return;
+            // Keep browser copy behavior, but stop Streamlit's global shortcut handler.
+            event.stopPropagation();
+            if (typeof event.stopImmediatePropagation === 'function') {
+              event.stopImmediatePropagation();
+            }
+          };
+
+          rootWindow.addEventListener('keydown', stopStreamlitCacheShortcut, true);
+          rootWindow.document.addEventListener('keydown', stopStreamlitCacheShortcut, true);
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
 def main() -> None:
     st.set_page_config(
         page_title="INTP Study Manager",
@@ -38,6 +78,7 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
+    _install_copy_shortcut_guard()
     init_db()
     ensure_default_api_providers()
 

@@ -655,6 +655,8 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
       }}
     }};
   </script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
   <style>
     :root {{
@@ -773,7 +775,6 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
       background: #fffdf7;
       box-shadow: 0 8px 18px rgba(70,45,18,.08);
       transition: border-color .18s, background .18s;
-      white-space: pre-wrap;
       line-height: 1.72;
       font-size: 15px;
     }}
@@ -793,6 +794,81 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
     }}
     .note-body {{
       overflow-wrap: anywhere;
+    }}
+    .note-body h1,
+    .note-body h2,
+    .note-body h3,
+    .note-body h4 {{
+      margin: 16px 0 8px;
+      color: #7f3f1a;
+      line-height: 1.35;
+    }}
+    .note-body h1 {{ font-size: 21px; }}
+    .note-body h2 {{ font-size: 19px; }}
+    .note-body h3 {{ font-size: 17px; }}
+    .note-body p {{
+      margin: 8px 0;
+    }}
+    .note-body ul,
+    .note-body ol {{
+      margin: 8px 0 10px;
+      padding-left: 24px;
+    }}
+    .note-body li {{
+      margin: 4px 0;
+    }}
+    .note-body blockquote {{
+      margin: 12px 0;
+      padding: 8px 12px;
+      border-left: 4px solid #c98245;
+      background: #fff3df;
+      color: #5c5144;
+    }}
+    .note-body pre {{
+      margin: 12px 0;
+      padding: 12px;
+      overflow-x: auto;
+      border-radius: 10px;
+      background: #28231d;
+      color: #f9efe0;
+      line-height: 1.55;
+    }}
+    .note-body code {{
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: #efe2cd;
+      color: #6f3718;
+      font-family: "Cascadia Code", "Consolas", monospace;
+      font-size: 0.92em;
+    }}
+    .note-body pre code {{
+      padding: 0;
+      background: transparent;
+      color: inherit;
+    }}
+    .note-body table {{
+      width: 100%;
+      margin: 12px 0;
+      border-collapse: collapse;
+      display: block;
+      overflow-x: auto;
+      font-size: 14px;
+    }}
+    .note-body th,
+    .note-body td {{
+      border: 1px solid #dbc8ac;
+      padding: 7px 9px;
+      text-align: left;
+      vertical-align: top;
+    }}
+    .note-body th {{
+      background: #f2dfbf;
+      color: #653314;
+    }}
+    .note-body hr {{
+      border: 0;
+      border-top: 1px solid var(--line);
+      margin: 16px 0;
     }}
     .note-body mjx-container {{
       overflow-x: auto;
@@ -836,6 +912,20 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
         .replaceAll("'", '&#039;');
     }}
 
+    function renderMarkdown(value) {{
+      const source = String(value ?? '');
+      if (!window.marked || !window.DOMPurify) {{
+        return escapeHtml(source).replaceAll('\\n', '<br>');
+      }}
+      const rawHtml = window.marked.parse(source, {{
+        gfm: true,
+        breaks: true
+      }});
+      return window.DOMPurify.sanitize(rawHtml, {{
+        USE_PROFILES: {{ html: true }}
+      }});
+    }}
+
     pageRoot.innerHTML = pages.map(page => `
       <article class="page" id="page-${{page.slideNumber}}" data-page="${{page.slideNumber}}">
         <div class="page-label">
@@ -850,7 +940,7 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
       <article class="note" id="note-${{page.slideNumber}}" data-page="${{page.slideNumber}}">
         <h3>第 ${{page.slideNumber}} 页讲解</h3>
         <div class="note-meta">${{escapeHtml(page.model || '未生成')}} ${{page.createdAt ? '· ' + escapeHtml(page.createdAt) : ''}}</div>
-        <div class="note-body">${{escapeHtml(page.explanation)}}</div>
+        <div class="note-body">${{renderMarkdown(page.explanation)}}</div>
       </article>
     `).join('');
 

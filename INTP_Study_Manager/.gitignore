@@ -1,1 +1,7 @@
 data/
+data/api_keys.enc.json
+*.enc.json
+streamlit_stdout.log
+streamlit_stderr.log
+__pycache__/
+*.pyc

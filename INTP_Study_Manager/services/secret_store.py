@@ -1,0 +1,160 @@
+from __future__ import annotations
+
+import base64
+import json
+import os
+import sys
+from datetime import datetime
+from typing import Any
+
+try:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+    CRYPTOGRAPHY_AVAILABLE = True
+except ModuleNotFoundError:
+    InvalidTag = Exception
+    AESGCM = None
+    PBKDF2HMAC = None
+    hashes = None
+    CRYPTOGRAPHY_AVAILABLE = False
+
+from db import DATA_DIR
+
+SECRET_STORE_PATH = DATA_DIR / "api_keys.enc.json"
+KDF_ITERATIONS = 390_000
+
+
+class SecretStoreError(RuntimeError):
+    pass
+
+
+def secret_store_exists() -> bool:
+    return SECRET_STORE_PATH.exists()
+
+
+def load_secret_store(master_password: str) -> dict[str, Any]:
+    if not SECRET_STORE_PATH.exists():
+        return {"providers": {}}
+    if not master_password:
+        raise SecretStoreError("请输入主密码。")
+    _require_crypto()
+
+    try:
+        payload = json.loads(SECRET_STORE_PATH.read_text(encoding="utf-8"))
+        salt = _b64decode(payload["salt"])
+        nonce = _b64decode(payload["nonce"])
+        ciphertext = _b64decode(payload["ciphertext"])
+    except (OSError, KeyError, json.JSONDecodeError, ValueError) as exc:
+        raise SecretStoreError("加密密钥库文件损坏或格式不正确。") from exc
+
+    key = _derive_key(master_password, salt, int(payload.get("iterations", KDF_ITERATIONS)))
+    try:
+        plaintext = AESGCM(key).decrypt(nonce, ciphertext, None)
+    except InvalidTag as exc:
+        raise SecretStoreError("主密码不正确，无法解密 API Key。") from exc
+
+    try:
+        data = json.loads(plaintext.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SecretStoreError("解密成功，但密钥库内容不是合法 JSON。") from exc
+    if not isinstance(data, dict):
+        raise SecretStoreError("密钥库内容格式不正确。")
+    data.setdefault("providers", {})
+    return data
+
+
+def save_secret_store(master_password: str, data: dict[str, Any]) -> None:
+    if not master_password:
+        raise SecretStoreError("请输入主密码。")
+    _require_crypto()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    key = _derive_key(master_password, salt, KDF_ITERATIONS)
+    normalized = {
+        "providers": data.get("providers", {}),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    plaintext = json.dumps(normalized, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
+    payload = {
+        "version": 1,
+        "algorithm": "AES-256-GCM",
+        "kdf": "PBKDF2-HMAC-SHA256",
+        "iterations": KDF_ITERATIONS,
+        "salt": _b64encode(salt),
+        "nonce": _b64encode(nonce),
+        "ciphertext": _b64encode(ciphertext),
+        "updated_at": normalized["updated_at"],
+    }
+    SECRET_STORE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def upsert_provider_secret(
+    data: dict[str, Any],
+    *,
+    provider_id: int,
+    provider_name: str,
+    api_key: str,
+) -> dict[str, Any]:
+    key = api_key.strip()
+    if not key:
+        raise SecretStoreError("API Key 不能为空。")
+    providers = dict(data.get("providers", {}))
+    providers[str(provider_id)] = {
+        "provider_id": provider_id,
+        "provider_name": provider_name,
+        "api_key": key,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    return {**data, "providers": providers}
+
+
+def delete_provider_secret(data: dict[str, Any], provider_id: int) -> dict[str, Any]:
+    providers = dict(data.get("providers", {}))
+    providers.pop(str(provider_id), None)
+    return {**data, "providers": providers}
+
+
+def get_provider_secret(data: dict[str, Any], provider_id: int) -> str:
+    item = data.get("providers", {}).get(str(provider_id), {})
+    return str(item.get("api_key") or "")
+
+
+def masked_secret(value: str) -> str:
+    if not value:
+        return "未保存"
+    if len(value) <= 10:
+        return "*" * len(value)
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def _derive_key(master_password: str, salt: bytes, iterations: int) -> bytes:
+    _require_crypto()
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=iterations,
+    )
+    return kdf.derive(master_password.encode("utf-8"))
+
+
+def _b64encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii")
+
+
+def _b64decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value.encode("ascii"))
+
+
+def _require_crypto() -> None:
+    if CRYPTOGRAPHY_AVAILABLE:
+        return
+    raise SecretStoreError(
+        "当前 Python 环境缺少 cryptography，无法使用加密 API Key 功能。"
+        f"当前解释器：{sys.executable}。请运行：python -m pip install -r requirements.txt"
+    )
