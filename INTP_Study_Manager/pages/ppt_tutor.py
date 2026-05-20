@@ -48,6 +48,7 @@ def render() -> None:
     if not deck or not slides:
         st.warning("这个 PPT 暂无可用页面，请重新上传。")
         return
+    selection_quote = _consume_branch_selection_from_query(deck, slides)
 
     st.divider()
     _render_deck_actions(deck, slides)
@@ -55,14 +56,21 @@ def render() -> None:
     _render_synced_reader(deck, slides)
 
     st.divider()
+    st.markdown('<div id="ppt-branch-question"></div>', unsafe_allow_html=True)
+    branch_slide_key = f"ppt_branch_slide_{deck_id}"
+    active_quote = selection_quote or st.session_state.get(_branch_quote_state_key(deck_id))
+    if active_quote and active_quote.get("slide_id") in [slide["id"] for slide in slides]:
+        st.session_state[branch_slide_key] = active_quote["slide_id"]
     branch_slide_id = st.selectbox(
         "选择插问绑定页",
         [slide["id"] for slide in slides],
         format_func=lambda item_id: _slide_label(slides, item_id),
+        key=branch_slide_key,
     )
     branch_slide = fetch_one("SELECT * FROM ppt_slides WHERE id = ?", (branch_slide_id,))
     if branch_slide:
-        _render_branch_popover(deck, branch_slide)
+        quote_for_slide = active_quote if active_quote and active_quote.get("slide_id") == branch_slide["id"] else None
+        _render_branch_popover(deck, branch_slide, quote_for_slide)
         _render_question_history(branch_slide["id"])
 
 
@@ -181,11 +189,59 @@ def _render_deck_actions(deck: dict, slides: list[dict]) -> None:
 
 def _render_synced_reader(deck: dict, slides: list[dict]) -> None:
     st.subheader("同步阅读器")
+    st.caption("提示：在右侧 AI 讲解里选中一段文字，会出现“引用到插问”按钮，可把选中文本和前后文带到下方插问区。")
     payload = _build_reader_payload(slides)
     if not payload:
         st.warning("当前资料还没有可显示的原页面图片。请先点击“生成 / 修复原页面图片”。")
         return
     components.html(_build_synced_reader_html(deck, payload), height=850, scrolling=False)
+
+
+def _consume_branch_selection_from_query(deck: dict, slides: list[dict]) -> dict | None:
+    params = st.query_params
+    if params.get("intp_action") != "branch_quote":
+        return st.session_state.get(_branch_quote_state_key(deck["id"]))
+
+    try:
+        query_deck_id = int(params.get("deck_id", "0"))
+        slide_number = int(params.get("slide_number", "0"))
+    except ValueError:
+        return None
+    if query_deck_id != int(deck["id"]):
+        return None
+
+    slide = next((item for item in slides if int(item["slide_number"]) == slide_number), None)
+    selected_text = str(params.get("selected_text", "")).strip()
+    if not slide or not selected_text:
+        return None
+
+    quote = {
+        "deck_id": int(deck["id"]),
+        "slide_id": int(slide["id"]),
+        "slide_number": slide_number,
+        "slide_title": slide.get("title") or f"第 {slide_number} 页",
+        "selected_text": selected_text,
+        "context_before": str(params.get("context_before", "")).strip(),
+        "context_after": str(params.get("context_after", "")).strip(),
+        "token": f"{slide['id']}_{len(selected_text)}_{abs(hash(selected_text))}",
+    }
+    st.session_state[_branch_quote_state_key(deck["id"])] = quote
+
+    for key in [
+        "intp_action",
+        "deck_id",
+        "slide_number",
+        "selected_text",
+        "context_before",
+        "context_after",
+    ]:
+        if key in st.query_params:
+            del st.query_params[key]
+    return quote
+
+
+def _branch_quote_state_key(deck_id: int) -> str:
+    return f"ppt_branch_quote_{deck_id}"
 
 
 def _select_generation_range(slides: list[dict]) -> tuple[list[dict], str]:
@@ -463,42 +519,103 @@ def _render_main_explanation(deck: dict, slide: dict) -> None:
         st.info("还没有生成本页主线讲解。点击上方按钮，或先复制 Prompt 到 ChatGPT。")
 
 
-def _render_branch_popover(deck: dict, slide: dict) -> None:
+def _render_branch_popover(deck: dict, slide: dict, quote: dict | None = None) -> None:
     latest = _latest_explanation(slide["id"])
+    if quote:
+        with st.container(border=True):
+            st.subheader("基于选中文本插问")
+            st.caption(f"已引用第 {quote['slide_number']} 页 · {quote['slide_title']}。回答会保存为本页插问，不覆盖主线讲解。")
+            _render_branch_question_form(deck, slide, latest, quote=quote, form_key_suffix=quote["token"])
+
     with st.popover("打开插问浮窗：问问题但不覆盖主线讲解", use_container_width=True):
         st.markdown(f"**当前锚点：第 {slide['slide_number']} 页 · {slide['title']}**")
         st.caption("这里的回答会保存到插问记录，不会覆盖右侧的主线讲解。")
-        with st.form(f"branch_question_{slide['id']}", clear_on_submit=True):
-            question = st.text_area("我的插问", placeholder="例如：这一页里的 ROC 为什么会影响反变换？")
-            submitted = st.form_submit_button("问 GPT")
+        _render_branch_question_form(deck, slide, latest, quote=None, form_key_suffix="manual")
 
-        if submitted:
-            if not question.strip():
-                st.error("插问不能为空。")
-                return
-            prompt = _build_branch_prompt(deck, slide, latest, question.strip())
-            try:
-                with st.spinner("GPT 正在回答插问..."):
-                    answer = generate_text(
-                        prompt,
-                        provider_id=st.session_state.get("active_api_provider_id"),
-                        api_key=_active_api_key(),
-                        model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
-                        max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
-                    )
-                insert_and_get_id(
-                    """
-                    INSERT INTO slide_questions (slide_id, question, answer, model)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (slide["id"], question.strip(), answer, _active_model_label()),
-                )
-                st.success(f"插问已保存。现在回到第 {slide['slide_number']} 页主线。")
-                st.rerun()
-            except AIServiceError as exc:
-                st.error(str(exc))
-                st.caption("可以先复制下面的插问 Prompt 到 ChatGPT 手动使用。")
-                st.code(prompt, language="markdown")
+
+def _render_branch_question_form(
+    deck: dict,
+    slide: dict,
+    latest: dict | None,
+    *,
+    quote: dict | None,
+    form_key_suffix: str,
+) -> None:
+    if quote:
+        st.text_area(
+            "引用内容",
+            value=quote["selected_text"],
+            height=110,
+            disabled=True,
+            key=f"quote_preview_{slide['id']}_{form_key_suffix}",
+        )
+        with st.expander("自动保留的前后文", expanded=False):
+            st.markdown("**前文**")
+            st.text(quote.get("context_before") or "无")
+            st.markdown("**后文**")
+            st.text(quote.get("context_after") or "无")
+
+    with st.form(f"branch_question_{slide['id']}_{form_key_suffix}", clear_on_submit=True):
+        question = st.text_area(
+            "我的插问",
+            value="请解释这段引用的含义，并说明它和本页主线的关系。" if quote else "",
+            placeholder="例如：这一页里的 ROC 为什么会影响反变换？",
+            height=140,
+        )
+        submitted = st.form_submit_button("问当前模型")
+
+    if not submitted:
+        return
+    if not question.strip():
+        st.error("插问不能为空。")
+        return
+
+    full_question = _compose_quoted_branch_question(quote, question.strip()) if quote else question.strip()
+    prompt = _build_branch_prompt(deck, slide, latest, full_question)
+    try:
+        with st.spinner("GPT 正在回答插问..."):
+            answer = generate_text(
+                prompt,
+                provider_id=st.session_state.get("active_api_provider_id"),
+                api_key=_active_api_key(),
+                model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
+                max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+            )
+        insert_and_get_id(
+            """
+            INSERT INTO slide_questions (slide_id, question, answer, model)
+            VALUES (?, ?, ?, ?)
+            """,
+            (slide["id"], full_question, answer, _active_model_label()),
+        )
+        if quote:
+            st.session_state.pop(_branch_quote_state_key(quote["deck_id"]), None)
+        st.success(f"插问已保存。现在回到第 {slide['slide_number']} 页主线。")
+        st.rerun()
+    except AIServiceError as exc:
+        st.error(str(exc))
+        st.caption("可以先复制下面的插问 Prompt 到 ChatGPT 手动使用。")
+        st.code(prompt, language="markdown")
+
+
+def _compose_quoted_branch_question(quote: dict, question: str) -> str:
+    return "\n".join(
+        [
+            f"我选中了第 {quote['slide_number']} 页的一段内容，想围绕这段话插问。",
+            "",
+            "引用内容：",
+            quote["selected_text"],
+            "",
+            "前文上下文：",
+            quote.get("context_before") or "无",
+            "",
+            "后文上下文：",
+            quote.get("context_after") or "无",
+            "",
+            "我的问题：",
+            question,
+        ]
+    )
 
 
 def _render_question_history(slide_id: int) -> None:
@@ -633,8 +750,10 @@ def _build_reader_payload(slides: list[dict]) -> list[dict]:
 
 def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
     pages_json = json.dumps(payload, ensure_ascii=False)
+    deck_id = int(deck["id"])
     title = html.escape(deck.get("title") or "学习资料")
     subject = html.escape(deck.get("subject") or "未分类")
+    active_model = html.escape(_active_model_label())
     return f"""
 <!doctype html>
 <html>
@@ -876,6 +995,45 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
       max-width: 100%;
       padding: 2px 0;
     }}
+    .selection-toolbar {{
+      position: fixed;
+      z-index: 9999;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      max-width: min(560px, calc(100vw - 24px));
+      padding: 9px 10px;
+      border: 1px solid rgba(86, 48, 18, 0.18);
+      border-radius: 999px;
+      background: rgba(38, 27, 16, 0.94);
+      color: #fff8ea;
+      box-shadow: 0 12px 34px rgba(24, 14, 5, 0.28);
+      font-size: 13px;
+    }}
+    .selection-toolbar.show {{
+      display: flex;
+    }}
+    .selection-toolbar button {{
+      border: 0;
+      border-radius: 999px;
+      padding: 7px 11px;
+      background: #f0b35f;
+      color: #2d1a0c;
+      font-weight: 800;
+      cursor: pointer;
+      white-space: nowrap;
+    }}
+    .selection-toolbar button.secondary {{
+      background: rgba(255, 255, 255, 0.14);
+      color: #fff8ea;
+    }}
+    .selection-toolbar span {{
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #e8d8bf;
+    }}
     @media (max-width: 900px) {{
       .grid {{ grid-template-columns: 1fr; }}
       .notes {{ display: none; }}
@@ -897,11 +1055,22 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
       <aside class="notes" id="notes"></aside>
     </div>
   </div>
+  <div class="selection-toolbar" id="selectionToolbar">
+    <button type="button" id="askSelectionButton">引用到插问</button>
+    <button type="button" class="secondary" id="copySelectionButton">复制引用</button>
+    <span id="selectionHint">将引用选中文本，并用当前模型：{active_model}</span>
+  </div>
   <script>
+    const deckId = {deck_id};
     const pages = {pages_json};
     const pageRoot = document.getElementById('pages');
     const noteRoot = document.getElementById('notes');
     const current = document.getElementById('currentPage');
+    const selectionToolbar = document.getElementById('selectionToolbar');
+    const askSelectionButton = document.getElementById('askSelectionButton');
+    const copySelectionButton = document.getElementById('copySelectionButton');
+    const selectionHint = document.getElementById('selectionHint');
+    let currentSelectionPayload = null;
 
     function escapeHtml(value) {{
       return String(value ?? '')
@@ -978,6 +1147,129 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
 
     document.querySelectorAll('.page').forEach(page => observer.observe(page));
     if (pages.length) setActive(pages[0].slideNumber);
+
+    function clipText(value, limit) {{
+      const text = String(value ?? '').replace(/\\s+/g, ' ').trim();
+      if (text.length <= limit) return text;
+      return text.slice(0, limit).trim() + '...';
+    }}
+
+    function nodeElement(node) {{
+      if (!node) return null;
+      return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    }}
+
+    function buildSelectionPayload() {{
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+      const selectedText = selection.toString().trim();
+      if (selectedText.length < 2) return null;
+
+      const range = selection.getRangeAt(0);
+      const startElement = nodeElement(range.startContainer);
+      const endElement = nodeElement(range.endContainer);
+      const note = startElement?.closest?.('.note');
+      if (!note || !noteRoot.contains(note) || !endElement || !note.contains(endElement)) return null;
+
+      const noteBody = note.querySelector('.note-body');
+      const fullText = noteBody?.innerText || note.innerText || '';
+      const normalizedFullText = fullText.replace(/\\s+/g, ' ');
+      const normalizedSelected = selectedText.replace(/\\s+/g, ' ');
+      const start = normalizedFullText.indexOf(normalizedSelected);
+      const before = start >= 0 ? normalizedFullText.slice(Math.max(0, start - 700), start) : '';
+      const after = start >= 0
+        ? normalizedFullText.slice(start + normalizedSelected.length, start + normalizedSelected.length + 700)
+        : '';
+      const slideNumber = Number(note.dataset.page);
+      const page = pages.find(item => Number(item.slideNumber) === slideNumber) || {{}};
+      return {{
+        deckId,
+        slideNumber,
+        slideTitle: page.title || `第 ${{slideNumber}} 页`,
+        selectedText: clipText(selectedText, 1200),
+        contextBefore: clipText(before, 700),
+        contextAfter: clipText(after, 700),
+      }};
+    }}
+
+    function showSelectionToolbar() {{
+      const payload = buildSelectionPayload();
+      if (!payload) {{
+        hideSelectionToolbar();
+        return;
+      }}
+      currentSelectionPayload = payload;
+      const selection = window.getSelection();
+      const rect = selection.getRangeAt(0).getBoundingClientRect();
+      const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - 570));
+      const top = Math.max(8, rect.top - 52);
+      selectionToolbar.style.left = `${{left}}px`;
+      selectionToolbar.style.top = `${{top}}px`;
+      selectionHint.textContent = `第 ${{payload.slideNumber}} 页：${{clipText(payload.selectedText, 42)}}`;
+      selectionToolbar.classList.add('show');
+    }}
+
+    function hideSelectionToolbar() {{
+      currentSelectionPayload = null;
+      selectionToolbar.classList.remove('show');
+    }}
+
+    function quoteTextForClipboard(payload) {{
+      return [
+        `引用自第 ${{payload.slideNumber}} 页：${{payload.slideTitle}}`,
+        '',
+        payload.selectedText,
+        '',
+        '前文上下文：',
+        payload.contextBefore || '无',
+        '',
+        '后文上下文：',
+        payload.contextAfter || '无',
+      ].join('\\n');
+    }}
+
+    function sendSelectionToBranch() {{
+      const payload = currentSelectionPayload || buildSelectionPayload();
+      if (!payload) return;
+      try {{
+        const rootWindow = window.parent || window;
+        const url = new URL(rootWindow.location.href);
+        url.searchParams.set('intp_action', 'branch_quote');
+        url.searchParams.set('deck_id', String(payload.deckId));
+        url.searchParams.set('slide_number', String(payload.slideNumber));
+        url.searchParams.set('selected_text', payload.selectedText);
+        url.searchParams.set('context_before', payload.contextBefore);
+        url.searchParams.set('context_after', payload.contextAfter);
+        url.hash = 'ppt-branch-question';
+        rootWindow.location.href = url.toString();
+      }} catch (error) {{
+        navigator.clipboard?.writeText(quoteTextForClipboard(payload));
+        alert('浏览器阻止了自动引用，已尝试复制引用内容。请粘贴到下方插问框。');
+      }}
+    }}
+
+    function copyCurrentSelection() {{
+      const payload = currentSelectionPayload || buildSelectionPayload();
+      if (!payload) return;
+      navigator.clipboard?.writeText(quoteTextForClipboard(payload));
+      selectionHint.textContent = '引用内容已复制';
+      window.setTimeout(showSelectionToolbar, 800);
+    }}
+
+    askSelectionButton.addEventListener('mousedown', event => event.preventDefault());
+    copySelectionButton.addEventListener('mousedown', event => event.preventDefault());
+    askSelectionButton.addEventListener('click', sendSelectionToBranch);
+    copySelectionButton.addEventListener('click', copyCurrentSelection);
+    noteRoot.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
+    noteRoot.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
+    document.addEventListener('mousedown', (event) => {{
+      if (!selectionToolbar.contains(event.target)) {{
+        window.setTimeout(() => {{
+          const selection = window.getSelection();
+          if (!selection || selection.isCollapsed) hideSelectionToolbar();
+        }}, 80);
+      }}
+    }});
 
     function nearestScrollPanel(target) {{
       const element = target?.closest?.('.pages, .notes');
