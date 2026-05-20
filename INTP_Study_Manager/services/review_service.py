@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from db import execute, fetch_all, fetch_one, insert_and_get_id
+from db import execute_many, fetch_all, fetch_one, insert_and_get_id, managed_connection
 from models import REVIEW_INTERVALS
 from services.mastery_service import apply_review_result
 
@@ -17,15 +17,17 @@ def _to_date(value: str | date | None) -> date:
 
 def create_initial_review_tasks(knowledge_id: int, start_date: str | date | None = None) -> None:
     base_date = _to_date(start_date)
-    for days, stage in REVIEW_INTERVALS:
-        review_date = (base_date + timedelta(days=days)).isoformat()
-        insert_and_get_id(
-            """
-            INSERT INTO review_tasks (knowledge_id, review_date, review_stage)
-            VALUES (?, ?, ?)
-            """,
-            (knowledge_id, review_date, stage),
-        )
+    rows = [
+        (knowledge_id, (base_date + timedelta(days=days)).isoformat(), stage)
+        for days, stage in REVIEW_INTERVALS
+    ]
+    execute_many(
+        """
+        INSERT INTO review_tasks (knowledge_id, review_date, review_stage)
+        VALUES (?, ?, ?)
+        """,
+        rows,
+    )
 
 
 def ensure_initial_review_tasks(knowledge_id: int, start_date: str | date | None = None) -> None:
@@ -93,14 +95,15 @@ def mark_review_result(task_id: int, result: str) -> None:
         return
 
     new_mastery = apply_review_result(int(task["mastery"]), result)
-    execute(
-        "UPDATE review_tasks SET status = '已完成', result = ? WHERE id = ?",
-        (result, task_id),
-    )
-    execute(
-        "UPDATE knowledge_cards SET mastery = ? WHERE id = ?",
-        (new_mastery, task["knowledge_id"]),
-    )
+    with managed_connection() as conn:
+        conn.execute(
+            "UPDATE review_tasks SET status = '已完成', result = ? WHERE id = ?",
+            (result, task_id),
+        )
+        conn.execute(
+            "UPDATE knowledge_cards SET mastery = ? WHERE id = ?",
+            (new_mastery, task["knowledge_id"]),
+        )
 
     if result == "仍然模糊":
         _create_extra_review(task["knowledge_id"], 2, "追加复习：2 天后")
@@ -117,4 +120,3 @@ def _create_extra_review(knowledge_id: int, days: int, stage: str) -> None:
         """,
         (knowledge_id, review_date, stage),
     )
-

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from db import fetch_all, fetch_one, insert_and_get_id
+from db import fetch_all, insert_and_get_id
 from services.prompt_service import render_template
 
 
@@ -16,22 +16,24 @@ def render() -> None:
         st.info("请先在“学习登记”创建学习记录，再添加主线锚点。")
         return
 
+    session_by_id = {session["id"]: session for session in sessions}
     session_id = st.selectbox(
         "选择学习会话",
-        [s["id"] for s in sessions],
-        format_func=lambda item_id: _session_label(sessions, item_id),
+        list(session_by_id),
+        format_func=lambda item_id: _session_label(session_by_id, item_id),
     )
-    session = fetch_one("SELECT * FROM study_sessions WHERE id = ?", (session_id,))
+    session = session_by_id.get(session_id)
     if not session:
         return
+    anchors = fetch_all(
+        "SELECT * FROM mainline_anchors WHERE session_id = ? ORDER BY order_index ASC, id ASC",
+        (session_id,),
+    )
+    anchor_by_id = {anchor["id"]: anchor for anchor in anchors}
 
     tab_anchor, tab_branch, tab_context = st.tabs(["主线锚点", "插问分支", "完整脉络"])
 
     with tab_anchor:
-        anchors = fetch_all(
-            "SELECT * FROM mainline_anchors WHERE session_id = ? ORDER BY order_index ASC, id ASC",
-            (session_id,),
-        )
         next_index = len(anchors) + 1
         with st.form("add_anchor"):
             st.subheader("添加主线锚点")
@@ -65,10 +67,6 @@ def render() -> None:
             st.caption("当前学习会话暂无主线锚点。")
 
     with tab_branch:
-        anchors = fetch_all(
-            "SELECT * FROM mainline_anchors WHERE session_id = ? ORDER BY order_index ASC, id ASC",
-            (session_id,),
-        )
         if not anchors:
             st.warning("请先添加至少一个主线锚点。")
         else:
@@ -76,8 +74,8 @@ def render() -> None:
                 st.subheader("添加绑定锚点的插问")
                 anchor_id = st.selectbox(
                     "绑定主线锚点",
-                    [a["id"] for a in anchors],
-                    format_func=lambda item_id: _anchor_label(anchors, item_id),
+                    list(anchor_by_id),
+                    format_func=lambda item_id: _anchor_label(anchor_by_id, item_id),
                 )
                 question = st.text_area("插问内容")
                 answer_summary = st.text_area("ChatGPT 回答摘要")
@@ -105,18 +103,18 @@ def render() -> None:
                             int(need_review),
                         ),
                     )
-                    anchor = next(a for a in anchors if a["id"] == anchor_id)
+                    anchor = anchor_by_id[anchor_id]
                     st.success(f"插问已保存。现在回到主线 {anchor['anchor_code']}。")
 
             selected_anchor_id = st.selectbox(
                 "为当前插问生成 ChatGPT Prompt",
-                [a["id"] for a in anchors],
-                format_func=lambda item_id: _anchor_label(anchors, item_id),
+                list(anchor_by_id),
+                format_func=lambda item_id: _anchor_label(anchor_by_id, item_id),
                 key="branch_prompt_anchor",
             )
             prompt_question = st.text_area("要发送给 ChatGPT 的插问", key="branch_prompt_question")
             if prompt_question.strip():
-                anchor = next(a for a in anchors if a["id"] == selected_anchor_id)
+                anchor = anchor_by_id[selected_anchor_id]
                 mainline = f"{session['subject']} · {session['title']}：{session['main_question']}"
                 prompt = render_template(
                     "branch_question.md",
@@ -131,18 +129,17 @@ def render() -> None:
 
     with tab_context:
         st.subheader("完整脉络")
-        anchors = fetch_all(
-            "SELECT * FROM mainline_anchors WHERE session_id = ? ORDER BY order_index ASC, id ASC",
+        branches = fetch_all(
+            "SELECT * FROM branch_questions WHERE session_id = ? ORDER BY anchor_id ASC, created_at ASC, id ASC",
             (session_id,),
         )
+        branches_by_anchor: dict[int, list[dict]] = {}
+        for branch in branches:
+            branches_by_anchor.setdefault(int(branch["anchor_id"]), []).append(branch)
         for anchor in anchors:
             st.markdown(f"### {anchor['anchor_code']}：{anchor['title']}")
             st.write(anchor["content"] or "未填写主线内容。")
-            branches = fetch_all(
-                "SELECT * FROM branch_questions WHERE anchor_id = ? ORDER BY created_at ASC, id ASC",
-                (anchor["id"],),
-            )
-            for branch in branches:
+            for branch in branches_by_anchor.get(int(anchor["id"]), []):
                 with st.container(border=True):
                     st.markdown(f"**插问：** {branch['question']}")
                     st.markdown(f"**回答摘要：** {branch['answer_summary'] or '未填写'}")
@@ -150,12 +147,11 @@ def render() -> None:
                     st.success(f"现在回到主线 {anchor['anchor_code']}")
 
 
-def _session_label(sessions: list[dict], session_id: int) -> str:
-    session = next(item for item in sessions if item["id"] == session_id)
+def _session_label(sessions: dict[int, dict], session_id: int) -> str:
+    session = sessions[session_id]
     return f"{session['date']} · {session['subject']} · {session['title']}"
 
 
-def _anchor_label(anchors: list[dict], anchor_id: int) -> str:
-    anchor = next(item for item in anchors if item["id"] == anchor_id)
+def _anchor_label(anchors: dict[int, dict], anchor_id: int) -> str:
+    anchor = anchors[anchor_id]
     return f"{anchor['anchor_code']} · {anchor['title']}"
-

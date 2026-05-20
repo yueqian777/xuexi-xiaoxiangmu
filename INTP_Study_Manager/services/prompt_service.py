@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from typing import Mapping
 
@@ -7,6 +8,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 PROMPTS_DIR = BASE_DIR / "prompts"
 
 
+@lru_cache(maxsize=32)
 def load_template(name: str) -> str:
     return (PROMPTS_DIR / name).read_text(encoding="utf-8")
 
@@ -47,4 +49,3 @@ def format_knowledge_card(card: Mapping) -> str:
             f"掌握度：{card.get('mastery', 0)}",
         ]
     )
-

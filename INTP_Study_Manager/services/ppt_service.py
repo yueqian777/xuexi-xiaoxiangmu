@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO
 
-from db import DATA_DIR, execute, insert_and_get_id
+from db import DATA_DIR, execute_many, managed_connection
 
 UPLOAD_DIR = DATA_DIR / "uploads"
 PAGE_IMAGE_DIR = DATA_DIR / "page_images"
@@ -45,26 +45,30 @@ def _save_deck_records(
     title: str,
 ) -> int:
     deck_title = title.strip() or saved_path.stem
-    deck_id = insert_and_get_id(
-        """
-        INSERT INTO ppt_decks (filename, title, subject, file_path, slide_count)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (saved_path.name, deck_title, subject.strip(), str(saved_path), len(slides)),
-    )
-    for slide in slides:
-        execute(
+    with managed_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO ppt_decks (filename, title, subject, file_path, slide_count)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (saved_path.name, deck_title, subject.strip(), str(saved_path), len(slides)),
+        )
+        deck_id = int(cursor.lastrowid)
+        conn.executemany(
             """
             INSERT INTO ppt_slides (deck_id, slide_number, title, slide_text, notes, image_path)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                deck_id,
-                slide["slide_number"],
-                slide["title"],
-                slide["slide_text"],
-                slide["notes"],
-                str(image_paths.get(int(slide["slide_number"]), "")),
+                (
+                    deck_id,
+                    slide["slide_number"],
+                    slide["title"],
+                    slide["slide_text"],
+                    slide["notes"],
+                    str(image_paths.get(int(slide["slide_number"]), "")),
+                )
+                for slide in slides
             ),
         )
     return deck_id
@@ -227,14 +231,14 @@ try {{
 def render_missing_page_images(deck: dict, slides: list[dict]) -> dict[int, Path]:
     path = Path(deck["file_path"])
     image_paths = render_deck_page_images(path)
-    for slide in slides:
-        slide_number = int(slide["slide_number"])
-        image_path = image_paths.get(slide_number)
-        if image_path:
-            execute(
-                "UPDATE ppt_slides SET image_path = ? WHERE id = ?",
-                (str(image_path), slide["id"]),
-            )
+    execute_many(
+        "UPDATE ppt_slides SET image_path = ? WHERE id = ?",
+        (
+            (str(image_path), slide["id"])
+            for slide in slides
+            if (image_path := image_paths.get(int(slide["slide_number"])))
+        ),
+    )
     return image_paths
 
 
@@ -245,26 +249,23 @@ def refresh_pdf_slide_text(deck: dict, slides: list[dict]) -> int:
 
     extracted = {int(item["slide_number"]): item for item in extract_pdf_pages(path)}
     updated = 0
+    rows = []
     for slide in slides:
         slide_number = int(slide["slide_number"])
         item = extracted.get(slide_number)
         if not item:
             continue
-        execute(
-            """
-            UPDATE ppt_slides
-            SET title = ?, slide_text = ?, notes = ?
-            WHERE id = ?
-            """,
-            (
-                item["title"],
-                item["slide_text"],
-                item["notes"],
-                slide["id"],
-            ),
-        )
+        rows.append((item["title"], item["slide_text"], item["notes"], slide["id"]))
         if str(item["slide_text"]).strip():
             updated += 1
+    execute_many(
+        """
+        UPDATE ppt_slides
+        SET title = ?, slide_text = ?, notes = ?
+        WHERE id = ?
+        """,
+        rows,
+    )
     return updated
 
 

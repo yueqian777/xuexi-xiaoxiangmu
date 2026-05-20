@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -11,14 +12,30 @@ DATABASE_PATH = DATA_DIR / "study_manager.db"
 
 def get_connection() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
+@contextmanager
+def managed_connection() -> Iterator[sqlite3.Connection]:
+    conn = get_connection()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def init_db() -> None:
-    with get_connection() as conn:
+    with managed_connection() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS study_sessions (
@@ -183,6 +200,48 @@ def init_db() -> None:
                 notes TEXT DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
+            CREATE INDEX IF NOT EXISTS idx_study_sessions_date_id
+                ON study_sessions(date DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_study_sessions_subject_date_id
+                ON study_sessions(subject, date DESC, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_mainline_anchors_session_order
+                ON mainline_anchors(session_id, order_index ASC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_branch_questions_anchor_created
+                ON branch_questions(anchor_id, created_at ASC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_branch_questions_session_anchor
+                ON branch_questions(session_id, anchor_id);
+
+            CREATE INDEX IF NOT EXISTS idx_knowledge_cards_mastery_created
+                ON knowledge_cards(mastery ASC, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_cards_subject_created
+                ON knowledge_cards(subject, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_cards_source_session
+                ON knowledge_cards(source_session_id);
+
+            CREATE INDEX IF NOT EXISTS idx_mistakes_knowledge_created
+                ON mistakes(knowledge_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_mistakes_subject_topic_created
+                ON mistakes(subject, topic, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_mistakes_subject_cause
+                ON mistakes(subject, cause_category);
+
+            CREATE INDEX IF NOT EXISTS idx_review_tasks_status_date_id
+                ON review_tasks(status, review_date ASC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_review_tasks_knowledge_date
+                ON review_tasks(knowledge_id, review_date ASC, id ASC);
+
+            CREATE INDEX IF NOT EXISTS idx_parking_lot_status_created
+                ON parking_lot(status, created_at DESC, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_ppt_decks_created
+                ON ppt_decks(created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_slide_explanations_slide_created
+                ON slide_explanations(slide_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_slide_questions_slide_created
+                ON slide_questions(slide_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_api_providers_enabled_id
+                ON api_providers(enabled, id ASC);
             """
         )
         _ensure_column(conn, "ppt_slides", "image_path", "TEXT DEFAULT ''")
@@ -195,23 +254,28 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
 
 
 def fetch_all(query: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
-    with get_connection() as conn:
+    with managed_connection() as conn:
         rows = conn.execute(query, tuple(params)).fetchall()
     return [dict(row) for row in rows]
 
 
 def fetch_one(query: str, params: Iterable[Any] = ()) -> dict[str, Any] | None:
-    with get_connection() as conn:
+    with managed_connection() as conn:
         row = conn.execute(query, tuple(params)).fetchone()
     return dict(row) if row else None
 
 
 def execute(query: str, params: Iterable[Any] = ()) -> None:
-    with get_connection() as conn:
+    with managed_connection() as conn:
         conn.execute(query, tuple(params))
 
 
+def execute_many(query: str, params_seq: Iterable[Iterable[Any]]) -> None:
+    with managed_connection() as conn:
+        conn.executemany(query, (tuple(params) for params in params_seq))
+
+
 def insert_and_get_id(query: str, params: Iterable[Any] = ()) -> int:
-    with get_connection() as conn:
+    with managed_connection() as conn:
         cursor = conn.execute(query, tuple(params))
         return int(cursor.lastrowid)

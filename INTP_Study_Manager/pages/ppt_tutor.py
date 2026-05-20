@@ -53,12 +53,13 @@ def render() -> None:
         st.info("请先上传一个 PPTX 或 PDF 文件。当前版本会解析每页文字内容，后续可继续增强真实页面渲染和 OCR。")
         return
 
+    deck_by_id = {deck["id"]: deck for deck in decks}
     deck_id = st.selectbox(
         "选择 PPT",
-        [deck["id"] for deck in decks],
-        format_func=lambda item_id: _deck_label(decks, item_id),
+        list(deck_by_id),
+        format_func=lambda item_id: _deck_label(deck_by_id, item_id),
     )
-    deck = fetch_one("SELECT * FROM ppt_decks WHERE id = ?", (deck_id,))
+    deck = deck_by_id.get(deck_id)
     slides = fetch_all(
         "SELECT * FROM ppt_slides WHERE deck_id = ? ORDER BY slide_number ASC",
         (deck_id,),
@@ -66,29 +67,31 @@ def render() -> None:
     if not deck or not slides:
         st.warning("这个 PPT 暂无可用页面，请重新上传。")
         return
+    slide_by_id = {slide["id"]: slide for slide in slides}
+    latest_by_slide_id = _latest_explanations_by_slide_ids(list(slide_by_id))
     selection_quote = _consume_branch_selection_from_query(deck, slides)
 
     st.divider()
-    _render_deck_actions(deck, slides)
-    reader_quote = _render_synced_reader(deck, slides)
+    _render_deck_actions(deck, slides, latest_by_slide_id)
+    reader_quote = _render_synced_reader(deck, slides, latest_by_slide_id)
     selection_quote = selection_quote or reader_quote
 
     st.divider()
     st.markdown('<div id="ppt-branch-question"></div>', unsafe_allow_html=True)
     branch_slide_key = f"ppt_branch_slide_{deck_id}"
     active_quote = selection_quote or st.session_state.get(_branch_quote_state_key(deck_id))
-    if active_quote and active_quote.get("slide_id") in [slide["id"] for slide in slides]:
+    if active_quote and active_quote.get("slide_id") in slide_by_id:
         st.session_state[branch_slide_key] = active_quote["slide_id"]
     branch_slide_id = st.selectbox(
         "选择插问绑定页",
-        [slide["id"] for slide in slides],
-        format_func=lambda item_id: _slide_label(slides, item_id),
+        list(slide_by_id),
+        format_func=lambda item_id: _slide_label(slide_by_id, item_id),
         key=branch_slide_key,
     )
-    branch_slide = fetch_one("SELECT * FROM ppt_slides WHERE id = ?", (branch_slide_id,))
+    branch_slide = slide_by_id.get(branch_slide_id)
     if branch_slide:
         quote_for_slide = active_quote if active_quote and active_quote.get("slide_id") == branch_slide["id"] else None
-        _render_branch_popover(deck, branch_slide, quote_for_slide)
+        _render_branch_popover(deck, branch_slide, quote_for_slide, latest_by_slide_id.get(branch_slide["id"]))
         _render_question_history(branch_slide["id"])
 
     st.divider()
@@ -172,7 +175,7 @@ def _render_upload_form(*, expanded: bool = False) -> None:
         st.rerun()
 
 
-def _render_deck_actions(deck: dict, slides: list[dict]) -> None:
+def _render_deck_actions(deck: dict, slides: list[dict], latest_by_slide_id: dict[int, dict]) -> None:
     st.subheader("整份资料逐页分析")
     missing_images = [slide for slide in slides if not _image_exists(slide)]
     cols = st.columns([1.3, 1.3, 2])
@@ -202,7 +205,8 @@ def _render_deck_actions(deck: dict, slides: list[dict]) -> None:
         value=True,
         help="仅 OpenAI 兼容的视觉模型可用；如果所选模型不支持图片，API 会返回错误。",
     )
-    if send_image_when_no_text and not _active_provider_supports_image_input():
+    supports_image_input = _active_provider_supports_image_input()
+    if send_image_when_no_text and not supports_image_input:
         st.warning("当前 Provider / 模型看起来不支持图片输入。空白扫描页会被跳过；请切换视觉模型，或重新导入可提取文字的 PDF。")
     selected_slides, range_label = _select_generation_range(slides)
     st.caption(f"当前生成范围：{range_label}；将逐页调用 API 并保存到右侧讲解区。")
@@ -212,13 +216,15 @@ def _render_deck_actions(deck: dict, slides: list[dict]) -> None:
             selected_slides,
             only_missing=only_missing,
             send_image_when_no_text=send_image_when_no_text,
+            supports_image_input=supports_image_input,
+            latest_by_slide_id=latest_by_slide_id,
         )
 
 
-def _render_synced_reader(deck: dict, slides: list[dict]) -> dict | None:
+def _render_synced_reader(deck: dict, slides: list[dict], latest_by_slide_id: dict[int, dict]) -> dict | None:
     st.subheader("同步阅读器")
     st.caption("提示：在右侧 AI 讲解里选中一段文字，会出现“引用到插问”按钮，可把选中文本和前后文带到下方插问区。")
-    payload = _build_reader_payload(slides)
+    payload = _build_reader_payload(slides, latest_by_slide_id)
     if not payload:
         st.warning("当前资料还没有可显示的原页面图片。请先点击“生成 / 修复原页面图片”。")
         return None
@@ -529,6 +535,7 @@ def _build_reading_content(
     chunks: list[str] = []
     used_pages = 0
     truncated = False
+    current_chars = 0
 
     for slide in slides:
         slide_text = (slide.get("slide_text") or "").strip()
@@ -545,14 +552,15 @@ def _build_reading_content(
             ]
             if part
         )
-        candidate = ("\n\n".join(chunks + [chunk])).strip()
-        if len(candidate) > max_chars:
+        extra_chars = len(chunk) + (2 if chunks else 0)
+        if current_chars + extra_chars > max_chars:
             truncated = True
             if not chunks:
                 chunks.append(chunk[:max_chars] + "\n[内容已因长度限制截断]")
                 used_pages += 1
             break
         chunks.append(chunk)
+        current_chars += extra_chars
         used_pages += 1
 
     return "\n\n".join(chunks).strip(), used_pages, truncated
@@ -608,8 +616,14 @@ def _render_main_explanation(deck: dict, slide: dict) -> None:
         st.info("还没有生成本页主线讲解。点击上方按钮，或先复制 Prompt 到 ChatGPT。")
 
 
-def _render_branch_popover(deck: dict, slide: dict, quote: dict | None = None) -> None:
-    latest = _latest_explanation(slide["id"])
+def _render_branch_popover(
+    deck: dict,
+    slide: dict,
+    quote: dict | None = None,
+    latest: dict | None = None,
+) -> None:
+    if latest is None:
+        latest = _latest_explanation(slide["id"])
     if quote:
         with st.container(border=True):
             st.subheader("基于选中文本插问")
@@ -737,10 +751,12 @@ def _generate_whole_deck_explanations(
     *,
     only_missing: bool,
     send_image_when_no_text: bool,
+    supports_image_input: bool,
+    latest_by_slide_id: dict[int, dict],
 ) -> None:
     targets = []
     for slide in slides:
-        latest = _latest_explanation(slide["id"])
+        latest = latest_by_slide_id.get(int(slide["id"]))
         if only_missing and latest:
             continue
         targets.append(slide)
@@ -752,8 +768,17 @@ def _generate_whole_deck_explanations(
     progress = st.progress(0, text="准备生成逐页讲解...")
     generated = 0
     skipped = 0
+    provider_id = st.session_state.get("active_api_provider_id")
+    api_key = _active_api_key()
+    active_model = st.session_state.get("active_api_model", DEFAULT_MODEL)
+    max_tokens = int(st.session_state.get("active_api_max_tokens", 4096))
+    active_model_label = _active_model_label()
     for index, slide in enumerate(targets, start=1):
-        image_paths = _image_paths_for_generation(slide, send_image_when_no_text)
+        image_paths = _image_paths_for_generation(
+            slide,
+            send_image_when_no_text,
+            supports_image_input=supports_image_input,
+        )
         if _is_text_empty(slide) and not image_paths:
             st.warning(f"第 {slide['slide_number']} 页没有提取到文字，且当前模型不能读图片，已跳过。")
             skipped += 1
@@ -766,18 +791,18 @@ def _generate_whole_deck_explanations(
             )
             explanation = generate_text(
                 prompt,
-                provider_id=st.session_state.get("active_api_provider_id"),
-                api_key=_active_api_key(),
-                model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
+                provider_id=provider_id,
+                api_key=api_key,
+                model_override=active_model,
                 image_paths=image_paths,
-                max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+                max_output_tokens=max_tokens,
             )
             insert_and_get_id(
                 """
                 INSERT INTO slide_explanations (slide_id, model, explanation)
                 VALUES (?, ?, ?)
                 """,
-                (slide["id"], _active_model_label(), explanation),
+                (slide["id"], active_model_label, explanation),
             )
             generated += 1
         except AIServiceError as exc:
@@ -790,17 +815,17 @@ def _generate_whole_deck_explanations(
                 try:
                     explanation = generate_text(
                         _build_slide_prompt(deck, slide, image_attached=False),
-                        provider_id=st.session_state.get("active_api_provider_id"),
-                        api_key=_active_api_key(),
-                        model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
-                        max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+                        provider_id=provider_id,
+                        api_key=api_key,
+                        model_override=active_model,
+                        max_output_tokens=max_tokens,
                     )
                     insert_and_get_id(
                         """
                         INSERT INTO slide_explanations (slide_id, model, explanation)
                         VALUES (?, ?, ?)
                         """,
-                        (slide["id"], _active_model_label(), explanation),
+                        (slide["id"], active_model_label, explanation),
                     )
                     generated += 1
                     continue
@@ -817,13 +842,13 @@ def _generate_whole_deck_explanations(
         st.info("没有生成新讲解。被跳过的页面需要可提取文字、OCR，或支持图片输入的视觉模型。")
 
 
-def _build_reader_payload(slides: list[dict]) -> list[dict]:
+def _build_reader_payload(slides: list[dict], latest_by_slide_id: dict[int, dict]) -> list[dict]:
     payload = []
     for slide in slides:
         image_path = Path(slide.get("image_path") or "")
         if not image_path.exists():
             continue
-        latest = _latest_explanation(slide["id"])
+        latest = latest_by_slide_id.get(int(slide["id"]))
         payload.append(
             {
                 "slideNumber": int(slide["slide_number"]),
@@ -1394,10 +1419,17 @@ def _image_exists(slide: dict) -> bool:
     return bool(image_path and Path(image_path).exists())
 
 
-def _image_paths_for_generation(slide: dict, send_image_when_no_text: bool) -> list[str]:
+def _image_paths_for_generation(
+    slide: dict,
+    send_image_when_no_text: bool,
+    *,
+    supports_image_input: bool | None = None,
+) -> list[str]:
     if not send_image_when_no_text:
         return []
-    if not _active_provider_supports_image_input():
+    if supports_image_input is None:
+        supports_image_input = _active_provider_supports_image_input()
+    if not supports_image_input:
         return []
     if not _is_text_empty(slide):
         return []
@@ -1418,6 +1450,35 @@ def _latest_explanation(slide_id: int) -> dict | None:
         """,
         (slide_id,),
     )
+
+
+def _latest_explanations_by_slide_ids(slide_ids: list[int]) -> dict[int, dict]:
+    if not slide_ids:
+        return {}
+    latest: dict[int, dict] = {}
+    chunk_size = 900
+    for start in range(0, len(slide_ids), chunk_size):
+        chunk = slide_ids[start : start + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = fetch_all(
+            f"""
+            SELECT id, slide_id, model, explanation, created_at
+            FROM (
+                SELECT
+                    se.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY se.slide_id
+                        ORDER BY se.created_at DESC, se.id DESC
+                    ) AS rn
+                FROM slide_explanations se
+                WHERE se.slide_id IN ({placeholders})
+            )
+            WHERE rn = 1
+            """,
+            tuple(chunk),
+        )
+        latest.update({int(row["slide_id"]): row for row in rows})
+    return latest
 
 
 def _build_slide_prompt(deck: dict, slide: dict, *, image_attached: bool = False) -> str:
@@ -1453,13 +1514,13 @@ def _build_branch_prompt(deck: dict, slide: dict, latest: dict | None, question:
     )
 
 
-def _deck_label(decks: list[dict], deck_id: int) -> str:
-    deck = next(item for item in decks if item["id"] == deck_id)
+def _deck_label(decks: dict[int, dict], deck_id: int) -> str:
+    deck = decks[deck_id]
     return f"#{deck_id} · {deck['subject'] or '未分类'} · {deck['title']} · {deck['slide_count']} 页"
 
 
-def _slide_label(slides: list[dict], slide_id: int) -> str:
-    slide = next(item for item in slides if item["id"] == slide_id)
+def _slide_label(slides: dict[int, dict], slide_id: int) -> str:
+    slide = slides[slide_id]
     return f"第 {slide['slide_number']} 页 · {slide['title'] or '未命名页面'}"
 
 

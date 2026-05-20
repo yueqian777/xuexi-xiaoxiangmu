@@ -9,7 +9,7 @@ from typing import Any
 
 import requests
 
-from db import execute, fetch_all, fetch_one, insert_and_get_id
+from db import execute, execute_many, fetch_all, fetch_one, insert_and_get_id
 
 DEFAULT_MODEL = "gpt-5.5"
 
@@ -122,18 +122,15 @@ class AIProvider:
 
 
 def ensure_default_api_providers() -> None:
-    for provider in DEFAULT_PROVIDERS:
-        existing = fetch_one("SELECT id FROM api_providers WHERE name = ?", (provider["name"],))
-        if existing:
-            continue
-        insert_and_get_id(
-            """
-            INSERT INTO api_providers (
-                name, provider_type, base_url, model, api_key_env, auth_type,
-                extra_headers_json, request_template_json, response_path, enabled
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            """,
+    execute_many(
+        """
+        INSERT OR IGNORE INTO api_providers (
+            name, provider_type, base_url, model, api_key_env, auth_type,
+            extra_headers_json, request_template_json, response_path, enabled
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
             (
                 provider["name"],
                 provider["provider_type"],
@@ -144,8 +141,10 @@ def ensure_default_api_providers() -> None:
                 provider["extra_headers_json"],
                 provider["request_template_json"],
                 provider["response_path"],
-            ),
-        )
+            )
+            for provider in DEFAULT_PROVIDERS
+        ),
+    )
 
 
 def list_api_providers(enabled_only: bool = False) -> list[dict[str, Any]]:
