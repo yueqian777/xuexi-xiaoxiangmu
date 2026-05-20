@@ -129,6 +129,7 @@ def init_db() -> None:
                 title TEXT DEFAULT '',
                 slide_text TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
+                image_path TEXT DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 FOREIGN KEY (deck_id) REFERENCES ppt_decks(id) ON DELETE CASCADE,
                 UNIQUE(deck_id, slide_number)
@@ -170,6 +171,13 @@ def init_db() -> None:
             );
             """
         )
+        _ensure_column(conn, "ppt_slides", "image_path", "TEXT DEFAULT ''")
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def fetch_all(query: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:

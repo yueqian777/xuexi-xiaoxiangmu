@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import base64
+import html
+import json
+from datetime import date
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from db import fetch_all, fetch_one, insert_and_get_id
 from services.ai_service import (
@@ -11,8 +18,9 @@ from services.ai_service import (
     list_api_providers,
     provider_label,
 )
-from services.ppt_service import import_deck
+from services.ppt_service import import_deck, refresh_pdf_slide_text, render_missing_page_images
 from services.prompt_service import render_template
+from services.study_asset_service import parse_study_assets, save_study_assets
 
 
 def render() -> None:
@@ -41,25 +49,21 @@ def render() -> None:
         st.warning("这个 PPT 暂无可用页面，请重新上传。")
         return
 
-    slide_id = st.selectbox(
-        "当前页",
+    st.divider()
+    _render_deck_actions(deck, slides)
+    _render_study_asset_generator(deck)
+    _render_synced_reader(deck, slides)
+
+    st.divider()
+    branch_slide_id = st.selectbox(
+        "选择插问绑定页",
         [slide["id"] for slide in slides],
         format_func=lambda item_id: _slide_label(slides, item_id),
     )
-    slide = fetch_one("SELECT * FROM ppt_slides WHERE id = ?", (slide_id,))
-    if not slide:
-        return
-
-    st.divider()
-    left, right = st.columns([1.05, 1], gap="large")
-    with left:
-        _render_slide_view(deck, slide)
-    with right:
-        _render_main_explanation(deck, slide)
-
-    st.divider()
-    _render_branch_popover(deck, slide)
-    _render_question_history(slide["id"])
+    branch_slide = fetch_one("SELECT * FROM ppt_slides WHERE id = ?", (branch_slide_id,))
+    if branch_slide:
+        _render_branch_popover(deck, branch_slide)
+        _render_question_history(branch_slide["id"])
 
 
 def _render_api_settings() -> None:
@@ -97,6 +101,15 @@ def _render_api_settings() -> None:
             help="默认读取 Provider 配置；这里可以临时覆盖。",
         )
         st.session_state["active_api_model"] = model.strip() or provider.get("model") or DEFAULT_MODEL
+        max_tokens = st.number_input(
+            "最大输出 token",
+            min_value=512,
+            max_value=16000,
+            value=int(st.session_state.get("active_api_max_tokens", 4096)),
+            step=512,
+            help="DeepSeek V4 Pro 会消耗 reasoning token，建议至少 4096。",
+        )
+        st.session_state["active_api_max_tokens"] = int(max_tokens)
         st.caption(f"当前 Base URL：{provider.get('base_url') or '未设置'}")
         st.caption("如果使用本地 CLIProxyAPI，默认客户端 Key 是 local-client-key；真实上游 Key 由代理服务保存。")
 
@@ -123,26 +136,293 @@ def _render_upload_form() -> None:
         st.rerun()
 
 
-def _render_slide_view(deck: dict, slide: dict) -> None:
-    st.subheader("PPT 阅读区")
-    with st.container(border=True):
-        st.markdown(f"**{deck['title']}**")
-        st.caption(f"{deck.get('subject') or '未分类'} · 第 {slide['slide_number']} / {deck['slide_count']} 页")
-        if _is_pdf_deck(deck):
-            st.caption("PDF 原文预览：可在预览器中滚动到当前页，对照下方提取文本学习。")
-            st.pdf(deck["file_path"], height=520, key=f"pdf_{deck['id']}_{slide['slide_number']}")
-        st.markdown(f"### {slide['title'] or '未命名页面'}")
-        slide_text = (slide["slide_text"] or "").strip()
-        if slide_text:
-            st.markdown(_format_slide_text(slide_text))
-        else:
-            st.warning("这一页没有解析到文字。若这是扫描版 PDF，需要后续加入 OCR；当前可先手动补充关键文字。")
+def _render_deck_actions(deck: dict, slides: list[dict]) -> None:
+    st.subheader("整份资料逐页分析")
+    missing_images = [slide for slide in slides if not _image_exists(slide)]
+    cols = st.columns([1.3, 1.3, 2])
+    if cols[0].button("生成 / 修复原页面图片", disabled=not missing_images):
+        try:
+            with st.spinner("正在生成原页面图片..."):
+                render_missing_page_images(deck, slides)
+            st.success("原页面图片已生成。")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"生成原页面图片失败：{exc}")
+
+    if _is_pdf_deck(deck):
+        if st.button("重新提取 PDF 文字"):
+            try:
+                with st.spinner("正在重新提取 PDF 文字..."):
+                    updated = refresh_pdf_slide_text(deck, slides)
+                st.success(f"PDF 文字已刷新：{updated} 页提取到文本。")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"重新提取 PDF 文字失败：{exc}")
+
+    only_missing = cols[1].checkbox("只生成缺失讲解", value=True)
+    cols[2].caption("左侧滚动到某页时，右侧讲解会自动同步滚动到对应页。")
+    send_image_when_no_text = st.checkbox(
+        "PDF 无法提取文字时，把当前页原图直接发给支持视觉的 API",
+        value=True,
+        help="仅 OpenAI 兼容的视觉模型可用；如果所选模型不支持图片，API 会返回错误。",
+    )
+    if send_image_when_no_text and not _active_provider_supports_image_input():
+        st.warning("当前 Provider / 模型看起来不支持图片输入。空白扫描页会被跳过；请切换视觉模型，或重新导入可提取文字的 PDF。")
+    selected_slides, range_label = _select_generation_range(slides)
+    st.caption(f"当前生成范围：{range_label}；将逐页调用 API 并保存到右侧讲解区。")
+    if st.button("生成所选范围逐页讲解", type="primary"):
+        _generate_whole_deck_explanations(
+            deck,
+            selected_slides,
+            only_missing=only_missing,
+            send_image_when_no_text=send_image_when_no_text,
+        )
+
+
+def _render_synced_reader(deck: dict, slides: list[dict]) -> None:
+    st.subheader("同步阅读器")
+    payload = _build_reader_payload(slides)
+    if not payload:
+        st.warning("当前资料还没有可显示的原页面图片。请先点击“生成 / 修复原页面图片”。")
+        return
+    components.html(_build_synced_reader_html(deck, payload), height=850, scrolling=False)
+
+
+def _select_generation_range(slides: list[dict]) -> tuple[list[dict], str]:
+    mode = st.radio(
+        "生成范围",
+        ["全部生成", "10 页一组", "20 页一组"],
+        horizontal=True,
+        help="资料很长时建议分组生成，便于控制 API 消耗和失败重试。",
+    )
+    if mode == "全部生成":
+        return slides, f"全部 {len(slides)} 页"
+
+    group_size = 10 if mode == "10 页一组" else 20
+    groups = _build_slide_groups(slides, group_size)
+    selected_index = st.selectbox(
+        "选择批次",
+        list(range(len(groups))),
+        format_func=lambda index: _group_label(groups[index]),
+    )
+    selected = groups[selected_index]
+    return selected, _group_label(selected)
+
+
+def _build_slide_groups(slides: list[dict], group_size: int) -> list[list[dict]]:
+    return [slides[index : index + group_size] for index in range(0, len(slides), group_size)]
+
+
+def _group_label(group: list[dict]) -> str:
+    if not group:
+        return "空批次"
+    start = group[0]["slide_number"]
+    end = group[-1]["slide_number"]
+    return f"第 {start}-{end} 页（共 {len(group)} 页）"
+
+
+def _render_study_asset_generator(deck: dict) -> None:
+    st.subheader("从今日阅读内容生成学习登记和知识卡片")
+    st.caption("根据当前资料里已识别文字和已生成讲解，调用当前 API 生成草稿；确认后写入学习登记、知识点卡片和 1-3-7-14 复习计划。")
+
+    slides = _slides_with_latest_explanations(deck["id"])
+    recognized = [slide for slide in slides if _slide_has_learning_content(slide)]
+    today_slides = [slide for slide in recognized if _is_today(slide.get("explanation_created_at"))]
+    if not recognized:
+        st.info("当前资料还没有可沉淀的文字或讲解。请先重新提取 PDF 文字，或生成逐页讲解。")
+        return
+
+    source_options = []
+    if today_slides:
+        source_options.append("今天已生成讲解的页面")
+    source_options.extend(["当前资料全部已识别页面", "当前资料按批次选择"])
+
+    cols = st.columns([1.2, 1, 1])
+    source_mode = cols[0].selectbox("内容来源", source_options, key=f"asset_source_mode_{deck['id']}")
+    max_chars = cols[1].number_input(
+        "最大输入字符",
+        min_value=8000,
+        max_value=60000,
+        value=24000,
+        step=2000,
+        key=f"asset_max_chars_{deck['id']}",
+        help="太长的 PPT 会超过模型上下文，建议先用 10 或 20 页批次生成。",
+    )
+    include_ai_explanation = cols[2].checkbox(
+        "包含 AI 讲解",
+        value=True,
+        key=f"asset_include_ai_{deck['id']}",
+        help="勾选后会把逐页讲解也作为沉淀依据；如果讲解质量不稳定，可以只用 PPT/PDF 识别文字。",
+    )
+
+    selected_slides = today_slides if source_mode == "今天已生成讲解的页面" else recognized
+    range_label = source_mode
+    if source_mode == "当前资料按批次选择":
+        group_size = st.radio(
+            "沉淀批次大小",
+            [10, 20],
+            horizontal=True,
+            format_func=lambda value: f"{value} 页一组",
+            key=f"asset_group_size_{deck['id']}",
+        )
+        groups = _build_slide_groups(recognized, int(group_size))
+        group_index = st.selectbox(
+            "选择要沉淀的批次",
+            list(range(len(groups))),
+            format_func=lambda index: _group_label(groups[index]),
+            key=f"asset_group_index_{deck['id']}",
+        )
+        selected_slides = groups[group_index]
+        range_label = _group_label(selected_slides)
+
+    reading_content, used_pages, truncated = _build_reading_content(
+        selected_slides,
+        max_chars=int(max_chars),
+        include_ai_explanation=include_ai_explanation,
+    )
+    st.caption(f"将用于生成：{range_label}；实际纳入 {used_pages} 页。{'内容过长，已截断。' if truncated else ''}")
+
+    draft_key = f"study_asset_draft_{deck['id']}"
+    raw_key = f"study_asset_raw_{deck['id']}"
+    if st.button("调用 API 生成学习登记 / 知识卡片草稿", type="primary", key=f"generate_assets_{deck['id']}"):
+        if not reading_content.strip():
+            st.error("没有可发送给 API 的阅读内容。")
+            return
+        prompt = render_template(
+            "ppt_to_study_assets.md",
+            {
+                "today": date.today().isoformat(),
+                "subject": deck.get("subject") or "未分类",
+                "deck_title": deck.get("title") or "未命名资料",
+                "range_label": range_label,
+                "reading_content": reading_content,
+            },
+        )
+        try:
+            with st.spinner("正在调用 API 生成结构化学习资产..."):
+                output = generate_text(
+                    prompt,
+                    provider_id=st.session_state.get("active_api_provider_id"),
+                    api_key=_active_api_key(),
+                    model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
+                    max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+                )
+            assets = parse_study_assets(output)
+            st.session_state[draft_key] = assets
+            st.session_state[raw_key] = output
+            st.success("草稿已生成，请先预览再写入数据库。")
+        except (AIServiceError, ValueError, json.JSONDecodeError) as exc:
+            st.error(f"生成或解析失败：{exc}")
+            if "output" in locals():
+                st.caption("API 原始返回：")
+                st.code(output, language="json")
+
+    draft = st.session_state.get(draft_key)
+    if not draft:
+        return
+
+    with st.expander("预览将写入的学习登记和知识卡片", expanded=True):
+        st.json(draft)
+        cols = st.columns(2)
+        if cols[0].button("确认写入学习登记和知识卡片", key=f"save_assets_{deck['id']}"):
+            try:
+                session_id, knowledge_ids = save_study_assets(
+                    draft,
+                    fallback_subject=deck.get("subject") or "未分类",
+                    fallback_chapter=deck.get("title") or "",
+                )
+            except Exception as exc:
+                st.error(f"写入失败：{exc}")
+                return
+            st.success(f"已写入学习记录 #{session_id}，知识点卡片 {len(knowledge_ids)} 张，并已生成复习计划。")
+            del st.session_state[draft_key]
+            st.rerun()
+        if cols[1].button("清除草稿", key=f"clear_assets_{deck['id']}"):
+            del st.session_state[draft_key]
+            st.session_state.pop(raw_key, None)
+            st.rerun()
+
+
+def _slides_with_latest_explanations(deck_id: int) -> list[dict]:
+    return fetch_all(
+        """
+        SELECT
+            ps.*,
+            se.explanation AS latest_explanation,
+            se.model AS latest_model,
+            se.created_at AS explanation_created_at
+        FROM ppt_slides ps
+        LEFT JOIN slide_explanations se
+            ON se.id = (
+                SELECT id
+                FROM slide_explanations
+                WHERE slide_id = ps.id
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            )
+        WHERE ps.deck_id = ?
+        ORDER BY ps.slide_number ASC
+        """,
+        (deck_id,),
+    )
+
+
+def _slide_has_learning_content(slide: dict) -> bool:
+    return bool((slide.get("slide_text") or "").strip() or (slide.get("latest_explanation") or "").strip())
+
+
+def _is_today(value: str | None) -> bool:
+    return bool(value and value[:10] == date.today().isoformat())
+
+
+def _build_reading_content(
+    slides: list[dict],
+    *,
+    max_chars: int,
+    include_ai_explanation: bool,
+) -> tuple[str, int, bool]:
+    chunks: list[str] = []
+    used_pages = 0
+    truncated = False
+
+    for slide in slides:
+        slide_text = (slide.get("slide_text") or "").strip()
+        explanation = (slide.get("latest_explanation") or "").strip() if include_ai_explanation else ""
+        if not slide_text and not explanation:
+            continue
+
+        chunk = "\n".join(
+            part
+            for part in [
+                f"## 第 {slide['slide_number']} 页：{slide.get('title') or '未命名页面'}",
+                f"PPT/PDF 识别文字：\n{_clip_text(slide_text, 2200)}" if slide_text else "",
+                f"已生成 AI 讲解：\n{_clip_text(explanation, 2600)}" if explanation else "",
+            ]
+            if part
+        )
+        candidate = ("\n\n".join(chunks + [chunk])).strip()
+        if len(candidate) > max_chars:
+            truncated = True
+            if not chunks:
+                chunks.append(chunk[:max_chars] + "\n[内容已因长度限制截断]")
+                used_pages += 1
+            break
+        chunks.append(chunk)
+        used_pages += 1
+
+    return "\n\n".join(chunks).strip(), used_pages, truncated
+
+
+def _clip_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n[本页内容已截断]"
 
 
 def _render_main_explanation(deck: dict, slide: dict) -> None:
     st.subheader("当前页主线讲解")
     latest = _latest_explanation(slide["id"])
-    prompt = _build_slide_prompt(deck, slide)
+    prompt = _build_slide_prompt(deck, slide, image_attached=False)
 
     cols = st.columns(2)
     generate = cols[0].button("生成 / 更新本页讲解", type="primary")
@@ -159,6 +439,7 @@ def _render_main_explanation(deck: dict, slide: dict) -> None:
                     provider_id=st.session_state.get("active_api_provider_id"),
                     api_key=_active_api_key(),
                     model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
+                    max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
                 )
             insert_and_get_id(
                 """
@@ -203,6 +484,7 @@ def _render_branch_popover(deck: dict, slide: dict) -> None:
                         provider_id=st.session_state.get("active_api_provider_id"),
                         api_key=_active_api_key(),
                         model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
+                        max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
                     )
                 insert_and_get_id(
                     """
@@ -243,6 +525,417 @@ def _render_question_history(slide_id: int) -> None:
         st.dataframe(pd.DataFrame(questions), use_container_width=True, hide_index=True)
 
 
+def _generate_whole_deck_explanations(
+    deck: dict,
+    slides: list[dict],
+    *,
+    only_missing: bool,
+    send_image_when_no_text: bool,
+) -> None:
+    targets = []
+    for slide in slides:
+        latest = _latest_explanation(slide["id"])
+        if only_missing and latest:
+            continue
+        targets.append(slide)
+
+    if not targets:
+        st.info("所有页面都已有讲解。")
+        return
+
+    progress = st.progress(0, text="准备生成逐页讲解...")
+    generated = 0
+    skipped = 0
+    for index, slide in enumerate(targets, start=1):
+        image_paths = _image_paths_for_generation(slide, send_image_when_no_text)
+        if _is_text_empty(slide) and not image_paths:
+            st.warning(f"第 {slide['slide_number']} 页没有提取到文字，且当前模型不能读图片，已跳过。")
+            skipped += 1
+            continue
+        prompt = _build_slide_prompt(deck, slide, image_attached=bool(image_paths))
+        try:
+            progress.progress(
+                (index - 1) / len(targets),
+                text=f"正在分析第 {slide['slide_number']} 页 / 共 {len(targets)} 页待生成...",
+            )
+            explanation = generate_text(
+                prompt,
+                provider_id=st.session_state.get("active_api_provider_id"),
+                api_key=_active_api_key(),
+                model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
+                image_paths=image_paths,
+                max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+            )
+            insert_and_get_id(
+                """
+                INSERT INTO slide_explanations (slide_id, model, explanation)
+                VALUES (?, ?, ?)
+                """,
+                (slide["id"], _active_model_label(), explanation),
+            )
+            generated += 1
+        except AIServiceError as exc:
+            if image_paths and _is_image_input_error(exc):
+                st.warning(f"第 {slide['slide_number']} 页：当前模型拒绝图片输入，已自动改为文本模式重试。")
+                if _is_text_empty(slide):
+                    st.warning(f"第 {slide['slide_number']} 页没有可用文字，文本模式无法生成有效讲解，已跳过。")
+                    skipped += 1
+                    continue
+                try:
+                    explanation = generate_text(
+                        _build_slide_prompt(deck, slide, image_attached=False),
+                        provider_id=st.session_state.get("active_api_provider_id"),
+                        api_key=_active_api_key(),
+                        model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
+                        max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+                    )
+                    insert_and_get_id(
+                        """
+                        INSERT INTO slide_explanations (slide_id, model, explanation)
+                        VALUES (?, ?, ?)
+                        """,
+                        (slide["id"], _active_model_label(), explanation),
+                    )
+                    generated += 1
+                    continue
+                except AIServiceError as retry_exc:
+                    st.error(f"第 {slide['slide_number']} 页文本模式重试失败：{retry_exc}")
+                    break
+            st.error(f"第 {slide['slide_number']} 页生成失败：{exc}")
+            break
+    progress.progress(1.0, text=f"已生成 {generated} 页讲解，跳过 {skipped} 页。")
+    if generated:
+        st.success(f"逐页讲解已保存：{generated} 页。")
+        st.rerun()
+    elif skipped:
+        st.info("没有生成新讲解。被跳过的页面需要可提取文字、OCR，或支持图片输入的视觉模型。")
+
+
+def _build_reader_payload(slides: list[dict]) -> list[dict]:
+    payload = []
+    for slide in slides:
+        image_path = Path(slide.get("image_path") or "")
+        if not image_path.exists():
+            continue
+        latest = _latest_explanation(slide["id"])
+        payload.append(
+            {
+                "slideNumber": int(slide["slide_number"]),
+                "title": slide.get("title") or f"第 {slide['slide_number']} 页",
+                "image": _image_data_uri(image_path),
+                "explanation": latest["explanation"] if latest else "本页还没有 AI 讲解。点击上方“生成整份资料逐页讲解”后会自动填入。",
+                "model": latest["model"] if latest else "",
+                "createdAt": latest["created_at"] if latest else "",
+            }
+        )
+    return payload
+
+
+def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
+    pages_json = json.dumps(payload, ensure_ascii=False)
+    title = html.escape(deck.get("title") or "学习资料")
+    subject = html.escape(deck.get("subject") or "未分类")
+    return f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <script>
+    window.MathJax = {{
+      tex: {{
+        inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
+        displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
+        processEscapes: true
+      }},
+      options: {{
+        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+      }},
+      startup: {{
+        typeset: false
+      }}
+    }};
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+  <style>
+    :root {{
+      --bg: #f6f1e8;
+      --ink: #20201d;
+      --muted: #706b61;
+      --line: #ded4c5;
+      --accent: #9a4f23;
+      --panel: #fffaf0;
+      --shadow: rgba(56, 38, 18, 0.14);
+    }}
+    * {{ box-sizing: border-box; }}
+    html {{
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+    }}
+    body {{
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: linear-gradient(135deg, #f7efe3, #eee5d4);
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif;
+      overscroll-behavior: none;
+    }}
+    .frame {{
+      height: 835px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      overflow: hidden;
+      background: var(--bg);
+      box-shadow: 0 18px 45px var(--shadow);
+    }}
+    .topbar {{
+      height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      background: rgba(255, 250, 240, 0.94);
+      border-bottom: 1px solid var(--line);
+    }}
+    .title {{
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }}
+    .meta {{
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .current {{
+      color: var(--accent);
+      font-weight: 800;
+    }}
+    .grid {{
+      height: calc(100% - 58px);
+      display: grid;
+      grid-template-columns: minmax(0, 1.22fr) minmax(360px, 0.78fr);
+    }}
+    .pages, .notes {{
+      height: 100%;
+      overflow-y: auto;
+      scroll-behavior: smooth;
+      overscroll-behavior: contain;
+      touch-action: pan-y;
+    }}
+    .pages {{
+      padding: 22px 24px 80px;
+      background:
+        radial-gradient(circle at 10% 10%, rgba(154,79,35,.08), transparent 28%),
+        #eee6d7;
+      border-right: 1px solid var(--line);
+    }}
+    .page {{
+      margin: 0 auto 30px;
+      max-width: 960px;
+      padding: 12px;
+      border-radius: 14px;
+      border: 2px solid transparent;
+      background: rgba(255,255,255,.56);
+      box-shadow: 0 10px 28px rgba(48,34,17,.16);
+      transition: border-color .18s, transform .18s, box-shadow .18s;
+    }}
+    .page.active {{
+      border-color: var(--accent);
+      transform: translateY(-2px);
+      box-shadow: 0 16px 38px rgba(120,70,28,.26);
+    }}
+    .page-label {{
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 2px 4px 10px;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 700;
+    }}
+    .page img {{
+      width: 100%;
+      display: block;
+      border-radius: 8px;
+      background: #fff;
+    }}
+    .notes {{
+      padding: 22px 20px 80px;
+      background: var(--panel);
+    }}
+    .note {{
+      min-height: 260px;
+      margin: 0 0 22px;
+      padding: 18px 18px 20px;
+      border: 1px solid var(--line);
+      border-left: 5px solid transparent;
+      border-radius: 16px;
+      background: #fffdf7;
+      box-shadow: 0 8px 18px rgba(70,45,18,.08);
+      transition: border-color .18s, background .18s;
+      white-space: pre-wrap;
+      line-height: 1.72;
+      font-size: 15px;
+    }}
+    .note.active {{
+      border-left-color: var(--accent);
+      background: #fff7e8;
+    }}
+    .note h3 {{
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 18px;
+    }}
+    .note-meta {{
+      margin-bottom: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .note-body {{
+      overflow-wrap: anywhere;
+    }}
+    .note-body mjx-container {{
+      overflow-x: auto;
+      overflow-y: hidden;
+      max-width: 100%;
+      padding: 2px 0;
+    }}
+    @media (max-width: 900px) {{
+      .grid {{ grid-template-columns: 1fr; }}
+      .notes {{ display: none; }}
+      .pages {{ border-right: 0; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <div class="topbar">
+      <div>
+        <div class="title">{title}</div>
+        <div class="meta">{subject} · 原页面同步阅读</div>
+      </div>
+      <div class="current" id="currentPage">第 1 页</div>
+    </div>
+    <div class="grid">
+      <section class="pages" id="pages"></section>
+      <aside class="notes" id="notes"></aside>
+    </div>
+  </div>
+  <script>
+    const pages = {pages_json};
+    const pageRoot = document.getElementById('pages');
+    const noteRoot = document.getElementById('notes');
+    const current = document.getElementById('currentPage');
+
+    function escapeHtml(value) {{
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    }}
+
+    pageRoot.innerHTML = pages.map(page => `
+      <article class="page" id="page-${{page.slideNumber}}" data-page="${{page.slideNumber}}">
+        <div class="page-label">
+          <span>第 ${{page.slideNumber}} 页</span>
+          <span>${{escapeHtml(page.title)}}</span>
+        </div>
+        <img src="${{page.image}}" alt="第 ${{page.slideNumber}} 页原页面" loading="lazy" />
+      </article>
+    `).join('');
+
+    noteRoot.innerHTML = pages.map(page => `
+      <article class="note" id="note-${{page.slideNumber}}" data-page="${{page.slideNumber}}">
+        <h3>第 ${{page.slideNumber}} 页讲解</h3>
+        <div class="note-meta">${{escapeHtml(page.model || '未生成')}} ${{page.createdAt ? '· ' + escapeHtml(page.createdAt) : ''}}</div>
+        <div class="note-body">${{escapeHtml(page.explanation)}}</div>
+      </article>
+    `).join('');
+
+    function typesetMath() {{
+      if (!window.MathJax?.typesetPromise) {{
+        window.setTimeout(typesetMath, 120);
+        return;
+      }}
+      window.MathJax.typesetPromise([noteRoot]).catch(error => console.error(error));
+    }}
+    typesetMath();
+
+    function setActive(pageNumber) {{
+      document.querySelectorAll('.page.active,.note.active').forEach(el => el.classList.remove('active'));
+      const page = document.getElementById(`page-${{pageNumber}}`);
+      const note = document.getElementById(`note-${{pageNumber}}`);
+      if (page) page.classList.add('active');
+      if (note) {{
+        note.classList.add('active');
+        noteRoot.scrollTo({{ top: note.offsetTop - noteRoot.offsetTop, behavior: 'smooth' }});
+      }}
+      current.textContent = `第 ${{pageNumber}} 页`;
+    }}
+
+    const observer = new IntersectionObserver((entries) => {{
+      const visible = entries
+        .filter(entry => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (!visible) return;
+      setActive(visible.target.dataset.page);
+    }}, {{
+      root: pageRoot,
+      threshold: [0.35, 0.5, 0.65, 0.8]
+    }});
+
+    document.querySelectorAll('.page').forEach(page => observer.observe(page));
+    if (pages.length) setActive(pages[0].slideNumber);
+
+    function nearestScrollPanel(target) {{
+      const element = target?.closest?.('.pages, .notes');
+      if (element) return element;
+      return pageRoot;
+    }}
+
+    function containedWheelScroll(event) {{
+      const panel = nearestScrollPanel(event.target);
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      panel.scrollBy({{ top: event.deltaY, left: event.deltaX, behavior: 'auto' }});
+    }}
+
+    window.addEventListener('wheel', containedWheelScroll, {{ capture: true, passive: false }});
+    document.addEventListener('wheel', containedWheelScroll, {{ capture: true, passive: false }});
+  </script>
+</body>
+</html>
+"""
+
+
+def _image_data_uri(path: Path) -> str:
+    suffix = path.suffix.lower().lstrip(".") or "png"
+    mime = "jpeg" if suffix in {"jpg", "jpeg"} else "png"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:image/{mime};base64,{encoded}"
+
+
+def _image_exists(slide: dict) -> bool:
+    image_path = slide.get("image_path") or ""
+    return bool(image_path and Path(image_path).exists())
+
+
+def _image_paths_for_generation(slide: dict, send_image_when_no_text: bool) -> list[str]:
+    if not send_image_when_no_text:
+        return []
+    if not _active_provider_supports_image_input():
+        return []
+    if not _is_text_empty(slide):
+        return []
+    image_path = slide.get("image_path") or ""
+    if image_path and Path(image_path).exists():
+        return [image_path]
+    return []
+
+
 def _latest_explanation(slide_id: int) -> dict | None:
     return fetch_one(
         """
@@ -256,7 +949,12 @@ def _latest_explanation(slide_id: int) -> dict | None:
     )
 
 
-def _build_slide_prompt(deck: dict, slide: dict) -> str:
+def _build_slide_prompt(deck: dict, slide: dict, *, image_attached: bool = False) -> str:
+    slide_text = slide["slide_text"] or ""
+    if not slide_text.strip() and image_attached and _image_exists(slide):
+        slide_text = "这一页没有提取到可用文字。我会随请求附上该页原图，请直接根据页面图片内容讲解；不要编造图片中不存在的信息。"
+    elif not slide_text.strip() and _image_exists(slide):
+        slide_text = "这一页没有提取到可用文字，当前请求没有附带页面图片。请提醒我：需要切换支持图片输入的视觉模型，或先对 PDF 做 OCR 后重新导入。"
     return render_template(
         "ppt_slide_explain.md",
         {
@@ -264,7 +962,7 @@ def _build_slide_prompt(deck: dict, slide: dict) -> str:
             "deck_title": deck["title"],
             "slide_number": str(slide["slide_number"]),
             "slide_title": slide["title"] or "未命名页面",
-            "slide_text": slide["slide_text"] or "这一页没有解析到文字。",
+            "slide_text": slide_text or "这一页没有解析到文字。",
         },
     )
 
@@ -308,6 +1006,62 @@ def _is_pdf_deck(deck: dict) -> bool:
 def _active_api_key() -> str:
     provider_id = st.session_state.get("active_api_provider_id")
     return st.session_state.get(f"api_key_provider_{provider_id}", "")
+
+
+def _is_text_empty(slide: dict) -> bool:
+    return not (slide.get("slide_text") or "").strip()
+
+
+def _active_provider_supports_image_input() -> bool:
+    provider_id = st.session_state.get("active_api_provider_id")
+    providers = list_api_providers()
+    provider = next((item for item in providers if item["id"] == provider_id), None)
+    if not provider:
+        return False
+    if provider.get("provider_type") != "openai_chat":
+        return False
+
+    model = str(st.session_state.get("active_api_model") or provider.get("model") or "").lower()
+    text_only_markers = (
+        "deepseek",
+        "claude",
+        "kimi",
+        "moonshot",
+        "yi-",
+        "doubao",
+        "ernie",
+        "hunyuan",
+        "llama",
+        "mistral",
+    )
+    if any(marker in model for marker in text_only_markers):
+        return False
+
+    vision_markers = (
+        "vision",
+        "visual",
+        "image",
+        "vl",
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-5",
+        "o4",
+        "qwen-vl",
+        "glm-4v",
+    )
+    return any(marker in model for marker in vision_markers)
+
+
+def _is_image_input_error(exc: AIServiceError) -> bool:
+    message = str(exc).lower()
+    markers = (
+        "model_incompatible",
+        "support image input",
+        "unsupported image",
+        "image input",
+        "vision",
+    )
+    return any(marker in message for marker in markers)
 
 
 def _active_model_label() -> str:

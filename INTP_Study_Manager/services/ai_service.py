@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import base64
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -59,6 +61,17 @@ DEFAULT_PROVIDERS = [
         "base_url": "https://api.iamhc.cn/v1",
         "model": "auto",
         "api_key_env": "IAMHC_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "choices.0.message.content",
+    },
+    {
+        "name": "DeepSeek V4 Pro",
+        "provider_type": "openai_chat",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-v4-pro",
+        "api_key_env": "DEEPSEEK_API_KEY",
         "auth_type": "bearer",
         "extra_headers_json": "{}",
         "request_template_json": "",
@@ -214,11 +227,12 @@ def generate_text(
     api_key: str | None = None,
     model_override: str | None = None,
     max_output_tokens: int = 1600,
+    image_paths: list[str] | None = None,
 ) -> str:
     provider = get_api_provider(provider_id)
     model = (model_override or provider.model or DEFAULT_MODEL).strip()
     key = _resolve_api_key(provider, api_key)
-    request = _build_request(provider, prompt, key, model, max_output_tokens)
+    request = _build_request(provider, prompt, key, model, max_output_tokens, image_paths or [])
 
     try:
         response = requests.request(
@@ -243,6 +257,10 @@ def generate_text(
     if isinstance(output, list):
         output = "\n".join(str(item) for item in output)
     if output is None or not str(output).strip():
+        reasoning = _safe_extract_path(payload, "choices.0.message.reasoning_content")
+        finish_reason = _safe_extract_path(payload, "choices.0.finish_reason")
+        if reasoning and finish_reason == "length":
+            raise AIServiceError("模型只返回了 reasoning，最终回答为空。请把“最大输出 token”调高后重试。")
         raise AIServiceError(f"没有从响应路径中提取到文本：{provider.response_path}")
     return str(output).strip()
 
@@ -272,6 +290,7 @@ def _build_request(
     api_key: str,
     model: str,
     max_output_tokens: int,
+    image_paths: list[str],
 ) -> dict[str, Any]:
     headers = {"Content-Type": "application/json"}
     headers.update(_parse_json_object(provider.extra_headers_json, "额外请求头"))
@@ -283,13 +302,27 @@ def _build_request(
         body = {"model": model, "input": prompt, "max_output_tokens": max_output_tokens}
     elif provider.provider_type == "openai_chat":
         url = _join_url(provider.base_url or "https://api.openai.com/v1", "chat/completions")
+        user_content: str | list[dict[str, Any]]
+        if image_paths:
+            user_content = [{"type": "text", "text": prompt}]
+            for image_path in image_paths:
+                user_content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _image_data_uri(Path(image_path))},
+                    }
+                )
+        else:
+            user_content = prompt
         body = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": user_content}],
             "temperature": 0.2,
             "max_tokens": max_output_tokens,
         }
     elif provider.provider_type == "anthropic_messages":
+        if image_paths:
+            raise AIServiceError("当前 Anthropic Provider 尚未实现图片直传，请改用 OpenAI 兼容视觉接口。")
         base = (provider.base_url or "https://api.anthropic.com").rstrip("/")
         if base.endswith("/v1/messages"):
             url = base
@@ -303,6 +336,8 @@ def _build_request(
             "messages": [{"role": "user", "content": prompt}],
         }
     elif provider.provider_type == "gemini_generate_content":
+        if image_paths:
+            raise AIServiceError("当前 Gemini Provider 尚未实现图片直传，请改用 OpenAI 兼容视觉接口。")
         base = (provider.base_url or "https://generativelanguage.googleapis.com").rstrip("/")
         url = f"{base}/v1beta/models/{model}:generateContent"
         body = {
@@ -310,6 +345,8 @@ def _build_request(
             "generationConfig": {"maxOutputTokens": max_output_tokens},
         }
     elif provider.provider_type == "custom_http_json":
+        if image_paths:
+            raise AIServiceError("自定义 HTTP JSON Provider 尚未实现图片直传。")
         url = provider.base_url.strip()
         body = _render_custom_body(provider.request_template_json, prompt, model, max_output_tokens)
     else:
@@ -317,6 +354,15 @@ def _build_request(
 
     url, headers = _apply_auth(url, headers, provider.auth_type, api_key)
     return {"method": "POST", "url": url, "headers": headers, "json": body}
+
+
+def _image_data_uri(path: Path) -> str:
+    if not path.exists():
+        raise AIServiceError(f"页面图片不存在：{path}")
+    suffix = path.suffix.lower()
+    mime = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 def _apply_auth(url: str, headers: dict[str, str], auth_type: str, api_key: str) -> tuple[str, dict[str, str]]:
@@ -398,3 +444,10 @@ def _extract_path(payload: Any, path: str) -> Any:
         else:
             raise AIServiceError(f"响应路径在 {part} 处无法继续访问。")
     return current
+
+
+def _safe_extract_path(payload: Any, path: str) -> Any:
+    try:
+        return _extract_path(payload, path)
+    except AIServiceError:
+        return None

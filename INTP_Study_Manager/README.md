@@ -42,9 +42,10 @@ data/study_manager.db
 2. OpenAI 兼容 Chat Completions
 3. 本地 CLIProxyAPI
 4. 幻城网安 API
-5. Anthropic Messages API
-6. Google Gemini generateContent
-7. 自定义 HTTP JSON API
+5. DeepSeek V4 Pro
+6. Anthropic Messages API
+7. Google Gemini generateContent
+8. 自定义 HTTP JSON API
 
 API Key 默认不会写入 SQLite，也不会保存到项目文件。你可以在页面中临时输入，也可以使用环境变量。
 
@@ -64,6 +65,12 @@ setx CLIPROXY_API_KEY "local-client-key"
 
 ```powershell
 setx IAMHC_API_KEY "你在 api.iamhc.cn 控制台创建的 sk- 令牌"
+```
+
+例如 DeepSeek：
+
+```powershell
+setx DEEPSEEK_API_KEY "你的 DeepSeek sk- 令牌"
 ```
 
 重新打开终端后启动应用，或在页面中临时输入 API Key。
@@ -100,13 +107,14 @@ output_text
 进入“PPT 逐页讲解”页面后：
 
 1. 上传 `.pptx` 或 `.pdf` 文件。
-2. 选择 PPT 和当前页。
+2. 选择 PPT / PDF 资料。
 3. 在“AI API 设置”里选择 Provider。
-4. 左侧查看当前页解析出的文字内容。
-5. 右侧点击“生成 / 更新本页讲解”，AI 会只围绕当前页讲解。
-6. 点击“打开插问浮窗”，提问不会覆盖当前页主线讲解，而是单独保存为本页插问记录。
+4. 点击“生成 / 修复原页面图片”，确保每页都有原页面预览。
+5. 点击“生成整份资料逐页讲解”，AI 会按页依次分析整份资料。
+6. 在同步阅读器左侧滚动原页面，右侧讲解会自动同步到当前可见页。
+7. 点击“打开插问浮窗”，提问不会覆盖主线讲解，而是单独保存为对应页的插问记录。
 
-当前版本优先保证本地可运行和学习流不中断。PPTX 会解析每页文本内容；PDF 会按页提取文字，并在阅读区显示 PDF 原文预览。如果 PDF 是扫描版图片，可能提取不到文字，后续可继续加入 OCR。
+当前版本优先保证本地可运行和学习流不中断。PPTX 会通过本机 PowerPoint 导出原始页面图片；PDF 会通过 PyMuPDF 渲染为页面图片并提取文字。如果 PDF 是扫描版图片，页面会保留原图，并可在“PDF 无法提取文字时，把当前页原图直接发给支持视觉的 API”开启后把页面图片传给支持视觉输入的 OpenAI 兼容模型。
 
 ## 每日学习流程示例
 
