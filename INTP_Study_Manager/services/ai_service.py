@@ -346,6 +346,16 @@ def _build_http_error(response: requests.Response) -> AIServiceError:
             category=category,
             status_code=response.status_code,
         )
+    if category == "model_not_found":
+        return AIServiceError(
+            (
+                f"当前模型在这个 Provider 下不可用（HTTP {response.status_code}）{suffix}。\n"
+                f"上游返回：{concise}\n"
+                "处理方式：在首页或当前页面切换为该 Provider 实际支持的模型，或更换 Provider 后再重试。"
+            ),
+            category=category,
+            status_code=response.status_code,
+        )
     if category == "model_incompatible":
         return AIServiceError(
             (
@@ -392,6 +402,20 @@ def _classify_api_error_text(text: str, status_code: int | None) -> str:
     )
     if status_code == 429 or any(marker in normalized for marker in rate_markers):
         return "rate_limit"
+
+    model_not_found_markers = (
+        "model_not_found",
+        "model not found",
+        "no available channel for model",
+        "no channel for model",
+        "unsupported model",
+        "模型不存在",
+        "模型不可用",
+        "没有可用渠道",
+        "无可用渠道",
+    )
+    if any(marker in normalized for marker in model_not_found_markers):
+        return "model_not_found"
 
     incompatible_markers = (
         "model_incompatible",

@@ -22,13 +22,16 @@
   <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
   <style>
     :root {
-      --bg: #f6f1e8;
-      --ink: #20201d;
-      --muted: #706b61;
-      --line: #ded4c5;
-      --accent: #9a4f23;
-      --panel: #fffaf0;
-      --shadow: rgba(56, 38, 18, 0.14);
+      --bg: #f2fbf8;
+      --ink: #12323d;
+      --muted: #5d7c86;
+      --line: #cbe5ea;
+      --accent: #18a58f;
+      --accent-2: #55b7f4;
+      --panel: #ffffff;
+      --soft-green: #e9f9f2;
+      --soft-blue: #edf8ff;
+      --shadow: rgba(17, 89, 105, 0.13);
     }
     * { box-sizing: border-box; }
     html {
@@ -40,7 +43,7 @@
       margin: 0;
       height: 100%;
       overflow: hidden;
-      background: linear-gradient(135deg, #f7efe3, #eee5d4);
+      background: linear-gradient(135deg, #f5fffb, #eef8ff);
       color: var(--ink);
       font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif;
       overscroll-behavior: none;
@@ -59,7 +62,7 @@
       align-items: center;
       justify-content: space-between;
       padding: 0 20px;
-      background: rgba(255, 250, 240, 0.94);
+      background: rgba(249, 255, 253, 0.96);
       border-bottom: 1px solid var(--line);
     }
     .title {
@@ -74,10 +77,66 @@
       color: var(--accent);
       font-weight: 800;
     }
+    .layout-controls {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-right: 14px;
+    }
+    .layout-controls button {
+      border: 1px solid #b9dde6;
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: #ffffff;
+      color: #24606f;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      box-shadow: 0 4px 12px rgba(24, 111, 130, 0.08);
+    }
+    .layout-controls button:hover {
+      border-color: var(--accent);
+      color: #087b70;
+      background: var(--soft-green);
+    }
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
     .grid {
       height: calc(100% - 58px);
       display: grid;
-      grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.72fr) minmax(330px, 0.48fr);
+      grid-template-columns: minmax(260px, 1.15fr) 8px minmax(300px, 0.85fr) 8px minmax(330px, 0.55fr);
+      transition: grid-template-columns .14s ease;
+    }
+    .resize-handle {
+      position: relative;
+      width: 8px;
+      height: 100%;
+      background: linear-gradient(180deg, #dbf3f2, #eaf7ff);
+      border-left: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+      cursor: col-resize;
+      z-index: 5;
+    }
+    .resize-handle::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 3px;
+      height: 42px;
+      border-radius: 999px;
+      transform: translate(-50%, -50%);
+      background: #8ccfd0;
+      box-shadow: 0 0 0 4px rgba(24, 165, 143, 0.08);
+    }
+    .resize-handle:hover::after,
+    .resize-handle.dragging::after {
+      background: var(--accent);
+      box-shadow: 0 0 0 5px rgba(24, 165, 143, 0.18);
     }
     .pages, .notes {
       height: 100%;
@@ -89,9 +148,8 @@
     .pages {
       padding: 22px 24px 80px;
       background:
-        radial-gradient(circle at 10% 10%, rgba(154,79,35,.08), transparent 28%),
-        #eee6d7;
-      border-right: 1px solid var(--line);
+        radial-gradient(circle at 10% 10%, rgba(85,183,244,.16), transparent 28%),
+        linear-gradient(180deg, #f3fbff, #eefaf6);
     }
     .page {
       margin: 0 auto 30px;
@@ -100,13 +158,13 @@
       border-radius: 14px;
       border: 2px solid transparent;
       background: rgba(255,255,255,.56);
-      box-shadow: 0 10px 28px rgba(48,34,17,.16);
+      box-shadow: 0 10px 28px rgba(20,85,98,.13);
       transition: border-color .18s, transform .18s, box-shadow .18s;
     }
     .page.active {
       border-color: var(--accent);
       transform: translateY(-2px);
-      box-shadow: 0 16px 38px rgba(120,70,28,.26);
+      box-shadow: 0 16px 38px rgba(24,165,143,.22);
     }
     .page-label {
       display: flex;
@@ -134,15 +192,15 @@
       border: 1px solid var(--line);
       border-left: 5px solid transparent;
       border-radius: 16px;
-      background: #fffdf7;
-      box-shadow: 0 8px 18px rgba(70,45,18,.08);
+      background: #ffffff;
+      box-shadow: 0 8px 18px rgba(19,87,101,.08);
       transition: border-color .18s, background .18s;
       line-height: 1.72;
       font-size: 15px;
     }
     .note.active {
       border-left-color: var(--accent);
-      background: #fff7e8;
+      background: #effbf7;
     }
     .note h3 {
       margin: 0 0 10px;
@@ -162,7 +220,7 @@
     .note-body h3,
     .note-body h4 {
       margin: 16px 0 8px;
-      color: #7f3f1a;
+      color: #0f7f78;
       line-height: 1.35;
     }
     .note-body h1 { font-size: 21px; }
@@ -178,24 +236,24 @@
     .note-body blockquote {
       margin: 12px 0;
       padding: 8px 12px;
-      border-left: 4px solid #c98245;
-      background: #fff3df;
-      color: #5c5144;
+      border-left: 4px solid #68c9ae;
+      background: #ecfbf5;
+      color: #365967;
     }
     .note-body pre {
       margin: 12px 0;
       padding: 12px;
       overflow-x: auto;
       border-radius: 10px;
-      background: #28231d;
-      color: #f9efe0;
+      background: #12323d;
+      color: #eafffb;
       line-height: 1.55;
     }
     .note-body code {
       padding: 2px 5px;
       border-radius: 5px;
-      background: #efe2cd;
-      color: #6f3718;
+      background: #e7f7f4;
+      color: #087b70;
       font-family: "Cascadia Code", "Consolas", monospace;
       font-size: 0.92em;
     }
@@ -214,14 +272,14 @@
     }
     .note-body th,
     .note-body td {
-      border: 1px solid #dbc8ac;
+      border: 1px solid #cbe5ea;
       padding: 7px 9px;
       text-align: left;
       vertical-align: top;
     }
     .note-body th {
-      background: #f2dfbf;
-      color: #653314;
+      background: #e7f7ff;
+      color: #155f7a;
     }
     .note-body hr {
       border: 0;
@@ -242,11 +300,11 @@
       gap: 8px;
       max-width: min(560px, calc(100vw - 24px));
       padding: 9px 10px;
-      border: 1px solid rgba(86, 48, 18, 0.18);
+      border: 1px solid rgba(31, 145, 154, 0.22);
       border-radius: 999px;
-      background: rgba(38, 27, 16, 0.94);
-      color: #fff8ea;
-      box-shadow: 0 12px 34px rgba(24, 14, 5, 0.28);
+      background: rgba(247, 255, 253, 0.98);
+      color: var(--ink);
+      box-shadow: 0 12px 34px rgba(18, 97, 112, 0.18);
       font-size: 13px;
     }
     .selection-toolbar.show { display: flex; }
@@ -254,43 +312,94 @@
       border: 0;
       border-radius: 999px;
       padding: 7px 11px;
-      background: #f0b35f;
-      color: #2d1a0c;
+      background: var(--accent);
+      color: #ffffff;
       font-weight: 800;
       cursor: pointer;
       white-space: nowrap;
     }
     .selection-toolbar button.secondary {
-      background: rgba(255, 255, 255, 0.14);
-      color: #fff8ea;
+      background: #e6f6ff;
+      color: #1f6b86;
     }
     .selection-toolbar span {
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      color: #e8d8bf;
+      color: #557783;
     }
     .canvas-chat {
       height: 100%;
       display: grid;
       grid-template-rows: auto auto minmax(0, 1fr) auto;
-      border-left: 1px solid var(--line);
       background:
-        linear-gradient(180deg, rgba(255,250,240,.98), rgba(246,233,211,.98)),
+        linear-gradient(180deg, rgba(250,255,253,.98), rgba(236,248,255,.98)),
         var(--panel);
-      box-shadow: inset 10px 0 28px rgba(79, 49, 17, 0.06);
+      box-shadow: inset 10px 0 28px rgba(24, 119, 140, 0.06);
       overflow: hidden;
+    }
+    .canvas-chat.collapsed {
+      display: flex;
+      align-items: stretch;
+      justify-content: center;
+      background: linear-gradient(180deg, #eaf8ff, #e9fbf3);
+    }
+    .canvas-chat.collapsed .canvas-chat-header,
+    .canvas-chat.collapsed .canvas-context,
+    .canvas-chat.collapsed .canvas-messages,
+    .canvas-chat.collapsed .canvas-compose {
+      display: none;
+    }
+    .canvas-collapsed-rail {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      padding: 12px 6px;
+    }
+    .canvas-chat.collapsed .canvas-collapsed-rail {
+      display: flex;
+    }
+    .canvas-collapsed-rail button {
+      width: 34px;
+      min-height: 170px;
+      border: 1px solid #a8dce4;
+      border-radius: 999px;
+      background: #ffffff;
+      color: #087b70;
+      font-weight: 900;
+      cursor: pointer;
+      writing-mode: vertical-rl;
+      letter-spacing: .08em;
+      box-shadow: 0 10px 22px rgba(20, 105, 128, 0.14);
     }
     .canvas-chat-header {
       padding: 16px 16px 12px;
       border-bottom: 1px solid var(--line);
     }
+    .canvas-chat-header-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
     .canvas-chat-title {
       margin: 0;
-      color: #6f3718;
+      color: #087b70;
       font-size: 16px;
       font-weight: 900;
+    }
+    .canvas-toggle {
+      border: 1px solid #b9dde6;
+      border-radius: 999px;
+      padding: 5px 9px;
+      background: #ffffff;
+      color: #24606f;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
     }
     .canvas-chat-meta {
       margin-top: 5px;
@@ -301,8 +410,8 @@
     .canvas-context {
       padding: 10px 16px;
       border-bottom: 1px solid var(--line);
-      background: rgba(255, 246, 229, 0.86);
-      color: #5c5144;
+      background: rgba(235, 249, 246, 0.86);
+      color: #355d68;
       font-size: 13px;
       line-height: 1.5;
     }
@@ -316,8 +425,9 @@
       margin: 16px 4px;
       padding: 14px;
       border: 1px dashed #cdb793;
+      border-color: #a9d8e5;
       border-radius: 14px;
-      color: #786a58;
+      color: #5d7c86;
       background: rgba(255,255,255,.48);
       font-size: 13px;
       line-height: 1.65;
@@ -335,16 +445,16 @@
     }
     .chat-question {
       margin-left: 26px;
-      background: #7a421f;
-      color: #fff8ea;
+      background: linear-gradient(135deg, #18a58f, #43a9e8);
+      color: #ffffff;
       border-bottom-right-radius: 5px;
     }
     .chat-answer {
       margin-top: 8px;
       margin-right: 22px;
-      border: 1px solid #dfcfb7;
-      background: #fffdf7;
-      color: #2d2821;
+      border: 1px solid #cbe5ea;
+      background: #ffffff;
+      color: var(--ink);
       border-bottom-left-radius: 5px;
     }
     .chat-answer h1,
@@ -352,7 +462,7 @@
     .chat-answer h3,
     .chat-answer h4 {
       margin: 12px 0 6px;
-      color: #7f3f1a;
+      color: #0f7f78;
       line-height: 1.35;
     }
     .chat-answer p { margin: 7px 0; }
@@ -364,29 +474,29 @@
     .chat-answer code {
       padding: 2px 5px;
       border-radius: 5px;
-      background: #efe2cd;
-      color: #6f3718;
+      background: #e7f7f4;
+      color: #087b70;
       font-family: "Cascadia Code", "Consolas", monospace;
       font-size: 0.92em;
     }
     .chat-turn-meta {
       margin: 6px 2px 0;
-      color: #8a7a66;
+      color: #6f8c96;
       font-size: 11px;
     }
     .canvas-compose {
       padding: 12px 14px 14px;
       border-top: 1px solid var(--line);
-      background: rgba(255, 250, 240, 0.98);
+      background: rgba(250, 255, 253, 0.98);
     }
     .quote-preview {
       display: none;
       margin-bottom: 8px;
       padding: 9px 10px;
-      border: 1px solid #d4b88c;
+      border: 1px solid #a8dce4;
       border-radius: 12px;
-      background: #fff1d8;
-      color: #5f431f;
+      background: #edf8ff;
+      color: #1f5d70;
       font-size: 12px;
       line-height: 1.45;
     }
@@ -397,7 +507,7 @@
       float: right;
       border: 0;
       background: transparent;
-      color: #7a421f;
+      color: #087b70;
       cursor: pointer;
       font-weight: 900;
     }
@@ -406,9 +516,9 @@
       min-height: 82px;
       resize: vertical;
       padding: 10px 11px;
-      border: 1px solid #d7c4a6;
+      border: 1px solid #b9dde6;
       border-radius: 13px;
-      background: #fffdf8;
+      background: #ffffff;
       color: var(--ink);
       font-family: inherit;
       font-size: 14px;
@@ -417,7 +527,7 @@
     }
     .canvas-input:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(154, 79, 35, 0.13);
+      box-shadow: 0 0 0 3px rgba(24, 165, 143, 0.13);
     }
     .canvas-actions {
       display: flex;
@@ -434,8 +544,8 @@
       border: 0;
       border-radius: 999px;
       padding: 8px 14px;
-      background: #9a4f23;
-      color: #fff8ea;
+      background: var(--accent);
+      color: #ffffff;
       font-weight: 900;
       cursor: pointer;
       white-space: nowrap;
@@ -445,10 +555,12 @@
       cursor: not-allowed;
     }
     @media (max-width: 900px) {
-      .grid { grid-template-columns: 1fr; }
+      .grid { grid-template-columns: 1fr !important; }
+      .resize-handle { display: none; }
       .notes,
       .canvas-chat { display: none; }
       .pages { border-right: 0; }
+      .layout-controls { display: none; }
     }
   </style>
 </head>
@@ -459,14 +571,30 @@
         <div class="title" id="deckTitle">学习资料</div>
         <div class="meta" id="deckMeta">未分类 · 原页面同步阅读</div>
       </div>
-      <div class="current" id="currentPage">第 1 页</div>
+      <div class="topbar-right">
+        <div class="layout-controls" aria-label="阅读器宽度比例">
+          <button type="button" data-layout-preset="balanced">均衡</button>
+          <button type="button" data-layout-preset="reading">原页优先</button>
+          <button type="button" data-layout-preset="notes">讲解优先</button>
+          <button type="button" data-layout-preset="chat">插问优先</button>
+        </div>
+        <div class="current" id="currentPage">第 1 页</div>
+      </div>
     </div>
-    <div class="grid">
+    <div class="grid" id="readerGrid">
       <section class="pages" id="pages"></section>
+      <div class="resize-handle" data-resize-handle="pages-notes" title="拖拽调整原页面和讲解区宽度"></div>
       <aside class="notes" id="notes"></aside>
+      <div class="resize-handle" data-resize-handle="notes-chat" title="拖拽调整讲解区和插问区宽度"></div>
       <aside class="canvas-chat" id="canvasChat">
+        <div class="canvas-collapsed-rail">
+          <button type="button" id="openCanvasButton">展开插问</button>
+        </div>
         <header class="canvas-chat-header">
-          <h3 class="canvas-chat-title">侧边插问</h3>
+          <div class="canvas-chat-header-row">
+            <h3 class="canvas-chat-title">侧边插问</h3>
+            <button type="button" class="canvas-toggle" id="toggleCanvasButton">收起</button>
+          </div>
           <div class="canvas-chat-meta" id="canvasChatMeta">跟随当前页，不改变阅读位置</div>
         </header>
         <div class="canvas-context" id="canvasContext">当前上下文：第 1 页</div>
@@ -516,6 +644,7 @@
     };
 
     const frame = document.getElementById('frame');
+    const readerGrid = document.getElementById('readerGrid');
     const deckTitle = document.getElementById('deckTitle');
     const deckMeta = document.getElementById('deckMeta');
     const pageRoot = document.getElementById('pages');
@@ -526,6 +655,8 @@
     const copySelectionButton = document.getElementById('copySelectionButton');
     const selectionHint = document.getElementById('selectionHint');
     const canvasChat = document.getElementById('canvasChat');
+    const toggleCanvasButton = document.getElementById('toggleCanvasButton');
+    const openCanvasButton = document.getElementById('openCanvasButton');
     const canvasChatMeta = document.getElementById('canvasChatMeta');
     const canvasContext = document.getElementById('canvasContext');
     const canvasMessages = document.getElementById('canvasMessages');
@@ -544,6 +675,9 @@
     let currentSlideNumber = 1;
     let currentChatQuote = null;
     let restoreScrollAfterRender = null;
+    let layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+    let chatCollapsed = false;
+    let activeResize = null;
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -578,6 +712,115 @@
 
     function storageKey(name) {
       return `intp_synced_reader_${deckId}_${name}`;
+    }
+
+    function globalStorageKey(name) {
+      return `intp_synced_reader_global_${name}`;
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function loadLayoutState() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(globalStorageKey('layout')) || '{}');
+        if (Number.isFinite(saved.pages) && Number.isFinite(saved.notes) && Number.isFinite(saved.chat)) {
+          layoutState = {
+            pages: clamp(saved.pages, 0.35, 3.2),
+            notes: clamp(saved.notes, 0.35, 3.2),
+            chat: clamp(saved.chat, 0.28, 2.4),
+          };
+        }
+        chatCollapsed = localStorage.getItem(globalStorageKey('chatCollapsed')) === 'true';
+      } catch {
+        layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+        chatCollapsed = false;
+      }
+      applyLayoutState();
+    }
+
+    function saveLayoutState() {
+      localStorage.setItem(globalStorageKey('layout'), JSON.stringify(layoutState));
+      localStorage.setItem(globalStorageKey('chatCollapsed'), String(chatCollapsed));
+    }
+
+    function applyLayoutState() {
+      if (!readerGrid) return;
+      const chatColumn = chatCollapsed ? '48px' : `minmax(330px, ${layoutState.chat}fr)`;
+      readerGrid.style.gridTemplateColumns = `minmax(260px, ${layoutState.pages}fr) 8px minmax(300px, ${layoutState.notes}fr) 8px ${chatColumn}`;
+      canvasChat.classList.toggle('collapsed', chatCollapsed);
+      if (toggleCanvasButton) toggleCanvasButton.textContent = chatCollapsed ? '展开' : '收起';
+    }
+
+    function setLayoutPreset(name) {
+      const presets = {
+        balanced: { pages: 1, notes: 1, chat: 0.72 },
+        reading: { pages: 1.55, notes: 0.82, chat: 0.5 },
+        notes: { pages: 0.86, notes: 1.45, chat: 0.56 },
+        chat: { pages: 0.85, notes: 0.82, chat: 1.05 },
+      };
+      layoutState = presets[name] || presets.balanced;
+      if (name === 'chat') chatCollapsed = false;
+      applyLayoutState();
+      saveLayoutState();
+    }
+
+    function openCanvasChat(focusInput = false) {
+      if (chatCollapsed) {
+        chatCollapsed = false;
+        applyLayoutState();
+        saveLayoutState();
+      }
+      if (focusInput) {
+        window.setTimeout(() => canvasInput?.focus(), 80);
+      }
+    }
+
+    function toggleCanvasChat() {
+      chatCollapsed = !chatCollapsed;
+      applyLayoutState();
+      saveLayoutState();
+    }
+
+    function startResize(event) {
+      const handle = event.target.closest('[data-resize-handle]');
+      if (!handle) return;
+      event.preventDefault();
+      activeResize = {
+        handle,
+        kind: handle.dataset.resizeHandle,
+        startX: event.clientX,
+        start: { ...layoutState },
+      };
+      handle.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    }
+
+    function updateResize(event) {
+      if (!activeResize) return;
+      event.preventDefault();
+      const gridWidth = Math.max(1, readerGrid.getBoundingClientRect().width);
+      const delta = (event.clientX - activeResize.startX) / gridWidth * 4;
+      if (activeResize.kind === 'pages-notes') {
+        layoutState.pages = clamp(activeResize.start.pages + delta, 0.35, 3.2);
+        layoutState.notes = clamp(activeResize.start.notes - delta, 0.35, 3.2);
+      } else {
+        layoutState.notes = clamp(activeResize.start.notes + delta, 0.35, 3.2);
+        layoutState.chat = clamp(activeResize.start.chat - delta, 0.28, 2.4);
+        if (chatCollapsed && delta < -0.02) chatCollapsed = false;
+      }
+      applyLayoutState();
+    }
+
+    function stopResize() {
+      if (!activeResize) return;
+      activeResize.handle.classList.remove('dragging');
+      activeResize = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      saveLayoutState();
     }
 
     function saveScrollState() {
@@ -627,6 +870,7 @@
       const height = Number(args.height || 850);
       frame.style.height = `${Math.max(360, height - 15)}px`;
       Streamlit.setFrameHeight(height);
+      loadLayoutState();
 
       deckTitle.textContent = String(args.title || '学习资料');
       deckMeta.textContent = `${String(args.subject || '未分类')} · 原页面同步阅读`;
@@ -742,6 +986,7 @@
         return;
       }
       currentSelectionPayload = payload;
+      openCanvasChat(false);
       const selection = window.getSelection();
       const rect = selection.getRangeAt(0).getBoundingClientRect();
       const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - 570));
@@ -838,6 +1083,7 @@
     function sendSelectionToBranch() {
       const payload = currentSelectionPayload || buildSelectionPayload();
       if (!payload) return;
+      openCanvasChat(true);
       currentChatQuote = payload;
       renderQuotePreview();
       canvasInput.focus();
@@ -859,6 +1105,14 @@
     askSelectionButton.addEventListener('click', sendSelectionToBranch);
     copySelectionButton.addEventListener('click', copyCurrentSelection);
     canvasSendButton.addEventListener('click', sendCanvasQuestion);
+    toggleCanvasButton.addEventListener('click', toggleCanvasChat);
+    openCanvasButton.addEventListener('click', () => openCanvasChat(true));
+    document.querySelectorAll('[data-layout-preset]').forEach(button => {
+      button.addEventListener('click', () => setLayoutPreset(button.dataset.layoutPreset));
+    });
+    readerGrid.addEventListener('mousedown', startResize);
+    window.addEventListener('mousemove', updateResize);
+    window.addEventListener('mouseup', stopResize);
     clearQuoteButton.addEventListener('click', () => {
       currentChatQuote = null;
       renderQuotePreview();
