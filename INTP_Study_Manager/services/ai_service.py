@@ -18,6 +18,7 @@ PROVIDER_TYPES = {
     "openai_chat": "OpenAI 兼容 Chat Completions",
     "anthropic_messages": "Anthropic Messages API",
     "gemini_generate_content": "Google Gemini generateContent",
+    "cohere_chat": "Cohere Chat API",
     "custom_http_json": "自定义 HTTP JSON",
     "minimax_chat": "MiniMax Chat API",
 }
@@ -106,6 +107,128 @@ DEFAULT_PROVIDERS = [
         "base_url": "https://api.minimax.chat/v1",
         "model": "MiniMax-M2.7",
         "api_key_env": "MINIMAX_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "choices.0.message.content",
+    },
+    # === 2026年新增主流 Provider ===
+    {
+        "name": "智谱 AI (GLM)",
+        "provider_type": "openai_chat",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-4-flash",
+        "api_key_env": "ZHIPU_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "choices.0.message.content",
+    },
+    {
+        "name": "阿里云通义千问 (Qwen)",
+        "provider_type": "openai_chat",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-max",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "choices.0.message.content",
+    },
+    {
+        "name": "腾讯混元 (Hunyuan)",
+        "provider_type": "openai_chat",
+        "base_url": "https://hunyuan.cloud.tencent.com/v1",
+        "model": "hunyuan-pro",
+        "api_key_env": "HUNYUAN_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "choices.0.message.content",
+    },
+    {
+        "name": "Cohere",
+        "provider_type": "cohere_chat",
+        "base_url": "https://api.cohere.ai/v2",
+        "model": "command-r-plus",
+        "api_key_env": "COHERE_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "generations.0.text",
+    },
+    {
+        "name": "Mistral AI",
+        "provider_type": "openai_chat",
+        "base_url": "https://api.mistral.ai/v1",
+        "model": "mistral-large",
+        "api_key_env": "MISTRAL_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "choices.0.message.content",
+    },
+    {
+        "name": "Grok (xAI)",
+        "provider_type": "openai_chat",
+        "base_url": "https://api.x.ai/v1",
+        "model": "grok-3",
+        "api_key_env": "XAI_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "choices.0.message.content",
+    },
+    {
+        "name": "硅基流动 (SiliconFlow)",
+        "provider_type": "openai_chat",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "model": "Qwen/Qwen2.5-72B-Instruct",
+        "api_key_env": "SILICONFLOW_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "choices.0.message.content",
+    },
+    {
+        "name": "字节豆包 (Doubao)",
+        "provider_type": "openai_chat",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "model": "doubao-pro-32k",
+        "api_key_env": "DOUBAO_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "choices.0.message.content",
+    },
+    {
+        "name": "Kimi (Moonshot)",
+        "provider_type": "openai_chat",
+        "base_url": "https://api.moonshot.cn/v1",
+        "model": "moonshot-v1-128k",
+        "api_key_env": "MOONSHOT_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "choices.0.message.content",
+    },
+    {
+        "name": "Groq",
+        "provider_type": "openai_chat",
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": "llama-4-scout",
+        "api_key_env": "GROQ_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "choices.0.message.content",
+    },
+    {
+        "name": "Perplexity",
+        "provider_type": "openai_chat",
+        "base_url": "https://api.perplexity.ai",
+        "model": "sonar-pro",
+        "api_key_env": "PERPLEXITY_API_KEY",
         "auth_type": "bearer",
         "extra_headers_json": "{}",
         "request_template_json": "",
@@ -539,6 +662,14 @@ def _build_request(
             "temperature": 0.7,
             "max_tokens": max_output_tokens,
         }
+    elif provider.provider_type == "cohere_chat":
+        url = _join_url(provider.base_url or "https://api.cohere.ai/v2", "chat")
+        body = {
+            "model": model,
+            "message": prompt,
+            "max_tokens": max_output_tokens,
+            "temperature": 0.7,
+        }
     else:
         raise AIServiceError(f"未知 Provider 类型：{provider.provider_type}")
 
@@ -640,6 +771,8 @@ def _list_models_impl(provider: dict[str, Any], api_key: str | None) -> list[str
         return _list_gemini_models(provider, api_key)
     if provider_type == "minimax_chat":
         return _list_minimax_models(base_url, key)
+    if provider_type == "cohere_chat":
+        return _list_cohere_models(base_url, key)
     return []
 
 
@@ -740,6 +873,30 @@ def _list_minimax_models(base_url: str, api_key: str) -> list[str]:
     return sorted(set(models))
 
 
+def _list_cohere_models(base_url: str, api_key: str) -> list[str]:
+    """通过 Cohere /v2/models 接口获取模型列表。"""
+    if not base_url or not api_key:
+        return []
+    url = f"{base_url}/models"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+    except requests.RequestException:
+        return []
+    if resp.status_code != 200:
+        return []
+    try:
+        data = resp.json()
+    except ValueError:
+        return []
+    models = []
+    for m in data.get("models", []):
+        mid = m.get("name") or m.get("id")
+        if mid:
+            models.append(str(mid))
+    return sorted(set(models))
+
+
 def _default_response_path(provider_type: str) -> str:
     return {
         "openai_responses": "output_text",
@@ -747,6 +904,7 @@ def _default_response_path(provider_type: str) -> str:
         "anthropic_messages": "content.0.text",
         "gemini_generate_content": "candidates.0.content.parts.0.text",
         "minimax_chat": "choices.0.message.content",
+        "cohere_chat": "generations.0.text",
     }.get(provider_type, "")
 
 

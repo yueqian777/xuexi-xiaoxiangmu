@@ -40,18 +40,44 @@ data/study_manager.db
 
 ## API 接入设置
 
-项目支持多种 AI API 接入，不再固定依赖 OpenAI 官方接口。进入“API 接入设置”页面后，可以选择或新增 Provider。
+项目支持多种 AI API 接入，不再固定依赖 OpenAI 官方接口。进入”API 接入设置”页面后，可以选择或新增 Provider。
 
 当前内置模板包括：
 
-1. OpenAI Responses API
-2. OpenAI 兼容 Chat Completions
-3. 本地 CLIProxyAPI
-4. 幻城网安 API
-5. DeepSeek V4 Pro
-6. Anthropic Messages API
-7. Google Gemini generateContent
-8. 自定义 HTTP JSON API
+### 国际主流
+
+| Provider | API 类型 | 默认模型 | 环境变量 |
+|---|---|---|---|
+| OpenAI Responses | OpenAI Responses API | gpt-5.5 | `OPENAI_API_KEY` |
+| OpenAI 兼容接口 | OpenAI Chat Completions | gpt-5.5 | `OPENAI_API_KEY` |
+| Anthropic Messages | Anthropic Messages API | claude-sonnet-4-5 | `ANTHROPIC_API_KEY` |
+| Google Gemini | Google Gemini generateContent | gemini-2.5-pro | `GEMINI_API_KEY` |
+| Mistral AI | OpenAI Chat Completions | mistral-large | `MISTRAL_API_KEY` |
+| Cohere | Cohere Chat API | command-r-plus | `COHERE_API_KEY` |
+| Grok (xAI) | OpenAI Chat Completions | grok-3 | `XAI_API_KEY` |
+| Groq | OpenAI Chat Completions | llama-4-scout | `GROQ_API_KEY` |
+| Perplexity | OpenAI Chat Completions | sonar-pro | `PERPLEXITY_API_KEY` |
+
+### 国内主流
+
+| Provider | API 类型 | 默认模型 | 环境变量 |
+|---|---|---|---|
+| 智谱 AI (GLM) | OpenAI Chat Completions | glm-4-flash | `ZHIPU_API_KEY` |
+| 阿里云通义千问 (Qwen) | OpenAI Chat Completions | qwen-max | `DASHSCOPE_API_KEY` |
+| 腾讯混元 (Hunyuan) | OpenAI Chat Completions | hunyuan-pro | `HUNYUAN_API_KEY` |
+| Kimi (Moonshot) | OpenAI Chat Completions | moonshot-v1-128k | `MOONSHOT_API_KEY` |
+| 字节豆包 (Doubao) | OpenAI Chat Completions | doubao-pro-32k | `DOUBAO_API_KEY` |
+| MiniMax | MiniMax Chat API | MiniMax-M2.7 | `MINIMAX_API_KEY` |
+| 硅基流动 (SiliconFlow) | OpenAI Chat Completions | Qwen2.5-72B-Instruct | `SILICONFLOW_API_KEY` |
+| DeepSeek V4 Pro | OpenAI Chat Completions | deepseek-v4-pro | `DEEPSEEK_API_KEY` |
+
+### 其他
+
+| Provider | API 类型 | 默认模型 | 环境变量 |
+|---|---|---|---|
+| 本地 CLIProxyAPI | OpenAI Chat Completions | gpt-5.5 | `CLIPROXY_API_KEY` |
+| 幻城网安 API | OpenAI Chat Completions | auto | `IAMHC_API_KEY` |
+| 自定义 HTTP JSON API | 自定义 HTTP JSON | - | - |
 
 API Key 默认不会写入 SQLite，也不会保存到项目文件。你可以在页面中临时输入，也可以使用环境变量。
 
