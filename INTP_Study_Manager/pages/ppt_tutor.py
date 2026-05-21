@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import html
 import json
+import os
 import threading
 from datetime import date
 from pathlib import Path
@@ -18,6 +19,7 @@ from services.ai_service import (
     generate_text,
     is_quota_error,
     list_api_providers,
+    list_available_models,
     provider_label,
 )
 from services.api_key_ui import render_local_secret_unlock
@@ -118,17 +120,10 @@ def _render_api_settings() -> None:
         provider = next(p for p in providers if p["id"] == provider_id)
         ensure_provider_model(provider)
 
-        model = st.text_input(
-            "当前 API 临时模型",
-            key=provider_model_state_key(provider_id),
-            help="这个模型跟随当前 Provider 保存；切换 API 后会恢复该 API 自己的临时模型。",
-        )
-        active_model = model.strip() or provider.get("model") or DEFAULT_MODEL
-        set_active_provider(provider_id, active_model)
         key_name = f"api_key_provider_{provider_id}"
         render_local_secret_unlock(
             provider,
-            model=active_model,
+            model=provider.get("model") or DEFAULT_MODEL,
             target_session_key=key_name,
             key_prefix=f"ppt_provider_{provider_id}",
         )
@@ -139,6 +134,38 @@ def _render_api_settings() -> None:
             placeholder=f"不填写则读取环境变量 {provider.get('api_key_env') or '未设置'}",
         )
         st.session_state[key_name] = api_key
+
+        available_models = []
+        if api_key or os.getenv(provider.get("api_key_env") or ""):
+            available_models = list_available_models(provider, api_key=api_key)
+
+        model_key = provider_model_state_key(provider_id)
+        current_model = st.session_state.get(model_key, "").strip()
+        if not current_model:
+            current_model = provider.get("model") or DEFAULT_MODEL
+
+        if available_models:
+            model_index = 0
+            if current_model in available_models:
+                model_index = available_models.index(current_model)
+            model = st.selectbox(
+                "模型（已扫描）",
+                available_models,
+                index=model_index,
+                key=model_key,
+                help="已扫描到的可用模型。",
+            )
+            st.caption(f"✅ 已扫描到 {len(available_models)} 个可用模型")
+        else:
+            model = st.text_input(
+                "当前 API 临时模型（未扫描到可用模型）",
+                value=current_model,
+                key=model_key,
+                help="无法自动扫描此 Provider 的可用模型，请手动输入模型名称。",
+            )
+            st.caption("⚠️ 无法扫描到此 Provider 的可用模型列表，请手动填写模型名。")
+        active_model = model.strip() or provider.get("model") or DEFAULT_MODEL
+        set_active_provider(provider_id, active_model)
         max_tokens = st.number_input(
             "最大输出 token",
             min_value=512,

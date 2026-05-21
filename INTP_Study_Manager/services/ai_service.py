@@ -615,6 +615,131 @@ def _normalize_json_text(text: str, default: str) -> str:
     return text.strip() if text and text.strip() else default
 
 
+def list_available_models(
+    provider: dict[str, Any],
+    api_key: str | None = None,
+) -> list[str]:
+    """获取 provider 支持的模型列表，失败时返回空列表。"""
+    try:
+        return _list_models_impl(provider, api_key)
+    except Exception:
+        return []
+
+
+def _list_models_impl(provider: dict[str, Any], api_key: str | None) -> list[str]:
+    """各 provider 的 list_models 实现。"""
+    provider_type = provider.get("provider_type", "")
+    base_url = (provider.get("base_url") or "").strip().rstrip("/")
+    key = _resolve_api_key_for_list(provider, api_key)
+
+    if provider_type in ("openai_responses", "openai_chat"):
+        return _list_openai_models(base_url, key)
+    if provider_type == "anthropic_messages":
+        return _list_anthropic_models(base_url, key)
+    if provider_type == "gemini_generate_content":
+        return _list_gemini_models(provider, api_key)
+    if provider_type == "minimax_chat":
+        return _list_minimax_models(base_url, key)
+    return []
+
+
+def _resolve_api_key_for_list(provider: dict[str, Any], api_key: str | None) -> str:
+    """从 api_key 或环境变量获取 API key。"""
+    key = (api_key or "").strip()
+    if not key and provider.get("api_key_env"):
+        key = (os.getenv(provider["api_key_env"]) or "").strip()
+    if not key and provider.get("name") == "本地 CLIProxyAPI":
+        key = "local-client-key"
+    return key
+
+
+def _list_openai_models(base_url: str, api_key: str) -> list[str]:
+    """通过 OpenAI 兼容的 /models 接口获取模型列表。"""
+    if not base_url or not api_key:
+        return []
+    url = f"{base_url}/models"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    resp = requests.get(url, headers=headers, timeout=30)
+    if resp.status_code != 200:
+        return []
+    try:
+        data = resp.json()
+    except ValueError:
+        return []
+    models: list[str] = []
+    for item in data.get("data", []):
+        mid = item.get("id") or item.get("id")
+        if mid:
+            models.append(str(mid))
+    return sorted(set(models))
+
+
+def _list_anthropic_models(_base_url: str, _api_key: str) -> list[str]:
+    """Anthropic 不提供 list_models API，返回已知模型列表。"""
+    # Anthropic 没有公开的 list_models 接口，基于已知模型返回
+    known = [
+        "claude-sonnet-4-7",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "claude-opus-4-7",
+        "claude-3-5-sonnet-latest",
+        "claude-3-5-haiku-latest",
+        "claude-3-opus-latest",
+        "claude-3-sonnet-latest",
+        "claude-3-haiku-latest",
+    ]
+    return known
+
+
+def _list_gemini_models(provider: dict[str, Any], api_key: str | None) -> list[str]:
+    """通过 Google AI models:list API 获取模型列表。"""
+    key = _resolve_api_key_for_list(provider, api_key)
+    if not key:
+        return []
+    base = (provider.get("base_url") or "https://generativelanguage.googleapis").rstrip("/")
+    url = f"{base}/v1beta/models?key={key}"
+    try:
+        resp = requests.get(url, timeout=30)
+    except requests.RequestException:
+        return []
+    if resp.status_code != 200:
+        return []
+    try:
+        data = resp.json()
+    except ValueError:
+        return []
+    models = []
+    for m in data.get("models", []):
+        name = m.get("name", "")
+        if name:
+            models.append(name.removeprefix("models/"))
+    return sorted(set(models))
+
+
+def _list_minimax_models(base_url: str, api_key: str) -> list[str]:
+    """通过 MiniMax /v1/models 接口获取模型列表。"""
+    if not base_url or not api_key:
+        return []
+    url = f"{base_url}/models"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+    except requests.RequestException:
+        return []
+    if resp.status_code != 200:
+        return []
+    try:
+        data = resp.json()
+    except ValueError:
+        return []
+    models = []
+    for item in data.get("data", []):
+        mid = item.get("id") or item.get("model_id") or item.get("name")
+        if mid:
+            models.append(str(mid))
+    return sorted(set(models))
+
+
 def _default_response_path(provider_type: str) -> str:
     return {
         "openai_responses": "output_text",
