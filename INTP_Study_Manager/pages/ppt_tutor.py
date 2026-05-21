@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import html
 import json
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -46,6 +47,7 @@ def render() -> None:
     st.title("PPT 逐页讲解")
     st.caption("边看 PPT 边让 GPT 按页讲解；插问单独进入浮窗，不覆盖当前页主线讲解。")
 
+    _resume_interrupted_generation()
     _render_api_settings()
     decks = fetch_all(
         """
@@ -215,6 +217,7 @@ def _render_deck_actions(deck: dict, slides: list[dict], latest_by_slide_id: dic
         st.warning("当前 Provider / 模型看起来不支持图片输入。空白扫描页会被跳过；请切换视觉模型，或重新导入可提取文字的 PDF。")
     selected_slides, range_label = _select_generation_range(slides)
     st.caption(f"当前生成范围：{range_label}；将逐页调用 API 并保存到右侧讲解区。")
+    run_in_background = st.checkbox("后台运行（切换页面时继续生成）", value=True)
     if st.button("生成所选范围逐页讲解", type="primary"):
         _generate_whole_deck_explanations(
             deck,
@@ -223,6 +226,7 @@ def _render_deck_actions(deck: dict, slides: list[dict], latest_by_slide_id: dic
             send_image_when_no_text=send_image_when_no_text,
             supports_image_input=supports_image_input,
             latest_by_slide_id=latest_by_slide_id,
+            background=run_in_background,
         )
 
 
@@ -790,6 +794,18 @@ def _render_question_history(slide_id: int) -> None:
         st.dataframe(pd.DataFrame(questions), use_container_width=True, hide_index=True)
 
 
+def _resume_interrupted_generation() -> None:
+    task = st.session_state.get("ppt_generation_task")
+    if not task or task.get("status") != "running":
+        return
+    st.info("⏳ 后台生成进行中...")
+    progress = st.progress(task["progress"], text=task.get("status_text", "生成中..."))
+    progress.progress(task["progress"], text=task["status_text"])
+    if task.get("completed"):
+        st.success(f"✅ 生成完成：{task['generated']} 页")
+        st.rerun()
+
+
 def _generate_whole_deck_explanations(
     deck: dict,
     slides: list[dict],
@@ -798,6 +814,7 @@ def _generate_whole_deck_explanations(
     send_image_when_no_text: bool,
     supports_image_input: bool,
     latest_by_slide_id: dict[int, dict],
+    background: bool = False,
 ) -> None:
     targets = []
     for slide in slides:
@@ -810,14 +827,44 @@ def _generate_whole_deck_explanations(
         st.info("所有页面都已有讲解。")
         return
 
-    progress = st.progress(0, text="准备生成逐页讲解...")
-    generated = 0
-    skipped = 0
     provider_id = st.session_state.get("active_api_provider_id")
     api_key = _active_api_key()
     active_model = st.session_state.get("active_api_model", DEFAULT_MODEL)
     max_tokens = int(st.session_state.get("active_api_max_tokens", 4096))
     active_model_label = _active_model_label()
+    total = len(targets)
+
+    if background:
+        task = {
+            "status": "running",
+            "progress": 0.0,
+            "status_text": f"正在分析第 1 页 / 共 {total} 页待生成...",
+            "generated": 0,
+            "deck_id": int(deck["id"]),
+            "targets": [int(s["id"]) for s in targets],
+            "only_missing": only_missing,
+            "send_image_when_no_text": send_image_when_no_text,
+            "supports_image_input": supports_image_input,
+            "provider_id": provider_id,
+            "api_key": api_key,
+            "active_model": active_model,
+            "max_tokens": max_tokens,
+            "active_model_label": active_model_label,
+            "completed": False,
+        }
+        st.session_state["ppt_generation_task"] = task
+        thread = threading.Thread(
+            target=_background_generation_worker,
+            args=(task, deck, targets),
+            daemon=True,
+        )
+        thread.start()
+        st.rerun()
+        return
+
+    progress = st.progress(0, text="准备生成逐页讲解...")
+    generated = 0
+    skipped = 0
     for index, slide in enumerate(targets, start=1):
         image_paths = _image_paths_for_generation(
             slide,
@@ -891,6 +938,52 @@ def _generate_whole_deck_explanations(
         st.rerun()
     elif skipped:
         st.info("没有生成新讲解。被跳过的页面需要可提取文字、OCR，或支持图片输入的视觉模型。")
+
+
+def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -> None:
+    from services.ai_service import AIServiceError, generate_text
+    skipped = 0
+    total = len(targets)
+    reasoning_depth = st.session_state.get("active_api_reasoning_depth")
+
+    for index, slide in enumerate(targets, start=1):
+        task["progress"] = (index - 1) / total
+        task["status_text"] = f"正在分析第 {slide['slide_number']} 页 / 共 {total} 页待生成..."
+
+        from pages.ppt_tutor import _is_text_empty, _image_paths_for_generation, _build_slide_prompt
+        image_paths = _image_paths_for_generation(
+            slide,
+            task["send_image_when_no_text"],
+            supports_image_input=task["supports_image_input"],
+        )
+        if _is_text_empty(slide) and not image_paths:
+            skipped += 1
+            continue
+        prompt = _build_slide_prompt(deck, slide, image_attached=bool(image_paths))
+        try:
+            explanation = generate_text(
+                prompt,
+                provider_id=task["provider_id"],
+                api_key=task["api_key"],
+                model_override=task["active_model"],
+                image_paths=image_paths,
+                max_output_tokens=task["max_tokens"],
+                reasoning_depth=reasoning_depth,
+            )
+            insert_and_get_id(
+                """
+                INSERT INTO slide_explanations (slide_id, model, explanation)
+                VALUES (?, ?, ?)
+                """,
+                (slide["id"], task["active_model_label"], explanation),
+            )
+        except AIServiceError:
+            pass
+
+    task["status"] = "completed"
+    task["progress"] = 1.0
+    task["generated"] = len(targets) - skipped
+    task["status_text"] = f"生成完成：{task['generated']} 页"
 
 
 def _build_reader_payload(
