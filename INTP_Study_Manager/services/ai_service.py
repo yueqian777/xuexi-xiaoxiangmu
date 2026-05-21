@@ -278,7 +278,11 @@ def generate_text(
             raise AIServiceError("模型只返回了 reasoning，最终回答为空。请把\"最大输出 token\"调高后重试。")
         raise AIServiceError(f"没有从响应路径中提取到文本：{provider.response_path}")
     output_str = str(output).strip()
-    if reasoning_depth and reasoning_depth != "关闭":
+    # 对 MiniMax 始终执行思考内容移除（MiniMax 的思考内容无论是否开启推理都会出现）
+    # 其他模型仅在推理深度非"关闭"时移除
+    if provider.provider_type == "minimax_chat":
+        output_str = _strip_thinking_content(output_str, provider.provider_type)
+    elif reasoning_depth and reasoning_depth != "关闭":
         output_str = _strip_thinking_content(output_str, provider.provider_type)
     return output_str
 
@@ -664,15 +668,51 @@ def _strip_anthropic_thinking(text: str) -> str:
 
 def _strip_generic_thinking(text: str) -> str:
     import re
+
+    # 常见思考标签（中英文）
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    text = re.sub(r'\\[think\\].*?\\[/think\\]', '', text, flags=re.DOTALL)
+    text = re.sub(r'\[think\].*?\[/think\]', '', text, flags=re.DOTALL)
+    text = re.sub(r'«thinking>.*?</thinking>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<思考>.*?</思考>', '', text, flags=re.DOTALL)
+    text = re.sub(r'\[思考\].*?\[/思考\]', '', text, flags=re.DOTALL)
+    text = re.sub(r'\[推理\].*?\[/推理\]', '', text, flags=re.DOTALL)
+    text = re.sub(r'<推理中>.*?</推理中>', '', text, flags=re.DOTALL)
+    text = re.sub(r'\[分析中\].*?\[/分析中\]', '', text, flags=re.DOTALL)
+    text = re.sub(r'\[thought\].*?\[/thought\]', '', text, flags=re.DOTALL)
+
+    # 自然语言思考过程描述
     thinking_patterns = [
         r'思考过程[：:]\s*[\s\S]*?(?=\n\n|\Z)',
         r'推理过程[：:]\s*[\s\S]*?(?=\n\n|\Z)',
+        r'分析过程[：:]\s*[\s\S]*?(?=\n\n|\Z)',
         r'让我仔细想一想[：:]*[\s\S]*?(?=\n\n|\Z)',
-        r'Let me think[,:]*[\s\S]*?(?=\n\n|\Z)',
+        r'让我思考一下[：:]*[\s\S]*?(?=\n\n|\Z)',
+        r'我来分析一下[：:]*[\s\S]*?(?=\n\n|\Z)',
+        r'首先[，,]?我需要[^\n]*[。\n]',
+        r'第一步[，,]?[^\n]*[。\n]',
         r'Thinking process[,:]*[\s\S]*?(?=\n\n|\Z)',
+        r'Let me think[,:]*[\s\S]*?(?=\n\n|\Z)',
+        r"Let me analyze[,:]*[\s\S]*?(?=\n\n|\Z)",
+        r'First[,. ]?I need to[^\n]*[.\n]',
+        r"I'll think step by step[^\n]*[.\n]",
     ]
     for pattern in thinking_patterns:
         text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+
+    # 移除独立成行的思考过程段落（常见于推理模型）
+    lines = text.split('\n')
+    filtered_lines = []
+    skip_until_blank = False
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r'^(思考中|推理中|分析中|正在分析|正在推理|thinking|analyzing)', stripped, re.IGNORECASE):
+            skip_until_blank = True
+            continue
+        if skip_until_blank:
+            if not stripped:
+                skip_until_blank = False
+            continue
+        filtered_lines.append(line)
+    text = '\n'.join(filtered_lines)
+
     return text.strip()
