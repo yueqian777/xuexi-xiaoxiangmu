@@ -60,6 +60,8 @@ def render() -> None:
         st.success("计划任务已存在。")
         with st.expander("查看计划任务状态", expanded=False):
             st.text(task_output)
+    elif "计划任务尚未安装" in task_output:
+        st.info(task_output)
     else:
         st.warning("计划任务尚未安装，或当前环境无法读取。")
         with st.expander("查看系统返回", expanded=False):

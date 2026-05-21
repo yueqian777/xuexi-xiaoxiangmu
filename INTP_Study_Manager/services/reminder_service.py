@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import locale
 import platform
 import subprocess
 from datetime import date, datetime, time
@@ -111,14 +112,29 @@ def uninstall_windows_daily_review_task() -> tuple[bool, str]:
     if not _is_windows():
         return False, "当前定时提醒卸载只支持 Windows。"
     command = ["schtasks", "/Delete", "/TN", REMINDER_TASK_NAME, "/F"]
-    return _run_command(command)
+    ok, output = _run_command(command)
+    if not ok and _looks_like_missing_task(output):
+        return True, "计划任务本来就不存在，无需卸载。"
+    return ok, output
 
 
 def get_windows_task_status() -> tuple[bool, str]:
     if not _is_windows():
         return False, "非 Windows 环境，无法读取计划任务。"
-    command = ["schtasks", "/Query", "/TN", REMINDER_TASK_NAME, "/FO", "LIST", "/V"]
-    return _run_command(command)
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        _scheduled_task_status_script(),
+    ]
+    ok, output = _run_command(command)
+    if not ok and _looks_like_missing_task(output):
+        return False, "计划任务尚未安装。点击“安装 / 更新计划任务”即可创建本地每日复盘提醒。"
+    if ok:
+        return True, _format_windows_task_status(output)
+    return ok, output
 
 
 def run_daily_review_reminder_now() -> tuple[bool, str]:
@@ -159,15 +175,56 @@ def _task_run_command() -> str:
     return f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{REMINDER_SCRIPT}"'
 
 
+def _scheduled_task_status_script() -> str:
+    task_name = REMINDER_TASK_NAME.replace("'", "''")
+    return f"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$task = Get-ScheduledTask -TaskName '{task_name}'
+$info = Get-ScheduledTaskInfo -TaskName '{task_name}'
+$action = @($task.Actions)[0]
+$trigger = @($task.Triggers)[0]
+$result = [ordered]@{{
+    TaskName = $task.TaskName
+    State = [string]$task.State
+    NextRunTime = $(if ($info.NextRunTime) {{ $info.NextRunTime.ToString('yyyy-MM-dd HH:mm:ss') }} else {{ '' }})
+    LastRunTime = $(if ($info.LastRunTime) {{ $info.LastRunTime.ToString('yyyy-MM-dd HH:mm:ss') }} else {{ '' }})
+    LastTaskResult = [string]$info.LastTaskResult
+    Execute = [string]$action.Execute
+    Arguments = [string]$action.Arguments
+    TriggerStart = [string]$trigger.StartBoundary
+}}
+$result | ConvertTo-Json -Compress
+"""
+
+
+def _format_windows_task_status(output: str) -> str:
+    output = output.strip().lstrip("\ufeff")
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return output
+
+    return "\n".join(
+        [
+            f"任务名：{data.get('TaskName', REMINDER_TASK_NAME)}",
+            f"状态：{data.get('State', '')}",
+            f"下次运行：{data.get('NextRunTime', '')}",
+            f"上次运行：{data.get('LastRunTime', '')}",
+            f"上次结果：{data.get('LastTaskResult', '')}",
+            f"执行程序：{data.get('Execute', '')}",
+            f"执行参数：{data.get('Arguments', '')}",
+            f"触发器开始时间：{data.get('TriggerStart', '')}",
+        ]
+    )
+
+
 def _run_command(command: list[str], timeout: int = 30) -> tuple[bool, str]:
     try:
         completed = subprocess.run(
             command,
             check=False,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -176,9 +233,47 @@ def _run_command(command: list[str], timeout: int = 30) -> tuple[bool, str]:
         return False, str(exc)
 
     output = "\n".join(
-        part.strip() for part in [completed.stdout, completed.stderr] if part and part.strip()
+        part.strip()
+        for part in [
+            _decode_command_output(completed.stdout),
+            _decode_command_output(completed.stderr),
+        ]
+        if part and part.strip()
     )
     return completed.returncode == 0, output or "命令执行完成。"
+
+
+def _decode_command_output(data: bytes) -> str:
+    if not data:
+        return ""
+
+    preferred = locale.getpreferredencoding(False)
+    encodings = ["utf-8-sig", "utf-8", preferred, "mbcs", "gbk", "cp936"]
+    tried: set[str] = set()
+    for encoding in encodings:
+        if not encoding or encoding in tried:
+            continue
+        tried.add(encoding)
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return data.decode(preferred or "utf-8", errors="replace")
+
+
+def _looks_like_missing_task(output: str) -> bool:
+    normalized = output.lower()
+    return any(
+        marker in normalized
+        for marker in [
+            "cannot find the file specified",
+            "找不到指定的文件",
+            "任务不存在",
+            "does not exist",
+            "no msft_scheduledtask objects found",
+            "no scheduled task was found",
+        ]
+    )
 
 
 def _is_windows() -> bool:

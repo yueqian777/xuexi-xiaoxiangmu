@@ -103,7 +103,10 @@ DEFAULT_PROVIDERS = [
 
 
 class AIServiceError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, category: str = "unknown", status_code: int | None = None):
+        super().__init__(message)
+        self.category = category
+        self.status_code = status_code
 
 
 @dataclass
@@ -245,7 +248,7 @@ def generate_text(
         raise AIServiceError(f"API 请求失败：{exc}") from exc
 
     if response.status_code >= 400:
-        raise AIServiceError(f"API 返回 HTTP {response.status_code}：{response.text[:1200]}")
+        raise _build_http_error(response)
 
     try:
         payload = response.json()
@@ -269,6 +272,132 @@ def provider_label(provider: dict[str, Any]) -> str:
     model = provider.get("model") or "未设置模型"
     state = "启用" if provider.get("enabled") else "停用"
     return f"#{provider['id']} · {provider['name']} · {type_label} · {model} · {state}"
+
+
+def is_quota_error(exc: Exception) -> bool:
+    if isinstance(exc, AIServiceError) and exc.category == "quota":
+        return True
+    return _classify_api_error_text(str(exc), None) == "quota"
+
+
+def _build_http_error(response: requests.Response) -> AIServiceError:
+    raw_text = response.text or ""
+    error_message = raw_text.strip()
+    error_type = ""
+    error_code = ""
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        error = payload.get("error", payload)
+        if isinstance(error, dict):
+            error_message = str(error.get("message") or raw_text).strip()
+            error_type = str(error.get("type") or "").strip()
+            error_code = str(error.get("code") or "").strip()
+
+    category = _classify_api_error_text(
+        " ".join([error_message, error_type, error_code, raw_text]),
+        response.status_code,
+    )
+    concise = _compact_api_error_message(error_message)
+    suffix_parts = []
+    if error_type:
+        suffix_parts.append(f"type={error_type}")
+    if error_code:
+        suffix_parts.append(f"code={error_code}")
+    suffix = f"（{', '.join(suffix_parts)}）" if suffix_parts else ""
+
+    if category == "quota":
+        return AIServiceError(
+            (
+                f"API 额度或上游余额不足（HTTP {response.status_code}）{suffix}。\n"
+                f"上游返回：{concise}\n"
+                "处理方式：切换到仍有额度的 Provider，或到该上游控制台充值 / 更换模型后再重试。"
+            ),
+            category=category,
+            status_code=response.status_code,
+        )
+    if category == "rate_limit":
+        return AIServiceError(
+            (
+                f"API 触发频率限制（HTTP {response.status_code}）{suffix}。\n"
+                f"上游返回：{concise}\n"
+                "处理方式：稍后重试，或把 PPT 逐页生成范围改成 10 页 / 20 页一组。"
+            ),
+            category=category,
+            status_code=response.status_code,
+        )
+    if category == "model_incompatible":
+        return AIServiceError(
+            (
+                f"当前模型不支持本次请求形式（HTTP {response.status_code}）{suffix}。\n"
+                f"上游返回：{concise}\n"
+                "处理方式：如果正在发送页面图片，请切换到支持视觉输入的模型；否则更换兼容模型。"
+            ),
+            category=category,
+            status_code=response.status_code,
+        )
+
+    return AIServiceError(
+        f"API 返回 HTTP {response.status_code}{suffix}：{_compact_api_error_message(raw_text)}",
+        category=category,
+        status_code=response.status_code,
+    )
+
+
+def _classify_api_error_text(text: str, status_code: int | None) -> str:
+    normalized = (text or "").lower()
+    quota_markers = (
+        "notenoughcverror",
+        "insufficient_quota",
+        "quota",
+        "current quota",
+        "balance",
+        "prepaid",
+        "余额不足",
+        "额度不足",
+        "资源不足",
+        "11210",
+    )
+    if any(marker in normalized for marker in quota_markers):
+        return "quota"
+
+    rate_markers = (
+        "rate_limit",
+        "too many requests",
+        "requests per",
+        "rate limit",
+        "限流",
+        "请求过快",
+        "频率限制",
+    )
+    if status_code == 429 or any(marker in normalized for marker in rate_markers):
+        return "rate_limit"
+
+    incompatible_markers = (
+        "model_incompatible",
+        "doesnt support image input",
+        "doesn't support image input",
+        "support image input",
+        "unsupported image",
+        "image input",
+        "不支持图片",
+        "不支持视觉",
+    )
+    if any(marker in normalized for marker in incompatible_markers):
+        return "model_incompatible"
+
+    return "unknown"
+
+
+def _compact_api_error_message(message: str, limit: int = 600) -> str:
+    text = " ".join(str(message or "").split())
+    if len(text) <= limit:
+        return text or "空响应"
+    return f"{text[:limit]}..."
 
 
 def _resolve_api_key(provider: AIProvider, api_key: str | None) -> str:

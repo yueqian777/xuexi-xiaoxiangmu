@@ -42,6 +42,28 @@ def open_parking_questions(limit: int = 10) -> list[dict]:
     )
 
 
+def recent_knowledge_links(limit: int = 8) -> list[dict]:
+    return fetch_all(
+        """
+        SELECT
+            kl.relation_type,
+            kl.relation_note,
+            kl.compare_points,
+            kl.created_at,
+            source.subject AS source_subject,
+            source.topic AS source_topic,
+            target.subject AS target_subject,
+            target.topic AS target_topic
+        FROM knowledge_links kl
+        JOIN knowledge_cards source ON source.id = kl.source_knowledge_id
+        JOIN knowledge_cards target ON target.id = kl.target_knowledge_id
+        ORDER BY kl.created_at DESC, kl.id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+
+
 def mistake_cause_counts(subject: str | None = None) -> list[dict]:
     params: tuple = ()
     where_clause = ""
@@ -58,4 +80,3 @@ def mistake_cause_counts(subject: str | None = None) -> list[dict]:
         """,
         params,
     )
-

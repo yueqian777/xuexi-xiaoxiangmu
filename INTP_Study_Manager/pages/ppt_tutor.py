@@ -15,11 +15,12 @@ from services.ai_service import (
     AIServiceError,
     DEFAULT_MODEL,
     generate_text,
+    is_quota_error,
     list_api_providers,
     provider_label,
 )
 from services.api_key_ui import render_local_secret_unlock
-from services.api_runtime import ensure_provider_model, provider_model_state_key, set_active_provider
+from services.api_runtime import ensure_active_provider, ensure_provider_model, provider_model_state_key, set_active_provider
 from services.ppt_service import import_deck, refresh_pdf_slide_text, render_missing_page_images
 from services.prompt_service import render_template
 from services.study_asset_service import parse_study_assets, save_study_assets
@@ -46,7 +47,24 @@ def render() -> None:
     st.caption("边看 PPT 边让 GPT 按页讲解；插问单独进入浮窗，不覆盖当前页主线讲解。")
 
     _render_api_settings()
-    decks = fetch_all("SELECT * FROM ppt_decks ORDER BY created_at DESC, id DESC")
+    decks = fetch_all(
+        """
+        SELECT *
+        FROM ppt_decks
+        ORDER BY
+            CASE status
+                WHEN '使用中' THEN 0
+                WHEN '待整理' THEN 1
+                WHEN '暂停' THEN 2
+                WHEN '归档' THEN 3
+                ELSE 9
+            END,
+            category ASC,
+            sort_order ASC,
+            created_at DESC,
+            id DESC
+        """
+    )
     _render_upload_form(expanded=not bool(decks))
 
     if not decks:
@@ -69,30 +87,10 @@ def render() -> None:
         return
     slide_by_id = {slide["id"]: slide for slide in slides}
     latest_by_slide_id = _latest_explanations_by_slide_ids(list(slide_by_id))
-    selection_quote = _consume_branch_selection_from_query(deck, slides)
 
     st.divider()
     _render_deck_actions(deck, slides, latest_by_slide_id)
-    reader_quote = _render_synced_reader(deck, slides, latest_by_slide_id)
-    selection_quote = selection_quote or reader_quote
-
-    st.divider()
-    st.markdown('<div id="ppt-branch-question"></div>', unsafe_allow_html=True)
-    branch_slide_key = f"ppt_branch_slide_{deck_id}"
-    active_quote = selection_quote or st.session_state.get(_branch_quote_state_key(deck_id))
-    if active_quote and active_quote.get("slide_id") in slide_by_id:
-        st.session_state[branch_slide_key] = active_quote["slide_id"]
-    branch_slide_id = st.selectbox(
-        "选择插问绑定页",
-        list(slide_by_id),
-        format_func=lambda item_id: _slide_label(slide_by_id, item_id),
-        key=branch_slide_key,
-    )
-    branch_slide = slide_by_id.get(branch_slide_id)
-    if branch_slide:
-        quote_for_slide = active_quote if active_quote and active_quote.get("slide_id") == branch_slide["id"] else None
-        _render_branch_popover(deck, branch_slide, quote_for_slide, latest_by_slide_id.get(branch_slide["id"]))
-        _render_question_history(branch_slide["id"])
+    _render_synced_reader(deck, slides, latest_by_slide_id)
 
     st.divider()
     _render_study_asset_generator(deck)
@@ -106,7 +104,7 @@ def _render_api_settings() -> None:
             st.warning("没有启用的 Provider。请先到“API 接入设置”页面创建。")
             return
 
-        current_provider_id = st.session_state.get("active_api_provider_id", providers[0]["id"])
+        current_provider_id, _ = ensure_active_provider(providers)
         provider_ids = [provider["id"] for provider in providers]
         selected_index = provider_ids.index(current_provider_id) if current_provider_id in provider_ids else 0
         provider_id = st.selectbox(
@@ -221,21 +219,22 @@ def _render_deck_actions(deck: dict, slides: list[dict], latest_by_slide_id: dic
         )
 
 
-def _render_synced_reader(deck: dict, slides: list[dict], latest_by_slide_id: dict[int, dict]) -> dict | None:
+def _render_synced_reader(deck: dict, slides: list[dict], latest_by_slide_id: dict[int, dict]) -> None:
     st.subheader("同步阅读器")
-    st.caption("提示：在右侧 AI 讲解里选中一段文字，会出现“引用到插问”按钮，可把选中文本和前后文带到下方插问区。")
-    payload = _build_reader_payload(slides, latest_by_slide_id)
+    st.caption("提示：右侧固定插问栏会绑定当前页。你可以直接提问，或选中讲解文字后引用到插问。")
+    question_by_slide_id = _questions_by_slide_ids([int(slide["id"]) for slide in slides])
+    payload = _build_reader_payload(slides, latest_by_slide_id, question_by_slide_id)
     if not payload:
         st.warning("当前资料还没有可显示的原页面图片。请先点击“生成 / 修复原页面图片”。")
-        return None
+        return
 
     synced_reader_component = _get_synced_reader_component()
     if synced_reader_component is None:
         st.error(f"同步阅读器组件目录缺失：{SYNCED_READER_COMPONENT_PATH}")
         st.caption("请确认项目里的 components/synced_reader/index.html 存在，然后重启 Streamlit。")
-        return None
+        return
 
-    selection_payload = synced_reader_component(
+    component_payload = synced_reader_component(
         deck_id=int(deck["id"]),
         title=deck.get("title") or "学习资料",
         subject=deck.get("subject") or "未分类",
@@ -245,34 +244,72 @@ def _render_synced_reader(deck: dict, slides: list[dict], latest_by_slide_id: di
         default=None,
         key=f"synced_reader_{deck['id']}",
     )
-    if isinstance(selection_payload, dict):
-        return _consume_branch_selection_from_component(deck, slides, selection_payload)
-    return None
+    if isinstance(component_payload, dict):
+        _handle_synced_reader_action(deck, slides, latest_by_slide_id, component_payload)
 
 
-def _consume_branch_selection_from_component(deck: dict, slides: list[dict], payload: dict) -> dict | None:
-    if payload.get("action") != "branch_quote":
-        return None
+def _handle_synced_reader_action(
+    deck: dict,
+    slides: list[dict],
+    latest_by_slide_id: dict[int, dict],
+    payload: dict,
+) -> None:
+    if payload.get("action") != "canvas_question":
+        return
     try:
         query_deck_id = int(payload.get("deckId", 0))
         slide_number = int(payload.get("slideNumber", 0))
     except (TypeError, ValueError):
-        return None
+        return
     if query_deck_id != int(deck["id"]):
-        return None
+        return
 
     token = str(payload.get("token") or "").strip()
-    last_token_key = f"ppt_branch_quote_last_token_{deck['id']}"
-    quote_key = _branch_quote_state_key(deck["id"])
+    last_token_key = f"ppt_canvas_question_last_token_{deck['id']}"
     if token and st.session_state.get(last_token_key) == token:
-        return st.session_state.get(quote_key)
+        return
 
     slide = next((item for item in slides if int(item["slide_number"]) == slide_number), None)
-    selected_text = str(payload.get("selectedText", "")).strip()
-    if not slide or not selected_text:
-        return None
+    question = str(payload.get("question") or "").strip()
+    if not slide or not question:
+        return
 
-    quote = {
+    quote_payload = payload.get("quote") if isinstance(payload.get("quote"), dict) else None
+    quote = _quote_from_component_payload(deck, slide, quote_payload) if quote_payload else None
+    full_question = _compose_quoted_branch_question(quote, question) if quote else question
+    prompt = _build_branch_prompt(deck, slide, latest_by_slide_id.get(int(slide["id"])), full_question)
+    try:
+        with st.spinner(f"正在回答第 {slide_number} 页插问..."):
+            answer = generate_text(
+                prompt,
+                provider_id=st.session_state.get("active_api_provider_id"),
+                api_key=_active_api_key(),
+                model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
+                max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+            )
+        insert_and_get_id(
+            """
+            INSERT INTO slide_questions (slide_id, question, answer, model)
+            VALUES (?, ?, ?, ?)
+            """,
+            (slide["id"], full_question, answer, _active_model_label()),
+        )
+    except AIServiceError as exc:
+        st.error(str(exc))
+        st.caption("侧边插问调用失败，当前阅读位置不会被修改。")
+        return
+
+    if token:
+        st.session_state[last_token_key] = token
+    st.rerun()
+
+
+def _quote_from_component_payload(deck: dict, slide: dict, payload: dict) -> dict | None:
+    selected_text = str(payload.get("selectedText") or "").strip()
+    if not selected_text:
+        return None
+    slide_number = int(slide["slide_number"])
+    return {
         "deck_id": int(deck["id"]),
         "slide_id": int(slide["id"]),
         "slide_number": slide_number,
@@ -280,12 +317,8 @@ def _consume_branch_selection_from_component(deck: dict, slides: list[dict], pay
         "selected_text": selected_text,
         "context_before": str(payload.get("contextBefore", "")).strip(),
         "context_after": str(payload.get("contextAfter", "")).strip(),
-        "token": token or f"{slide['id']}_{len(selected_text)}_{abs(hash(selected_text))}",
+        "token": str(payload.get("token") or f"{slide['id']}_{len(selected_text)}_{abs(hash(selected_text))}"),
     }
-    st.session_state[quote_key] = quote
-    if token:
-        st.session_state[last_token_key] = token
-    return quote
 
 
 def _consume_branch_selection_from_query(deck: dict, slides: list[dict]) -> dict | None:
@@ -724,10 +757,10 @@ def _compose_quoted_branch_question(quote: dict, question: str) -> str:
 def _render_question_history(slide_id: int) -> None:
     questions = fetch_all(
         """
-        SELECT question, answer, model, created_at
+        SELECT question, answer, model, category, status, sort_order, created_at
         FROM slide_questions
         WHERE slide_id = ?
-        ORDER BY created_at DESC, id DESC
+        ORDER BY sort_order ASC, created_at ASC, id ASC
         """,
         (slide_id,),
     )
@@ -739,7 +772,10 @@ def _render_question_history(slide_id: int) -> None:
         with st.container(border=True):
             st.markdown(f"**问：** {item['question']}")
             st.markdown(item["answer"])
-            st.caption(f"模型：{item['model']} · {item['created_at']}")
+            st.caption(
+                f"分类：{item.get('category') or '未分类'} · 状态：{item.get('status') or '未整理'} · "
+                f"排序：{item.get('sort_order') or 0} · 模型：{item['model']} · {item['created_at']}"
+            )
 
     with st.expander("表格视图"):
         st.dataframe(pd.DataFrame(questions), use_container_width=True, hide_index=True)
@@ -832,6 +868,10 @@ def _generate_whole_deck_explanations(
                 except AIServiceError as retry_exc:
                     st.error(f"第 {slide['slide_number']} 页文本模式重试失败：{retry_exc}")
                     break
+            if is_quota_error(exc):
+                st.error(f"第 {slide['slide_number']} 页生成失败：{exc}")
+                st.info("检测到 API 额度或上游余额不足，已停止后续页面生成。请切换 Provider、充值上游接口，或更换可用模型后再继续。")
+                break
             st.error(f"第 {slide['slide_number']} 页生成失败：{exc}")
             break
     progress.progress(1.0, text=f"已生成 {generated} 页讲解，跳过 {skipped} 页。")
@@ -842,7 +882,11 @@ def _generate_whole_deck_explanations(
         st.info("没有生成新讲解。被跳过的页面需要可提取文字、OCR，或支持图片输入的视觉模型。")
 
 
-def _build_reader_payload(slides: list[dict], latest_by_slide_id: dict[int, dict]) -> list[dict]:
+def _build_reader_payload(
+    slides: list[dict],
+    latest_by_slide_id: dict[int, dict],
+    question_by_slide_id: dict[int, list[dict]],
+) -> list[dict]:
     payload = []
     for slide in slides:
         image_path = Path(slide.get("image_path") or "")
@@ -857,6 +901,7 @@ def _build_reader_payload(slides: list[dict], latest_by_slide_id: dict[int, dict
                 "explanation": latest["explanation"] if latest else "本页还没有 AI 讲解。点击上方“生成整份资料逐页讲解”后会自动填入。",
                 "model": latest["model"] if latest else "",
                 "createdAt": latest["created_at"] if latest else "",
+                "questions": question_by_slide_id.get(int(slide["id"]), []),
             }
         )
     return payload
@@ -1481,8 +1526,41 @@ def _latest_explanations_by_slide_ids(slide_ids: list[int]) -> dict[int, dict]:
     return latest
 
 
+def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
+    if not slide_ids:
+        return {}
+    grouped: dict[int, list[dict]] = {int(slide_id): [] for slide_id in slide_ids}
+    chunk_size = 900
+    for start in range(0, len(slide_ids), chunk_size):
+        chunk = slide_ids[start : start + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = fetch_all(
+            f"""
+            SELECT slide_id, question, answer, model, category, status, sort_order, created_at
+            FROM slide_questions
+            WHERE slide_id IN ({placeholders})
+            ORDER BY sort_order ASC, created_at ASC, id ASC
+            """,
+            tuple(chunk),
+        )
+        for row in rows:
+            grouped.setdefault(int(row["slide_id"]), []).append(
+                {
+                    "question": row["question"],
+                    "answer": row["answer"],
+                    "model": row["model"],
+                    "category": row["category"],
+                    "status": row["status"],
+                    "sortOrder": row["sort_order"],
+                    "createdAt": row["created_at"],
+                }
+            )
+    return grouped
+
+
 def _build_slide_prompt(deck: dict, slide: dict, *, image_attached: bool = False) -> str:
     slide_text = slide["slide_text"] or ""
+    subject = deck.get("subject") or "未分类"
     if not slide_text.strip() and image_attached and _image_exists(slide):
         slide_text = "这一页没有提取到可用文字。我会随请求附上该页原图，请直接根据页面图片内容讲解；不要编造图片中不存在的信息。"
     elif not slide_text.strip() and _image_exists(slide):
@@ -1490,13 +1568,41 @@ def _build_slide_prompt(deck: dict, slide: dict, *, image_attached: bool = False
     return render_template(
         "ppt_slide_explain.md",
         {
-            "subject": deck.get("subject") or "未分类",
+            "subject": subject,
             "deck_title": deck["title"],
             "slide_number": str(slide["slide_number"]),
             "slide_title": slide["title"] or "未命名页面",
             "slide_text": slide_text or "这一页没有解析到文字。",
+            "related_knowledge": _related_knowledge_context(subject),
         },
     )
+
+
+def _related_knowledge_context(subject: str, limit: int = 8) -> str:
+    if not subject or subject == "未分类":
+        return "暂无同科目知识卡片。"
+
+    cards = fetch_all(
+        """
+        SELECT id, topic, core_question, one_sentence, mastery
+        FROM knowledge_cards
+        WHERE subject = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        """,
+        (subject, limit),
+    )
+    if not cards:
+        return "暂无同科目知识卡片。"
+
+    lines = []
+    for card in cards:
+        topic = card.get("topic") or "未命名知识点"
+        question = card.get("core_question") or "暂无核心问题"
+        one_sentence = card.get("one_sentence") or "暂无一句话解释"
+        mastery = card.get("mastery", 0)
+        lines.append(f"- #{card['id']} {topic}（掌握度 {mastery}%）：{question}；{one_sentence}")
+    return "\n".join(lines)
 
 
 def _build_branch_prompt(deck: dict, slide: dict, latest: dict | None, question: str) -> str:
@@ -1516,7 +1622,10 @@ def _build_branch_prompt(deck: dict, slide: dict, latest: dict | None, question:
 
 def _deck_label(decks: dict[int, dict], deck_id: int) -> str:
     deck = decks[deck_id]
-    return f"#{deck_id} · {deck['subject'] or '未分类'} · {deck['title']} · {deck['slide_count']} 页"
+    category = deck.get("category") or "未分类"
+    status = deck.get("status") or "使用中"
+    order = int(deck.get("sort_order") or 0)
+    return f"#{deck_id} · {status} · {category} · 排序 {order} · {deck['subject'] or '未分类'} · {deck['title']} · {deck['slide_count']} 页"
 
 
 def _slide_label(slides: dict[int, dict], slide_id: int) -> str:

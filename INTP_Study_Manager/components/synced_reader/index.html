@@ -77,7 +77,7 @@
     .grid {
       height: calc(100% - 58px);
       display: grid;
-      grid-template-columns: minmax(0, 1.22fr) minmax(360px, 0.78fr);
+      grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.72fr) minmax(330px, 0.48fr);
     }
     .pages, .notes {
       height: 100%;
@@ -271,9 +271,183 @@
       white-space: nowrap;
       color: #e8d8bf;
     }
+    .canvas-chat {
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      border-left: 1px solid var(--line);
+      background:
+        linear-gradient(180deg, rgba(255,250,240,.98), rgba(246,233,211,.98)),
+        var(--panel);
+      box-shadow: inset 10px 0 28px rgba(79, 49, 17, 0.06);
+      overflow: hidden;
+    }
+    .canvas-chat-header {
+      padding: 16px 16px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .canvas-chat-title {
+      margin: 0;
+      color: #6f3718;
+      font-size: 16px;
+      font-weight: 900;
+    }
+    .canvas-chat-meta {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .canvas-context {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 246, 229, 0.86);
+      color: #5c5144;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .canvas-messages {
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px 14px 18px;
+      overscroll-behavior: contain;
+    }
+    .canvas-empty {
+      margin: 16px 4px;
+      padding: 14px;
+      border: 1px dashed #cdb793;
+      border-radius: 14px;
+      color: #786a58;
+      background: rgba(255,255,255,.48);
+      font-size: 13px;
+      line-height: 1.65;
+    }
+    .chat-turn {
+      margin-bottom: 14px;
+    }
+    .chat-question,
+    .chat-answer {
+      padding: 11px 12px;
+      border-radius: 14px;
+      line-height: 1.62;
+      font-size: 14px;
+      overflow-wrap: anywhere;
+    }
+    .chat-question {
+      margin-left: 26px;
+      background: #7a421f;
+      color: #fff8ea;
+      border-bottom-right-radius: 5px;
+    }
+    .chat-answer {
+      margin-top: 8px;
+      margin-right: 22px;
+      border: 1px solid #dfcfb7;
+      background: #fffdf7;
+      color: #2d2821;
+      border-bottom-left-radius: 5px;
+    }
+    .chat-answer h1,
+    .chat-answer h2,
+    .chat-answer h3,
+    .chat-answer h4 {
+      margin: 12px 0 6px;
+      color: #7f3f1a;
+      line-height: 1.35;
+    }
+    .chat-answer p { margin: 7px 0; }
+    .chat-answer ul,
+    .chat-answer ol {
+      margin: 7px 0 9px;
+      padding-left: 22px;
+    }
+    .chat-answer code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: #efe2cd;
+      color: #6f3718;
+      font-family: "Cascadia Code", "Consolas", monospace;
+      font-size: 0.92em;
+    }
+    .chat-turn-meta {
+      margin: 6px 2px 0;
+      color: #8a7a66;
+      font-size: 11px;
+    }
+    .canvas-compose {
+      padding: 12px 14px 14px;
+      border-top: 1px solid var(--line);
+      background: rgba(255, 250, 240, 0.98);
+    }
+    .quote-preview {
+      display: none;
+      margin-bottom: 8px;
+      padding: 9px 10px;
+      border: 1px solid #d4b88c;
+      border-radius: 12px;
+      background: #fff1d8;
+      color: #5f431f;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .quote-preview.show {
+      display: block;
+    }
+    .quote-preview button {
+      float: right;
+      border: 0;
+      background: transparent;
+      color: #7a421f;
+      cursor: pointer;
+      font-weight: 900;
+    }
+    .canvas-input {
+      width: 100%;
+      min-height: 82px;
+      resize: vertical;
+      padding: 10px 11px;
+      border: 1px solid #d7c4a6;
+      border-radius: 13px;
+      background: #fffdf8;
+      color: var(--ink);
+      font-family: inherit;
+      font-size: 14px;
+      line-height: 1.55;
+      outline: none;
+    }
+    .canvas-input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(154, 79, 35, 0.13);
+    }
+    .canvas-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 9px;
+    }
+    .canvas-hint {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .canvas-send {
+      border: 0;
+      border-radius: 999px;
+      padding: 8px 14px;
+      background: #9a4f23;
+      color: #fff8ea;
+      font-weight: 900;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .canvas-send:disabled {
+      opacity: .56;
+      cursor: not-allowed;
+    }
     @media (max-width: 900px) {
       .grid { grid-template-columns: 1fr; }
-      .notes { display: none; }
+      .notes,
+      .canvas-chat { display: none; }
       .pages { border-right: 0; }
     }
   </style>
@@ -290,6 +464,25 @@
     <div class="grid">
       <section class="pages" id="pages"></section>
       <aside class="notes" id="notes"></aside>
+      <aside class="canvas-chat" id="canvasChat">
+        <header class="canvas-chat-header">
+          <h3 class="canvas-chat-title">侧边插问</h3>
+          <div class="canvas-chat-meta" id="canvasChatMeta">跟随当前页，不改变阅读位置</div>
+        </header>
+        <div class="canvas-context" id="canvasContext">当前上下文：第 1 页</div>
+        <div class="canvas-messages" id="canvasMessages"></div>
+        <div class="canvas-compose">
+          <div class="quote-preview" id="quotePreview">
+            <button type="button" id="clearQuoteButton">×</button>
+            <div id="quotePreviewText"></div>
+          </div>
+          <textarea class="canvas-input" id="canvasInput" placeholder="直接问当前页，例如：这里为什么必须看 ROC？"></textarea>
+          <div class="canvas-actions">
+            <span class="canvas-hint" id="canvasHint">默认绑定当前可见页</span>
+            <button type="button" class="canvas-send" id="canvasSendButton">问当前模型</button>
+          </div>
+        </div>
+      </aside>
     </div>
   </div>
   <div class="selection-toolbar" id="selectionToolbar">
@@ -332,12 +525,25 @@
     const askSelectionButton = document.getElementById('askSelectionButton');
     const copySelectionButton = document.getElementById('copySelectionButton');
     const selectionHint = document.getElementById('selectionHint');
+    const canvasChat = document.getElementById('canvasChat');
+    const canvasChatMeta = document.getElementById('canvasChatMeta');
+    const canvasContext = document.getElementById('canvasContext');
+    const canvasMessages = document.getElementById('canvasMessages');
+    const canvasInput = document.getElementById('canvasInput');
+    const canvasSendButton = document.getElementById('canvasSendButton');
+    const canvasHint = document.getElementById('canvasHint');
+    const quotePreview = document.getElementById('quotePreview');
+    const quotePreviewText = document.getElementById('quotePreviewText');
+    const clearQuoteButton = document.getElementById('clearQuoteButton');
 
     let pages = [];
     let deckId = 0;
     let activeModel = '';
     let observer = null;
     let currentSelectionPayload = null;
+    let currentSlideNumber = 1;
+    let currentChatQuote = null;
+    let restoreScrollAfterRender = null;
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -367,22 +573,54 @@
         window.setTimeout(typesetMath, 120);
         return;
       }
-      window.MathJax.typesetPromise([noteRoot]).catch(error => console.error(error));
+      window.MathJax.typesetPromise([noteRoot, canvasMessages]).catch(error => console.error(error));
+    }
+
+    function storageKey(name) {
+      return `intp_synced_reader_${deckId}_${name}`;
+    }
+
+    function saveScrollState() {
+      if (!deckId) return;
+      localStorage.setItem(storageKey('pageScroll'), String(pageRoot.scrollTop));
+      localStorage.setItem(storageKey('noteScroll'), String(noteRoot.scrollTop));
+      localStorage.setItem(storageKey('currentSlide'), String(currentSlideNumber));
+    }
+
+    function readScrollState() {
+      if (!deckId) return null;
+      return {
+        pageScroll: Number(localStorage.getItem(storageKey('pageScroll')) || 0),
+        noteScroll: Number(localStorage.getItem(storageKey('noteScroll')) || 0),
+        currentSlide: Number(localStorage.getItem(storageKey('currentSlide')) || currentSlideNumber || 1),
+      };
+    }
+
+    function pageForSlide(slideNumber) {
+      return pages.find(item => Number(item.slideNumber) === Number(slideNumber)) || null;
     }
 
     function setActive(pageNumber) {
+      currentSlideNumber = Number(pageNumber || 1);
       document.querySelectorAll('.page.active,.note.active').forEach(el => el.classList.remove('active'));
-      const page = document.getElementById(`page-${pageNumber}`);
-      const note = document.getElementById(`note-${pageNumber}`);
+      const page = document.getElementById(`page-${currentSlideNumber}`);
+      const note = document.getElementById(`note-${currentSlideNumber}`);
       if (page) page.classList.add('active');
       if (note) {
         note.classList.add('active');
         noteRoot.scrollTo({ top: note.offsetTop - noteRoot.offsetTop, behavior: 'smooth' });
       }
-      current.textContent = `第 ${pageNumber} 页`;
+      current.textContent = `第 ${currentSlideNumber} 页`;
+      renderChatForPage(currentSlideNumber);
+      saveScrollState();
     }
 
     function renderReader(args) {
+      restoreScrollAfterRender = {
+        pageScroll: pageRoot.scrollTop,
+        noteScroll: noteRoot.scrollTop,
+        currentSlide: currentSlideNumber,
+      };
       pages = Array.isArray(args.pages) ? args.pages : [];
       deckId = Number(args.deck_id || 0);
       activeModel = String(args.active_model || '');
@@ -393,6 +631,15 @@
       deckTitle.textContent = String(args.title || '学习资料');
       deckMeta.textContent = `${String(args.subject || '未分类')} · 原页面同步阅读`;
       selectionHint.textContent = `将引用选中文本，并用当前模型：${activeModel || '当前模型'}`;
+      canvasChatMeta.textContent = `当前模型：${activeModel || '当前模型'} · 回答保存为对应页插问`;
+      if (canvasSendButton.disabled) {
+        canvasInput.value = '';
+        currentChatQuote = null;
+        renderQuotePreview();
+        canvasHint.textContent = '回答已保存，可继续围绕当前页追问';
+      }
+      canvasSendButton.disabled = false;
+      canvasSendButton.textContent = '问当前模型';
 
       if (observer) {
         observer.disconnect();
@@ -429,7 +676,16 @@
       });
 
       document.querySelectorAll('.page').forEach(page => observer.observe(page));
-      if (pages.length) setActive(pages[0].slideNumber);
+      const stored = readScrollState();
+      const targetSlide = stored?.currentSlide || restoreScrollAfterRender?.currentSlide || pages[0]?.slideNumber || 1;
+      if (pages.length) setActive(targetSlide);
+      window.setTimeout(() => {
+        const state = stored || restoreScrollAfterRender;
+        if (!state) return;
+        pageRoot.scrollTop = state.pageScroll || 0;
+        noteRoot.scrollTop = state.noteScroll || 0;
+        renderChatForPage(currentSlideNumber);
+      }, 80);
       typesetMath();
     }
 
@@ -515,11 +771,78 @@
       ].join('\n');
     }
 
+    function renderQuotePreview() {
+      if (!currentChatQuote) {
+        quotePreview.classList.remove('show');
+        quotePreviewText.textContent = '';
+        return;
+      }
+      quotePreviewText.textContent = `已引用第 ${currentChatQuote.slideNumber} 页：${clipText(currentChatQuote.selectedText, 140)}`;
+      quotePreview.classList.add('show');
+    }
+
+    function renderChatForPage(slideNumber) {
+      const page = pageForSlide(slideNumber);
+      if (!page) {
+        canvasContext.textContent = '当前上下文：未识别页面';
+        canvasMessages.innerHTML = '<div class="canvas-empty">还没有可用上下文。</div>';
+        return;
+      }
+      canvasContext.textContent = `当前上下文：第 ${page.slideNumber} 页 · ${page.title || '未命名页面'}`;
+      const messages = Array.isArray(page.questions) ? page.questions : [];
+      if (!messages.length) {
+        canvasMessages.innerHTML = `
+          <div class="canvas-empty">
+            本页还没有插问。你可以直接围绕当前 PPT 页面和右侧讲解提问；回答会保存到这一页，不会覆盖主线讲解。
+          </div>
+        `;
+        return;
+      }
+      canvasMessages.innerHTML = messages.map(item => `
+        <div class="chat-turn">
+          <div class="chat-question">${escapeHtml(item.question || '').replaceAll('\n', '<br>')}</div>
+          <div class="chat-answer">${renderMarkdown(item.answer || '')}</div>
+          <div class="chat-turn-meta">${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '· ' + escapeHtml(item.createdAt) : ''}</div>
+        </div>
+      `).join('');
+      canvasMessages.scrollTop = canvasMessages.scrollHeight;
+      typesetMath();
+    }
+
+    function sendCanvasQuestion() {
+      const question = canvasInput.value.trim();
+      if (!question) {
+        canvasHint.textContent = '请先输入问题';
+        canvasInput.focus();
+        return;
+      }
+      const page = pageForSlide(currentSlideNumber);
+      if (!page) {
+        canvasHint.textContent = '当前页上下文不可用';
+        return;
+      }
+      saveScrollState();
+      canvasSendButton.disabled = true;
+      canvasSendButton.textContent = '发送中...';
+      canvasHint.textContent = `正在询问第 ${currentSlideNumber} 页`;
+      Streamlit.setComponentValue({
+        action: 'canvas_question',
+        token: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        deckId,
+        slideNumber: currentSlideNumber,
+        question,
+        quote: currentChatQuote,
+      });
+    }
+
     function sendSelectionToBranch() {
       const payload = currentSelectionPayload || buildSelectionPayload();
       if (!payload) return;
-      Streamlit.setComponentValue(payload);
-      selectionHint.textContent = '已引用到下方插问区';
+      currentChatQuote = payload;
+      renderQuotePreview();
+      canvasInput.focus();
+      canvasHint.textContent = '已引用选中文本，将随下一次提问发送';
+      selectionHint.textContent = '已引用到侧边插问栏';
       selectionToolbar.classList.remove('show');
     }
 
@@ -535,6 +858,20 @@
     copySelectionButton.addEventListener('mousedown', event => event.preventDefault());
     askSelectionButton.addEventListener('click', sendSelectionToBranch);
     copySelectionButton.addEventListener('click', copyCurrentSelection);
+    canvasSendButton.addEventListener('click', sendCanvasQuestion);
+    clearQuoteButton.addEventListener('click', () => {
+      currentChatQuote = null;
+      renderQuotePreview();
+      canvasHint.textContent = '已清除引用';
+    });
+    canvasInput.addEventListener('keydown', (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        event.preventDefault();
+        sendCanvasQuestion();
+      }
+    });
+    pageRoot.addEventListener('scroll', saveScrollState, { passive: true });
+    noteRoot.addEventListener('scroll', saveScrollState, { passive: true });
     noteRoot.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
     noteRoot.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
     document.addEventListener('mousedown', (event) => {
@@ -547,13 +884,15 @@
     });
 
     function nearestScrollPanel(target) {
-      const element = target?.closest?.('.pages, .notes');
+      if (target?.closest?.('.canvas-input')) return null;
+      const element = target?.closest?.('.pages, .notes, .canvas-messages');
       if (element) return element;
       return pageRoot;
     }
 
     function containedWheelScroll(event) {
       const panel = nearestScrollPanel(event.target);
+      if (!panel) return;
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();

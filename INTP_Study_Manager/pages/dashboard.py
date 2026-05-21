@@ -5,13 +5,225 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+from services.ai_service import AIServiceError, DEFAULT_MODEL, list_api_providers, provider_label
+from services.api_key_ui import render_local_secret_unlock
+from services.api_runtime import (
+    ensure_active_provider,
+    ensure_provider_model,
+    provider_model_state_key,
+    save_default_api_config,
+    set_active_provider,
+)
+from services.daily_ai_review_service import (
+    answers_payload,
+    collect_review_candidates,
+    evaluate_today_ai_review,
+    evaluation_payload,
+    generate_today_ai_review_plan,
+    get_today_ai_review_plan,
+    plan_payload,
+    regenerate_today_ai_review_plan,
+)
 from services.review_service import get_today_review_tasks
 from services.reminder_service import get_daily_reminder_config, get_today_review_log, is_daily_review_due_now
-from services.stats_service import low_mastery_cards, open_parking_questions, recent_blockers
+from services.stats_service import low_mastery_cards, open_parking_questions, recent_blockers, recent_knowledge_links
 
 
 def _self_test_question(topic: str) -> str:
     return f"请闭卷解释「{topic}」解决什么核心问题，并写出一句话解释、关键逻辑和一个典型应用。"
+
+
+def _render_default_api_and_daily_ai_review() -> None:
+    st.subheader("每日 AI 轻量复习")
+    st.caption("先设置项目默认 API。首页会用少量问题检查今天最值得复习的知识点；提交答案后自动批改，并写回知识点掌握度。")
+
+    providers = list_api_providers(enabled_only=True)
+    if not providers:
+        st.warning("没有启用的 API Provider。请先进入“API 接入设置”创建或启用一个 Provider。")
+        return
+
+    provider_id, _ = ensure_active_provider(providers)
+    provider_ids = [int(provider["id"]) for provider in providers]
+    selected_index = provider_ids.index(int(provider_id)) if provider_id in provider_ids else 0
+
+    with st.container(border=True):
+        cols = st.columns([1.4, 1, 1])
+        selected_provider_id = cols[0].selectbox(
+            "项目默认 API",
+            provider_ids,
+            index=selected_index,
+            format_func=lambda item_id: provider_label(next(p for p in providers if int(p["id"]) == int(item_id))),
+            key="dashboard_default_api_provider",
+        )
+        provider = next(p for p in providers if int(p["id"]) == int(selected_provider_id))
+        ensure_provider_model(provider)
+        model = cols[1].text_input(
+            "默认模型",
+            key=provider_model_state_key(int(selected_provider_id)),
+            help="后续页面没有主动切换 API 时，会沿用这个默认 Provider 和模型。",
+        )
+        max_tokens = cols[2].number_input(
+            "复习输出 token",
+            min_value=800,
+            max_value=8000,
+            value=int(st.session_state.get("daily_ai_review_max_tokens", 2200)),
+            step=200,
+        )
+        st.session_state["daily_ai_review_max_tokens"] = int(max_tokens)
+
+        active_model = model.strip() or provider.get("model") or DEFAULT_MODEL
+        set_active_provider(int(selected_provider_id), active_model)
+        key_name = f"api_key_provider_{selected_provider_id}"
+        render_local_secret_unlock(
+            provider,
+            model=active_model,
+            target_session_key=key_name,
+            key_prefix=f"dashboard_default_provider_{selected_provider_id}",
+        )
+        api_key = st.text_input(
+            "默认 API Key",
+            value=st.session_state.get(key_name, ""),
+            type="password",
+            placeholder=f"不填则读取环境变量 {provider.get('api_key_env') or '未设置'}；也可以使用上方本地加密 Key 解锁。",
+            key=f"dashboard_api_key_{selected_provider_id}",
+        )
+        st.session_state[key_name] = api_key
+
+        cols = st.columns([1, 1, 2])
+        if cols[0].button("保存为项目默认 API", type="primary"):
+            save_default_api_config(int(selected_provider_id), active_model)
+            st.success("项目默认 API 已保存。后续 API 任务未主动切换时会使用它。")
+            st.rerun()
+
+        candidates = collect_review_candidates()
+        cols[1].metric("今日自测候选", len(candidates))
+        if candidates:
+            cols[2].caption("候选来自：今日到期复习、低于 70% 的知识点、仍需复习的知识卡片。")
+        else:
+            cols[2].caption("暂无候选知识点。先创建知识卡片或等待复习任务到期。")
+
+    if not api_key and provider.get("auth_type") != "none" and not provider.get("api_key_env"):
+        st.info("填写默认 API Key 后，首页会自动生成今天的轻量自测计划。")
+        return
+
+    plan = get_today_ai_review_plan()
+    auto_key = f"daily_ai_review_auto_generated_{date.today().isoformat()}"
+    if plan is None and candidates and not st.session_state.get(auto_key):
+        st.session_state[auto_key] = True
+        try:
+            with st.spinner("正在自动生成今天的轻量复习提问..."):
+                plan = generate_today_ai_review_plan(
+                    provider_id=int(selected_provider_id),
+                    api_key=api_key,
+                    model=active_model,
+                    max_output_tokens=int(max_tokens),
+                )
+            st.success("今日轻量自测计划已生成。")
+        except (AIServiceError, ValueError, RuntimeError) as exc:
+            st.warning(f"今日自测计划暂未生成：{exc}")
+
+    controls = st.columns([1, 1, 2])
+    if controls[0].button("生成 / 重新生成今日自测", disabled=not bool(candidates)):
+        try:
+            with st.spinner("正在生成今日轻量复习提问..."):
+                plan = regenerate_today_ai_review_plan(
+                    provider_id=int(selected_provider_id),
+                    api_key=api_key,
+                    model=active_model,
+                    max_output_tokens=int(max_tokens),
+                )
+            st.success("今日自测计划已更新。")
+            st.rerun()
+        except (AIServiceError, ValueError, RuntimeError) as exc:
+            st.error(f"生成失败：{exc}")
+    controls[1].caption("建议每天 3-5 题，不把复习变成负担。")
+
+    plan = plan or get_today_ai_review_plan()
+    if not plan:
+        return
+
+    _render_daily_ai_review_plan(
+        plan,
+        provider_id=int(selected_provider_id),
+        api_key=api_key,
+        model=active_model,
+        max_tokens=int(max_tokens),
+    )
+
+
+def _render_daily_ai_review_plan(
+    plan_row: dict,
+    *,
+    provider_id: int,
+    api_key: str,
+    model: str,
+    max_tokens: int,
+) -> None:
+    plan = plan_payload(plan_row)
+    evaluation = evaluation_payload(plan_row)
+    saved_answers = answers_payload(plan_row)
+    questions = plan.get("questions", [])
+
+    with st.container(border=True):
+        st.markdown(f"**今日复习主线：** {plan.get('main_line') or '少量问题检查今天最值得复习的知识点。'}")
+        st.caption(f"状态：{plan_row.get('status')} · 生成时间：{plan_row.get('created_at')}")
+
+        with st.form(f"daily_ai_review_answers_{plan_row['id']}"):
+            answers: dict[str, str] = {}
+            for index, question in enumerate(questions, start=1):
+                question_id = str(question.get("question_id") or f"q{index}")
+                st.markdown(
+                    f"**{index}. [{question.get('question_type', '自测题')}] {question.get('topic', '')}**\n\n"
+                    f"{question.get('question', '')}"
+                )
+                answers[question_id] = st.text_area(
+                    "你的回答",
+                    value=saved_answers.get(question_id, ""),
+                    placeholder="先闭卷写。不会就留空或写“不会”，系统会按错因处理。",
+                    key=f"daily_ai_answer_{plan_row['id']}_{question_id}",
+                    height=110,
+                )
+            submitted = st.form_submit_button("提交回答并让 AI 批改")
+
+        if submitted:
+            try:
+                with st.spinner("正在批改并更新掌握度..."):
+                    evaluate_today_ai_review(
+                        plan_row=plan_row,
+                        answers=answers,
+                        provider_id=provider_id,
+                        api_key=api_key,
+                        model=model,
+                        max_output_tokens=max_tokens,
+                    )
+                st.success("批改完成，知识点掌握度已更新。")
+                st.rerun()
+            except (AIServiceError, ValueError, RuntimeError) as exc:
+                st.error(f"批改失败：{exc}")
+
+        if evaluation:
+            _render_daily_ai_review_evaluation(evaluation)
+
+
+def _render_daily_ai_review_evaluation(evaluation: dict) -> None:
+    st.markdown("**AI 批改结果**")
+    st.info(evaluation.get("overall_summary") or "已完成批改。")
+    for item in evaluation.get("evaluations", []):
+        with st.container(border=True):
+            st.markdown(
+                f"**{item.get('result')} · {item.get('score')} 分 · 错因：{item.get('cause_category')}**"
+            )
+            if item.get("feedback"):
+                st.markdown(f"反馈：{item['feedback']}")
+            if item.get("correct_answer"):
+                st.markdown(f"参考答案：{item['correct_answer']}")
+            if item.get("next_question"):
+                st.caption(f"下一轮追问：{item['next_question']}")
+
+    updates = evaluation.get("mastery_updates") or []
+    if updates:
+        st.markdown("**掌握度更新**")
+        st.dataframe(pd.DataFrame(updates), use_container_width=True, hide_index=True)
 
 
 def render() -> None:
@@ -22,6 +234,7 @@ def render() -> None:
     low_cards = low_mastery_cards()
     blockers = recent_blockers()
     parking = open_parking_questions()
+    links = recent_knowledge_links()
     reminder_config = get_daily_reminder_config()
     review_log = get_today_review_log()
 
@@ -41,6 +254,8 @@ def render() -> None:
             st.info(f"今日 {reminder_config['time']} 会提醒你进行每日复盘。")
         else:
             st.caption("每日复盘提醒当前未启用。")
+
+    _render_default_api_and_daily_ai_review()
 
     st.subheader(f"今天需要复习什么：{date.today().isoformat()}")
     if today_tasks:
@@ -82,6 +297,25 @@ def render() -> None:
             )
         else:
             st.caption("暂无低掌握度知识点。")
+
+    st.subheader("最近知识双链")
+    if links:
+        st.dataframe(
+            pd.DataFrame(links)[
+                [
+                    "source_subject",
+                    "source_topic",
+                    "relation_type",
+                    "target_topic",
+                    "relation_note",
+                    "created_at",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("暂无知识链接。可以在“知识点卡片”里把当前知识点连接到前置知识、相似概念或易混淆概念。")
 
     st.subheader("探索停车场问题")
     if parking:

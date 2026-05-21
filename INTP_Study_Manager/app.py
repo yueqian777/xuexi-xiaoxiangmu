@@ -11,6 +11,7 @@ from pages import (
     mainline_branches,
     mistakes,
     parking_lot,
+    ppt_management,
     ppt_tutor,
     quiz_prompts,
     reminders,
@@ -22,6 +23,7 @@ from services.ai_service import ensure_default_api_providers
 PAGES = {
     "首页 Dashboard": dashboard.render,
     "PPT 逐页讲解": ppt_tutor.render,
+    "PPT 与插问管理": ppt_management.render,
     "每日复盘提醒": reminders.render,
     "API 接入设置": api_settings.render,
     "学习登记": study_sessions.render,

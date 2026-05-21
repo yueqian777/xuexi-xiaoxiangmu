@@ -8,6 +8,18 @@ import streamlit as st
 from db import execute, fetch_all, fetch_one, insert_and_get_id
 from services.review_service import ensure_initial_review_tasks
 
+RELATION_TYPES = [
+    "前置知识",
+    "相似概念",
+    "对比概念",
+    "容易混淆",
+    "公式迁移",
+    "应用迁移",
+    "同一主线",
+    "反例关系",
+    "补充说明",
+]
+
 
 def render() -> None:
     st.title("知识点卡片")
@@ -172,8 +184,175 @@ def render() -> None:
         else:
             st.caption("暂无关联插问。")
 
+    _render_knowledge_links(card, cards)
+
 
 def _session_label(sessions: list[dict], session_id: int) -> str:
     session = next(item for item in sessions if item["id"] == session_id)
     return f"{session['date']} · {session['subject']} · {session['title']}"
 
+
+def _render_knowledge_links(card: dict, cards: list[dict]) -> None:
+    selected_id = int(card["id"])
+    candidates = [item for item in cards if int(item["id"]) != selected_id]
+
+    st.divider()
+    st.subheader("知识双链 / 联系与对比")
+    st.caption("把当前知识点连接到前置知识、相似概念、易混淆概念或公式迁移关系。这里不是资料收藏，而是帮助你建立 Obsidian 式的知识网络。")
+
+    if candidates:
+        candidate_by_id = {int(item["id"]): item for item in candidates}
+        with st.form(f"add_knowledge_link_{selected_id}"):
+            cols = st.columns([1.4, 1])
+            target_id = cols[0].selectbox(
+                "连接到哪个已学知识点",
+                list(candidate_by_id),
+                format_func=lambda item_id: _knowledge_card_label(candidate_by_id[item_id]),
+                key=f"link_target_{selected_id}",
+            )
+            relation_type = cols[1].selectbox(
+                "关系类型",
+                RELATION_TYPES,
+                key=f"link_type_{selected_id}",
+            )
+            relation_note = st.text_area(
+                "为什么要连接它们",
+                placeholder="例如：Z 变换 ROC 和系统稳定性都在回答“极点位置如何决定系统行为”，但一个强调序列唯一性，一个强调系统响应收敛。",
+                key=f"link_note_{selected_id}",
+            )
+            compare_points = st.text_area(
+                "联系 / 对比要点",
+                placeholder="写成 2-4 条：相同点、不同点、适用条件、容易混淆的位置。",
+                key=f"link_compare_{selected_id}",
+            )
+            submitted = st.form_submit_button("建立知识链接")
+
+        if submitted:
+            existing = fetch_one(
+                """
+                SELECT id
+                FROM knowledge_links
+                WHERE source_knowledge_id = ? AND target_knowledge_id = ? AND relation_type = ?
+                """,
+                (selected_id, target_id, relation_type),
+            )
+            if existing:
+                execute(
+                    """
+                    UPDATE knowledge_links
+                    SET relation_note = ?, compare_points = ?, created_at = datetime('now', 'localtime')
+                    WHERE id = ?
+                    """,
+                    (relation_note.strip(), compare_points.strip(), existing["id"]),
+                )
+                st.success("已有同类型链接，已更新说明和对比要点。")
+            else:
+                insert_and_get_id(
+                    """
+                    INSERT INTO knowledge_links (
+                        source_knowledge_id, target_knowledge_id, relation_type,
+                        relation_note, compare_points
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        selected_id,
+                        target_id,
+                        relation_type,
+                        relation_note.strip(),
+                        compare_points.strip(),
+                    ),
+                )
+                st.success("知识链接已建立。")
+            st.rerun()
+    else:
+        st.info("至少需要两张知识卡片，才能建立知识双链。")
+
+    outgoing = _knowledge_links_for_card(selected_id, direction="outgoing")
+    incoming = _knowledge_links_for_card(selected_id, direction="incoming")
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**出链：当前知识点连接到什么**")
+        _render_link_list(outgoing, direction="outgoing")
+    with right:
+        st.markdown("**入链：哪些知识点连接到当前卡片**")
+        _render_link_list(incoming, direction="incoming")
+
+
+def _knowledge_links_for_card(card_id: int, *, direction: str) -> list[dict]:
+    if direction == "outgoing":
+        return fetch_all(
+            """
+            SELECT
+                kl.id,
+                kl.relation_type,
+                kl.relation_note,
+                kl.compare_points,
+                kl.created_at,
+                kc.id AS linked_id,
+                kc.subject AS linked_subject,
+                kc.topic AS linked_topic,
+                kc.core_question AS linked_question,
+                kc.mastery AS linked_mastery
+            FROM knowledge_links kl
+            JOIN knowledge_cards kc ON kc.id = kl.target_knowledge_id
+            WHERE kl.source_knowledge_id = ?
+            ORDER BY kl.created_at DESC, kl.id DESC
+            """,
+            (card_id,),
+        )
+
+    return fetch_all(
+        """
+        SELECT
+            kl.id,
+            kl.relation_type,
+            kl.relation_note,
+            kl.compare_points,
+            kl.created_at,
+            kc.id AS linked_id,
+            kc.subject AS linked_subject,
+            kc.topic AS linked_topic,
+            kc.core_question AS linked_question,
+            kc.mastery AS linked_mastery
+        FROM knowledge_links kl
+        JOIN knowledge_cards kc ON kc.id = kl.source_knowledge_id
+        WHERE kl.target_knowledge_id = ?
+        ORDER BY kl.created_at DESC, kl.id DESC
+        """,
+        (card_id,),
+    )
+
+
+def _render_link_list(links: list[dict], *, direction: str) -> None:
+    if not links:
+        st.caption("暂无知识链接。")
+        return
+
+    for link in links:
+        label = _knowledge_link_display_label(link)
+        with st.container(border=True):
+            st.markdown(f"**{label}**")
+            st.caption(f"关系类型：{link['relation_type']} · 创建时间：{link['created_at']}")
+            if link.get("linked_question"):
+                st.markdown(f"核心问题：{link['linked_question']}")
+            if link.get("relation_note"):
+                st.markdown(f"连接理由：{link['relation_note']}")
+            if link.get("compare_points"):
+                st.markdown(f"联系 / 对比：\n\n{link['compare_points']}")
+            if st.button("删除这条链接", key=f"delete_knowledge_link_{direction}_{link['id']}"):
+                execute("DELETE FROM knowledge_links WHERE id = ?", (link["id"],))
+                st.success("知识链接已删除。")
+                st.rerun()
+
+
+def _knowledge_link_display_label(link: dict) -> str:
+    return (
+        f"#{link['linked_id']} · {link['linked_subject']} · "
+        f"{link['linked_topic']}（掌握度 {link['linked_mastery']}%）"
+    )
+
+
+def _knowledge_card_label(card: dict) -> str:
+    return f"#{card['id']} · {card['subject']} · {card['topic']}（{card['mastery']}%）"

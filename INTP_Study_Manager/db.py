@@ -93,6 +93,19 @@ def init_db() -> None:
                 FOREIGN KEY (source_session_id) REFERENCES study_sessions(id) ON DELETE SET NULL
             );
 
+            CREATE TABLE IF NOT EXISTS knowledge_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_knowledge_id INTEGER NOT NULL,
+                target_knowledge_id INTEGER NOT NULL,
+                relation_type TEXT NOT NULL DEFAULT '关联',
+                relation_note TEXT DEFAULT '',
+                compare_points TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                FOREIGN KEY (source_knowledge_id) REFERENCES knowledge_cards(id) ON DELETE CASCADE,
+                FOREIGN KEY (target_knowledge_id) REFERENCES knowledge_cards(id) ON DELETE CASCADE,
+                CHECK (source_knowledge_id != target_knowledge_id)
+            );
+
             CREATE TABLE IF NOT EXISTS mistakes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 subject TEXT NOT NULL,
@@ -134,6 +147,9 @@ def init_db() -> None:
                 filename TEXT NOT NULL,
                 title TEXT NOT NULL,
                 subject TEXT DEFAULT '',
+                category TEXT DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT '使用中',
                 file_path TEXT NOT NULL,
                 slide_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
@@ -167,6 +183,9 @@ def init_db() -> None:
                 question TEXT NOT NULL,
                 answer TEXT NOT NULL,
                 model TEXT NOT NULL,
+                category TEXT DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT '未整理',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 FOREIGN KEY (slide_id) REFERENCES ppt_slides(id) ON DELETE CASCADE
             );
@@ -200,6 +219,21 @@ def init_db() -> None:
                 notes TEXT DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
+
+            CREATE TABLE IF NOT EXISTS daily_ai_review_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                review_date TEXT NOT NULL UNIQUE,
+                provider_id INTEGER,
+                model TEXT DEFAULT '',
+                plan_json TEXT NOT NULL DEFAULT '{}',
+                source_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                answers_json TEXT DEFAULT '{}',
+                evaluation_json TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT '待回答',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                evaluated_at TEXT DEFAULT '',
+                FOREIGN KEY (provider_id) REFERENCES api_providers(id) ON DELETE SET NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_study_sessions_date_id
                 ON study_sessions(date DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_study_sessions_subject_date_id
@@ -218,6 +252,12 @@ def init_db() -> None:
                 ON knowledge_cards(subject, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_knowledge_cards_source_session
                 ON knowledge_cards(source_session_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_links_unique_relation
+                ON knowledge_links(source_knowledge_id, target_knowledge_id, relation_type);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_links_source_created
+                ON knowledge_links(source_knowledge_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_links_target_created
+                ON knowledge_links(target_knowledge_id, created_at DESC, id DESC);
 
             CREATE INDEX IF NOT EXISTS idx_mistakes_knowledge_created
                 ON mistakes(knowledge_id, created_at DESC, id DESC);
@@ -242,9 +282,29 @@ def init_db() -> None:
                 ON slide_questions(slide_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_api_providers_enabled_id
                 ON api_providers(enabled, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_daily_ai_review_plans_date
+                ON daily_ai_review_plans(review_date DESC, id DESC);
             """
         )
+        _ensure_column(conn, "ppt_decks", "category", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_decks", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "ppt_decks", "status", "TEXT NOT NULL DEFAULT '使用中'")
         _ensure_column(conn, "ppt_slides", "image_path", "TEXT DEFAULT ''")
+        _ensure_column(conn, "slide_questions", "category", "TEXT DEFAULT ''")
+        _ensure_column(conn, "slide_questions", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "slide_questions", "status", "TEXT NOT NULL DEFAULT '未整理'")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ppt_decks_manage
+            ON ppt_decks(status, category, sort_order ASC, created_at DESC, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_slide_questions_manage
+            ON slide_questions(status, category, sort_order ASC, created_at DESC, id DESC)
+            """
+        )
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
