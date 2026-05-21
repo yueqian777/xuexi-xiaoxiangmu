@@ -852,6 +852,12 @@ def _resume_interrupted_generation() -> None:
         if st.button("停止", key="stop_generation"):
             task["stop_requested"] = True
             st.rerun()
+            return
+
+    # 后台任务进行中时，周期性触发重新渲染以更新进度
+    import time
+    time.sleep(1.5)
+    st.rerun()
 
 
 def _generate_whole_deck_explanations(
