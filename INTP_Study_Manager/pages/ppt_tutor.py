@@ -148,6 +148,13 @@ def _render_api_settings() -> None:
             help="DeepSeek V4 Pro 会消耗 reasoning token，建议至少 4096。",
         )
         st.session_state["active_api_max_tokens"] = int(max_tokens)
+        reasoning_depth = st.selectbox(
+            "推理深度",
+            ["关闭", "低", "中", "高"],
+            index=0,
+            help="部分模型支持 extended thinking / reasoning_effort。开启后会消耗更多 token。",
+        )
+        st.session_state["active_api_reasoning_depth"] = reasoning_depth
         st.caption(f"当前 Base URL：{provider.get('base_url') or '未设置'}")
         st.caption("如果使用本地 CLIProxyAPI，默认客户端 Key 是 local-client-key；真实上游 Key 由代理服务保存。")
 
@@ -593,6 +600,7 @@ def _render_main_explanation(deck: dict, slide: dict) -> None:
                     api_key=_active_api_key(),
                     model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
                     max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+                    reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
                 )
             insert_and_get_id(
                 """
@@ -683,6 +691,7 @@ def _render_branch_question_form(
                 api_key=_active_api_key(),
                 model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+                reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
             )
         insert_and_get_id(
             """
@@ -796,6 +805,7 @@ def _generate_whole_deck_explanations(
                 model_override=active_model,
                 image_paths=image_paths,
                 max_output_tokens=max_tokens,
+                reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
             )
             insert_and_get_id(
                 """
@@ -819,6 +829,7 @@ def _generate_whole_deck_explanations(
                         api_key=api_key,
                         model_override=active_model,
                         max_output_tokens=max_tokens,
+                        reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
                     )
                     insert_and_get_id(
                         """

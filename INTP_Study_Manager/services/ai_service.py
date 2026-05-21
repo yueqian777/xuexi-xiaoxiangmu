@@ -104,7 +104,7 @@ DEFAULT_PROVIDERS = [
         "name": "MiniMax",
         "provider_type": "minimax_chat",
         "base_url": "https://api.minimax.chat/v1",
-        "model": "MiniMax-Text-01",
+        "model": "MiniMax-M2.7",
         "api_key_env": "MINIMAX_API_KEY",
         "auth_type": "bearer",
         "extra_headers_json": "{}",
@@ -178,7 +178,7 @@ def get_api_provider(provider_id: int | None) -> AIProvider:
     if row is None:
         row = fetch_one("SELECT * FROM api_providers WHERE enabled = 1 ORDER BY id ASC LIMIT 1")
     if row is None:
-        raise AIServiceError("没有可用 API Provider，请先到“API 接入设置”创建。")
+        raise AIServiceError("没有可用 API Provider，请先到\"API 接入设置\"创建。")
     return AIProvider(
         id=row["id"],
         name=row["name"],
@@ -239,11 +239,12 @@ def generate_text(
     model_override: str | None = None,
     max_output_tokens: int = 1600,
     image_paths: list[str] | None = None,
+    reasoning_depth: str | None = None,
 ) -> str:
     provider = get_api_provider(provider_id)
     model = (model_override or provider.model or DEFAULT_MODEL).strip()
     key = _resolve_api_key(provider, api_key)
-    request = _build_request(provider, prompt, key, model, max_output_tokens, image_paths or [])
+    request = _build_request(provider, prompt, key, model, max_output_tokens, image_paths or [], reasoning_depth)
 
     try:
         response = requests.request(
@@ -271,9 +272,12 @@ def generate_text(
         reasoning = _safe_extract_path(payload, "choices.0.message.reasoning_content")
         finish_reason = _safe_extract_path(payload, "choices.0.finish_reason")
         if reasoning and finish_reason == "length":
-            raise AIServiceError("模型只返回了 reasoning，最终回答为空。请把“最大输出 token”调高后重试。")
+            raise AIServiceError("模型只返回了 reasoning，最终回答为空。请把\"最大输出 token\"调高后重试。")
         raise AIServiceError(f"没有从响应路径中提取到文本：{provider.response_path}")
-    return str(output).strip()
+    output_str = str(output).strip()
+    if reasoning_depth and reasoning_depth != "关闭":
+        output_str = _strip_thinking_content(output_str, provider.provider_type)
+    return output_str
 
 
 def provider_label(provider: dict[str, Any]) -> str:
@@ -302,6 +306,7 @@ def _build_request(
     model: str,
     max_output_tokens: int,
     image_paths: list[str],
+    reasoning_depth: str | None = None,
 ) -> dict[str, Any]:
     headers = {"Content-Type": "application/json"}
     headers.update(_parse_json_object(provider.extra_headers_json, "额外请求头"))
@@ -331,6 +336,9 @@ def _build_request(
             "temperature": 0.2,
             "max_tokens": max_output_tokens,
         }
+        if reasoning_depth and reasoning_depth != "关闭":
+            effort_map = {"低": "low", "中": "medium", "高": "high"}
+            body["reasoning_effort"] = effort_map.get(reasoning_depth, "medium")
     elif provider.provider_type == "anthropic_messages":
         if image_paths:
             raise AIServiceError("当前 Anthropic Provider 尚未实现图片直传，请改用 OpenAI 兼容视觉接口。")
@@ -346,6 +354,12 @@ def _build_request(
             "max_tokens": max_output_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
+        if reasoning_depth and reasoning_depth != "关闭":
+            budget_map = {"低": 1024, "中": 4096, "高": 10240}
+            body["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": budget_map.get(reasoning_depth, 4096),
+            }
     elif provider.provider_type == "gemini_generate_content":
         if image_paths:
             raise AIServiceError("当前 Gemini Provider 尚未实现图片直传，请改用 OpenAI 兼容视觉接口。")
@@ -370,6 +384,13 @@ def _build_request(
         }
     else:
         raise AIServiceError(f"未知 Provider 类型：{provider.provider_type}")
+
+    # DeepSeek special handling via extra_body
+    if "deepseek" in (provider.name or "").lower() or "deepseek" in model.lower():
+        if reasoning_depth == "关闭":
+            body["extra_body"] = {"enable_thinking": False}
+        elif reasoning_depth:
+            body["extra_body"] = {"enable_thinking": True}
 
     url, headers = _apply_auth(url, headers, provider.auth_type, api_key)
     return {"method": "POST", "url": url, "headers": headers, "json": body}
@@ -471,3 +492,34 @@ def _safe_extract_path(payload: Any, path: str) -> Any:
         return _extract_path(payload, path)
     except AIServiceError:
         return None
+
+
+def _strip_thinking_content(text: str, provider_type: str) -> str:
+    if not text:
+        return text
+    if provider_type == "anthropic_messages":
+        return _strip_anthropic_thinking(text)
+    return _strip_generic_thinking(text)
+
+
+def _strip_anthropic_thinking(text: str) -> str:
+    import re
+    text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
+    text = re.sub(r'\\[thinking\\].*?\\[/thinking\\]', '', text, flags=re.DOTALL)
+    return text.strip()
+
+
+def _strip_generic_thinking(text: str) -> str:
+    import re
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    text = re.sub(r'\\[think\\].*?\\[/think\\]', '', text, flags=re.DOTALL)
+    thinking_patterns = [
+        r'思考过程[：:]\s*[\s\S]*?(?=\n\n|\Z)',
+        r'推理过程[：:]\s*[\s\S]*?(?=\n\n|\Z)',
+        r'让我仔细想一想[：:]*[\s\S]*?(?=\n\n|\Z)',
+        r'Let me think[,:]*[\s\S]*?(?=\n\n|\Z)',
+        r'Thinking process[,:]*[\s\S]*?(?=\n\n|\Z)',
+    ]
+    for pattern in thinking_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+    return text.strip()
