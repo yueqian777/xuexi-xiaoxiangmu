@@ -103,7 +103,7 @@ def _render_api_settings() -> None:
         st.caption("选择任意已启用 Provider。API Key 只保存在当前 Streamlit 会话里，不写入 SQLite。")
         providers = list_api_providers(enabled_only=True)
         if not providers:
-            st.warning("没有启用的 Provider。请先到“API 接入设置”页面创建。")
+            st.warning("没有启用的 Provider。请先到「API 接入设置」页面创建。")
             return
 
         current_provider_id, _ = ensure_active_provider(providers)
@@ -236,7 +236,7 @@ def _render_synced_reader(deck: dict, slides: list[dict], latest_by_slide_id: di
     question_by_slide_id = _questions_by_slide_ids([int(slide["id"]) for slide in slides])
     payload = _build_reader_payload(slides, latest_by_slide_id, question_by_slide_id)
     if not payload:
-        st.warning("当前资料还没有可显示的原页面图片。请先点击“生成 / 修复原页面图片”。")
+        st.warning("当前资料没有任何幻灯片数据。")
         return
 
     synced_reader_component = _get_synced_reader_component()
@@ -796,14 +796,35 @@ def _render_question_history(slide_id: int) -> None:
 
 def _resume_interrupted_generation() -> None:
     task = st.session_state.get("ppt_generation_task")
-    if not task or task.get("status") != "running":
+    if not task:
         return
-    st.info("⏳ 后台生成进行中...")
-    progress = st.progress(task["progress"], text=task.get("status_text", "生成中..."))
-    progress.progress(task["progress"], text=task["status_text"])
-    if task.get("completed"):
+
+    status = task.get("status")
+    stop_requested = task.get("stop_requested")
+
+    # 处理停止请求：用户点击停止时立即更新状态，不等后台线程
+    if stop_requested and status == "running":
+        task["status"] = "stopped"
+        task["status_text"] = task.get("status_text", "生成已停止")
+        status = "stopped"
+
+    if status == "completed":
         st.success(f"✅ 生成完成：{task['generated']} 页")
-        st.rerun()
+        return
+    if status == "stopped":
+        st.warning(f"⚠️ 已停止：{task.get('status_text', '生成已中断')}")
+        return
+    if status != "running":
+        return
+
+    col1, col2 = st.columns([1, 0.15])
+    with col1:
+        st.info("⏳ 后台生成进行中...")
+        st.progress(task["progress"], text=task.get("status_text", "生成中..."))
+    with col2:
+        if st.button("停止", key="stop_generation"):
+            task["stop_requested"] = True
+            st.rerun()
 
 
 def _generate_whole_deck_explanations(
@@ -851,6 +872,7 @@ def _generate_whole_deck_explanations(
             "max_tokens": max_tokens,
             "active_model_label": active_model_label,
             "completed": False,
+            "stop_requested": False,
         }
         st.session_state["ppt_generation_task"] = task
         thread = threading.Thread(
@@ -947,6 +969,10 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
     reasoning_depth = st.session_state.get("active_api_reasoning_depth")
 
     for index, slide in enumerate(targets, start=1):
+        if task.get("stop_requested"):
+            task["status"] = "stopped"
+            task["status_text"] = f"已停止：{index - 1} 页"
+            return
         task["progress"] = (index - 1) / total
         task["status_text"] = f"正在分析第 {slide['slide_number']} 页 / 共 {total} 页待生成..."
 
@@ -994,15 +1020,21 @@ def _build_reader_payload(
     payload = []
     for slide in slides:
         image_path = Path(slide.get("image_path") or "")
-        if not image_path.exists():
-            continue
         latest = latest_by_slide_id.get(int(slide["id"]))
+        slide_text = slide.get("slide_text") or ""
+        slide_title = slide.get("title") or f"第 {slide['slide_number']} 页"
+
+        if image_path.exists() and image_path.is_file():
+            image_data = _image_data_uri(image_path)
+        else:
+            image_data = ""
+
         payload.append(
             {
                 "slideNumber": int(slide["slide_number"]),
-                "title": slide.get("title") or f"第 {slide['slide_number']} 页",
-                "image": _image_data_uri(image_path),
-                "explanation": latest["explanation"] if latest else "本页还没有 AI 讲解。点击上方“生成整份资料逐页讲解”后会自动填入。",
+                "title": slide_title,
+                "image": image_data,
+                "explanation": latest["explanation"] if latest else "本页还没有 AI 讲解。" + (f"\n\n参考文字：\n{slide_text[:200]}..." if slide_text else ""),
                 "model": latest["model"] if latest else "",
                 "createdAt": latest["created_at"] if latest else "",
                 "questions": question_by_slide_id.get(int(slide["id"]), []),
@@ -1557,6 +1589,8 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
 
 
 def _image_data_uri(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
     suffix = path.suffix.lower().lstrip(".") or "png"
     mime = "jpeg" if suffix in {"jpg", "jpeg"} else "png"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")

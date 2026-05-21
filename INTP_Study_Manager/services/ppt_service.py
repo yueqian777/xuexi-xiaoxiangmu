@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import platform
 import subprocess
 import re
 from datetime import datetime
@@ -182,6 +184,13 @@ def render_pdf_page_images(path: Path) -> dict[int, Path]:
 
 
 def render_pptx_page_images(path: Path) -> dict[int, Path]:
+    if platform.system() == "Windows":
+        return _render_pptx_page_images_windows(path)
+    else:
+        return _render_pptx_page_images_linux(path)
+
+
+def _render_pptx_page_images_windows(path: Path) -> dict[int, Path]:
     target_dir = _page_image_target_dir(path)
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -226,6 +235,126 @@ try {{
     if not result:
         raise RuntimeError("PowerPoint 导出完成，但未找到页面图片。")
     return result
+
+
+def _render_pptx_page_images_linux(path: Path) -> dict[int, Path]:
+    result: dict[int, Path] = {}
+    # Try LibreOffice first
+    lo_result = _render_pptx_with_libreoffice(path)
+    if lo_result:
+        return lo_result
+    # Fallback: try python-pptx + PIL to render each slide
+    return _render_pptx_with_pptx2img(path)
+
+
+def _render_pptx_with_libreoffice(path: Path) -> dict[int, Path] | None:
+    target_dir = _page_image_target_dir(path)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        result = subprocess.run(
+            [
+                "libreoffice",
+                "--headless",
+                "--convert-to",
+                "png",
+                "--outdir",
+                str(target_dir),
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except FileNotFoundError:
+        return None  # LibreOffice not installed
+    if result.returncode != 0:
+        return None  # LibreOffice failed
+
+    result_map: dict[int, Path] = {}
+    for image in sorted(target_dir.glob("*.png")):
+        index = _slide_image_index(image.name)
+        if index:
+            normalized = target_dir / f"page_{index:03d}.png"
+            if image != normalized:
+                image.replace(normalized)
+            result_map[index] = normalized
+    return result_map if result_map else None
+
+
+def _render_pptx_with_pptx2img(path: Path) -> dict[int, Path]:
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches, Pt
+        from PIL import Image
+        import io
+    except ImportError as exc:
+        raise RuntimeError(
+            "在 Linux 上渲染 PPTX 页面图片需要安装依赖：pip install python-pptx Pillow\n"
+            "或安装 LibreOffice 后将其添加到 PATH。"
+        ) from exc
+
+    target_dir = _page_image_target_dir(path)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    presentation = Presentation(path)
+
+    result: dict[int, Path] = {}
+    for index, slide in enumerate(presentation.slides, start=1):
+        # Get slide dimensions
+        slide_width = presentation.slide_width
+        slide_height = presentation.slide_height
+
+        # Create a blank image
+        width_px = int(slide_width / 914400) * 2  # Convert EMUs to pixels at 2x scale
+        height_px = int(slide_height / 914400) * 2
+        img = Image.new("RGB", (width_px, height_px), (255, 255, 255))
+
+        # Try to render using pptx's shape positioning
+        # Note: python-pptx cannot directly render to image,
+        # so we create a visual representation from shapes
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                _draw_text_shape(img, shape, slide_width, slide_height)
+            elif hasattr(shape, "image"):
+                _draw_picture_shape(img, shape, slide_width, slide_height)
+
+        target = target_dir / f"page_{index:03d}.png"
+        img.save(target)
+        result[index] = target
+
+    if not result:
+        raise RuntimeError("PPTX 页面渲染失败，未生成任何图片。")
+    return result
+
+
+def _draw_text_shape(img: Image.Image, shape, slide_width: int, slide_height: int) -> None:
+    try:
+        from PIL import ImageDraw, ImageFont
+        left = int(shape.left / 914400) * 2
+        top = int(shape.top / 914400) * 2
+        width = int(shape.width / 914400) * 2
+        height = int(shape.height / 914400) * 2
+        draw = ImageDraw.Draw(img)
+        text = shape.text_frame.text
+        if text.strip():
+            # Simple text rendering - just draw text
+            for line in text.split("\n")[:20]:  # Limit lines
+                if line.strip():
+                    draw.text((left + 5, top + 5), line[:100], fill=(0, 0, 0))
+                    top += 20
+    except Exception:
+        pass
+
+
+def _draw_picture_shape(img: Image.Image, shape, slide_width: int, slide_height: int) -> None:
+    try:
+        left = int(shape.left / 914400) * 2
+        top = int(shape.top / 914400) * 2
+        width = int(shape.width / 914400) * 2
+        height = int(shape.height / 914400) * 2
+        img.paste((200, 200, 200), (left, top, left + width, top + height))
+    except Exception:
+        pass
 
 
 def render_missing_page_images(deck: dict, slides: list[dict]) -> dict[int, Path]:

@@ -6,3 +6,4 @@ requests>=2.31
 pypdf>=5.0
 pymupdf>=1.24
 cryptography>=42.0
+Pillow>=10.0
