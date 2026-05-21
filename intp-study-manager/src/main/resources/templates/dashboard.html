@@ -1,105 +1,64 @@
-<!DOCTYPE html>
-<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
-<head th:replace="~{fragments/layout :: head(${pageTitle})}"></head>
-<body>
-<div class="app-shell">
-    <aside th:replace="~{fragments/layout :: sidebar(${active})}"></aside>
-    <main class="main">
-        <header th:replace="~{fragments/layout :: topbar(${pageTitle})}"></header>
-        <div th:replace="~{fragments/layout :: flash}"></div>
-
-        <section class="grid four">
-            <div class="metric"><span>学习记录</span><strong th:text="${stats.studySessionCount}">0</strong></div>
-            <div class="metric"><span>知识卡片</span><strong th:text="${stats.knowledgeCardCount}">0</strong></div>
-            <div class="metric"><span>今日待复习</span><strong th:text="${stats.dueReviewCount}">0</strong></div>
-            <div class="metric"><span>待探索问题</span><strong th:text="${stats.openParkingCount}">0</strong></div>
-        </section>
-
-        <section class="grid two mt">
+<!doctype html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org" th:replace="~{layout :: layout('首页 Dashboard', ~{::section})}">
+<section>
+    <h1 class="h3 mb-3">首页 Dashboard</h1>
+    <div class="row g-3 mb-3">
+        <div class="col-md-3"><div class="panel metric"><div class="text-secondary">学习记录</div><div class="display-6" th:text="${studyCount}">0</div></div></div>
+        <div class="col-md-3"><div class="panel metric"><div class="text-secondary">知识卡片</div><div class="display-6" th:text="${cardCount}">0</div></div></div>
+        <div class="col-md-3"><div class="panel metric"><div class="text-secondary">待复习</div><div class="display-6" th:text="${pendingCount}">0</div></div></div>
+        <div class="col-md-3"><div class="panel metric"><div class="text-secondary">资料</div><div class="display-6" th:text="${deckCount}">0</div></div></div>
+    </div>
+    <div class="row g-3">
+        <div class="col-lg-6">
             <div class="panel">
-                <h2>今天需要复习什么</h2>
-                <div class="empty" th:if="${#lists.isEmpty(todayReviews)}">今天没有到期复习任务。</div>
-                <div class="card" th:each="item : ${todayReviews}">
-                    <div class="inline-row">
-                        <span class="tag" th:text="${item.task.reviewDate}">日期</span>
-                        <span class="status warn" th:text="${item.task.reviewStage}">阶段</span>
-                    </div>
-                    <h3 th:text="${item.knowledgeLabel}">知识点</h3>
-                    <form th:action="@{/reviews/{id}/result(id=${item.task.id})}" method="post">
-                        <label>复习结果
-                            <select name="result">
-                                <option th:each="result : ${reviewResults}" th:value="${result}" th:text="${result}"></option>
-                            </select>
-                        </label>
-                        <button type="submit">保存复习结果</button>
-                    </form>
+                <h2 class="h5">今日复习</h2>
+                <table class="table table-sm">
+                    <thead><tr><th>科目</th><th>知识点</th><th>阶段</th><th>掌握度</th></tr></thead>
+                    <tbody>
+                    <tr th:each="task : ${todayTasks}">
+                        <td th:text="${task.subject}"></td>
+                        <td th:text="${task.topic}"></td>
+                        <td th:text="${task.reviewStage}"></td>
+                        <td th:text="${task.mastery} + '%'"></td>
+                    </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="panel">
+                <h2 class="h5">低掌握度知识点</h2>
+                <table class="table table-sm">
+                    <thead><tr><th>科目</th><th>知识点</th><th>掌握度</th><th>核心问题</th></tr></thead>
+                    <tbody>
+                    <tr th:each="card : ${lowMasteryCards}">
+                        <td th:text="${card.subject}"></td>
+                        <td th:text="${card.topic}"></td>
+                        <td th:text="${card.mastery} + '%'"></td>
+                        <td th:text="${card.coreQuestion}"></td>
+                    </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="panel">
+                <h2 class="h5">最近卡点</h2>
+                <div th:each="item : ${recentBlockers}" class="border-bottom py-2">
+                    <div class="fw-semibold" th:text="|${item.date} · ${item.subject} · ${item.title}|"></div>
+                    <div class="text-pre" th:text="${item.blockers}"></div>
                 </div>
             </div>
-
+        </div>
+        <div class="col-lg-6">
             <div class="panel">
-                <h2>每日复盘提醒</h2>
-                <p class="muted" th:text="${reminderConfig.enabled ? '提醒已开启：' + reminderConfig.time : '提醒未开启'}">提醒状态</p>
-                <div class="status good" th:if="${todayReviewLog != null}">今天已完成复盘</div>
-                <form th:if="${todayReviewLog == null}" th:action="@{/dashboard/daily-review}" method="post">
-                    <label>复盘备注
-                        <textarea name="notes" placeholder="今天复盘了什么？还需要明天继续看什么？"></textarea>
-                    </label>
-                    <button type="submit">标记今天已完成复盘</button>
-                </form>
-            </div>
-        </section>
-
-        <section class="grid three mt">
-            <div class="panel">
-                <h2>最近学习记录</h2>
-                <div class="empty" th:if="${#lists.isEmpty(recentSessions)}">还没有学习记录。</div>
-                <div class="card" th:each="session, stat : ${recentSessions}" th:if="${stat.index < 5}">
-                    <span class="tag" th:text="${session.date}">日期</span>
-                    <h3 th:text="${session.title}">主题</h3>
-                    <p th:text="${session.mainQuestion}">核心问题</p>
-                    <p class="muted" th:text="${session.subject + ' · 掌握度 ' + session.mastery + '%'}">科目</p>
+                <h2 class="h5">未解决问题</h2>
+                <div th:each="item : ${parkingQuestions}" class="border-bottom py-2">
+                    <span class="badge text-bg-secondary" th:text="${item.subject}"></span>
+                    <span th:text="${item.question}"></span>
                 </div>
             </div>
-
-            <div class="panel">
-                <h2>掌握度低于 70% 的知识点</h2>
-                <div class="empty" th:if="${#lists.isEmpty(lowMasteryCards)}">暂无低掌握度知识点。</div>
-                <div class="card" th:each="card : ${lowMasteryCards}">
-                    <span class="status danger" th:text="${card.mastery + '%'}">掌握度</span>
-                    <h3 th:text="${card.topic}">知识点</h3>
-                    <p th:text="${card.oneSentence}">一句话解释</p>
-                </div>
-            </div>
-
-            <div class="panel">
-                <h2>探索停车场问题</h2>
-                <div class="empty" th:if="${#lists.isEmpty(parkingQuestions)}">暂无待探索问题。</div>
-                <div class="card" th:each="item : ${parkingQuestions}">
-                    <span class="tag" th:text="${item.subject}">科目</span>
-                    <p th:text="${item.question}">问题</p>
-                    <form th:action="@{/parking-lot/{id}/resolve(id=${item.id})}" method="post">
-                        <button class="small-button secondary" type="submit">标记已解决</button>
-                    </form>
-                </div>
-            </div>
-        </section>
-
-        <section class="panel mt">
-            <h2>最近知识双链</h2>
-            <div class="empty" th:if="${#lists.isEmpty(recentLinks)}">还没有建立知识链接。</div>
-            <table class="table" th:if="${!#lists.isEmpty(recentLinks)}">
-                <thead><tr><th>源知识点</th><th>目标知识点</th><th>关系</th><th>联系 / 对比</th></tr></thead>
-                <tbody>
-                <tr th:each="link, stat : ${recentLinks}" th:if="${stat.index < 8}">
-                    <td th:text="${link.sourceLabel}">源</td>
-                    <td th:text="${link.targetLabel}">目标</td>
-                    <td th:text="${link.link.relationType}">关联</td>
-                    <td th:text="${link.link.comparePoints}">对比</td>
-                </tr>
-                </tbody>
-            </table>
-        </section>
-    </main>
-</div>
-</body>
+        </div>
+    </div>
+</section>
 </html>

@@ -22,7 +22,7 @@ public class DashboardController {
         this.dailyReviewService = dailyReviewService;
     }
 
-    @GetMapping("/")
+    @GetMapping({"/", "/dashboard"})
     public String dashboard(Model model) {
         model.addAttribute("title", "首页 Dashboard");
         model.addAttribute("studyCount", statsService.count("study_sessions"));

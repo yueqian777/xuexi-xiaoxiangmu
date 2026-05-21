@@ -23,7 +23,7 @@
         <div class="col-lg-8">
             <div class="panel mb-3">
                 <h2 class="h5">错因统计</h2>
-                <span th:each="item : ${causeCounts}" class="badge text-bg-secondary me-2" th:text="|${item['cause_category']} · ${item['count']}|"></span>
+                <span th:each="item : ${causeCounts}" class="badge text-bg-secondary me-2" th:text="|${item.causeCategory} · ${item.count}|"></span>
             </div>
             <div class="panel">
                 <h2 class="h5">记录</h2>

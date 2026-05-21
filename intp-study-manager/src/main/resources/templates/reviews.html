@@ -1,103 +1,44 @@
-<!DOCTYPE html>
-<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
-<head th:replace="~{fragments/layout :: head(${pageTitle})}"></head>
-<body>
-<div class="app-shell">
-    <aside th:replace="~{fragments/layout :: sidebar(${active})}"></aside>
-    <main class="main">
-        <header th:replace="~{fragments/layout :: topbar(${pageTitle})}"></header>
-        <div th:replace="~{fragments/layout :: flash}"></div>
-
-        <section class="grid two">
-            <div class="panel">
-                <h2>今日复习</h2>
-                <div class="empty" th:if="${#lists.isEmpty(todayReviews)}">今天没有到期复习任务。</div>
-                <div class="card" th:each="item : ${todayReviews}">
-                    <div class="inline-row">
-                        <span class="tag" th:text="${item.task.reviewDate}">日期</span>
-                        <span class="tag" th:text="${item.task.reviewStage}">阶段</span>
-                    </div>
-                    <h3 th:text="${item.knowledgeLabel}">知识点</h3>
-                    <form th:action="@{/reviews/{id}/result(id=${item.task.id})}" method="post">
-                        <label>复习结果
-                            <select name="result">
-                                <option th:each="result : ${reviewResults}" th:value="${result}" th:text="${result}"></option>
-                            </select>
-                        </label>
-                        <button type="submit">保存复习结果</button>
+<!doctype html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org" th:replace="~{layout :: layout('复习计划', ~{::section})}">
+<section>
+    <h1 class="h3 mb-3">复习计划</h1>
+    <div class="panel mb-3">
+        <h2 class="h5">今日到期</h2>
+        <table class="table table-sm">
+            <thead><tr><th>日期</th><th>科目</th><th>知识点</th><th>阶段</th><th>掌握度</th><th>结果</th></tr></thead>
+            <tbody>
+            <tr th:each="task : ${todayTasks}">
+                <td th:text="${task.reviewDate}"></td>
+                <td th:text="${task.subject}"></td>
+                <td th:text="${task.topic}"></td>
+                <td th:text="${task.reviewStage}"></td>
+                <td th:text="${task.mastery} + '%'"></td>
+                <td>
+                    <form class="d-flex gap-2" method="post" th:action="@{/reviews/mark}">
+                        <input type="hidden" name="taskId" th:value="${task.id}">
+                        <select class="form-select form-select-sm" name="result"><option th:each="r : ${reviewResults}" th:text="${r}"></option></select>
+                        <button class="btn btn-sm btn-primary">提交</button>
                     </form>
-                </div>
-            </div>
-
-            <div class="panel">
-                <h2>新增复习任务</h2>
-                <form th:action="@{/reviews}" method="post">
-                    <label>知识点
-                        <select name="knowledgeId" required>
-                            <option th:each="card : ${cards}" th:value="${card.id}" th:text="${'#' + card.id + ' · ' + card.topic}"></option>
-                        </select>
-                    </label>
-                    <div class="grid two">
-                        <label>复习日期 <input type="date" name="reviewDate" th:value="${today}"></label>
-                        <label>复习阶段 <input name="reviewStage" value="自定义复习"></label>
-                    </div>
-                    <label>状态
-                        <select name="status">
-                            <option th:each="status : ${reviewStatuses}" th:value="${status}" th:text="${status}"></option>
-                        </select>
-                    </label>
-                    <button type="submit">创建复习任务</button>
-                </form>
-            </div>
-        </section>
-
-        <section class="panel mt">
-            <h2>全部待复习</h2>
-            <form class="toolbar" th:action="@{/reviews}" method="get">
-                <label>状态
-                    <select name="status">
-                        <option value="全部" th:selected="${selectedStatus == '全部'}">全部</option>
-                        <option th:each="status : ${reviewStatuses}" th:value="${status}" th:text="${status}" th:selected="${status == selectedStatus}"></option>
-                    </select>
-                </label>
-                <button class="secondary" type="submit">筛选</button>
-            </form>
-            <div class="empty" th:if="${#lists.isEmpty(tasks)}">没有复习任务。</div>
-            <details th:each="item : ${tasks}">
-                <summary>
-                    <span th:text="${item.task.reviewDate + ' · ' + item.knowledgeLabel}">复习任务</span>
-                    <span class="tag" th:text="${item.task.status}">状态</span>
-                </summary>
-                <div class="details-body">
-                    <form th:action="@{/reviews/{id}/update(id=${item.task.id})}" method="post">
-                        <input type="hidden" name="knowledgeId" th:value="${item.task.knowledgeId}">
-                        <div class="grid three">
-                            <label>复习日期 <input type="date" name="reviewDate" th:value="${item.task.reviewDate}"></label>
-                            <label>复习阶段 <input name="reviewStage" th:value="${item.task.reviewStage}"></label>
-                            <label>状态
-                                <select name="status">
-                                    <option th:each="status : ${reviewStatuses}" th:value="${status}" th:text="${status}" th:selected="${status == item.task.status}"></option>
-                                </select>
-                            </label>
-                        </div>
-                        <label>结果 <input name="result" th:value="${item.task.result}"></label>
-                        <button type="submit">更新复习任务</button>
-                    </form>
-                    <form th:action="@{/reviews/{id}/result(id=${item.task.id})}" method="post">
-                        <label>标记复习结果
-                            <select name="result">
-                                <option th:each="result : ${reviewResults}" th:value="${result}" th:text="${result}"></option>
-                            </select>
-                        </label>
-                        <button class="secondary" type="submit">保存复习结果</button>
-                    </form>
-                    <form th:action="@{/reviews/{id}/delete(id=${item.task.id})}" method="post">
-                        <button class="danger-button small-button" type="submit">删除复习任务</button>
-                    </form>
-                </div>
-            </details>
-        </section>
-    </main>
-</div>
-</body>
+                </td>
+            </tr>
+            </tbody>
+        </table>
+    </div>
+    <div class="panel">
+        <h2 class="h5">全部待复习</h2>
+        <table class="table table-sm table-hover">
+            <thead><tr><th>日期</th><th>科目</th><th>知识点</th><th>阶段</th><th>掌握度</th><th>错因</th></tr></thead>
+            <tbody>
+            <tr th:each="task : ${pendingTasks}">
+                <td th:text="${task.reviewDate}"></td>
+                <td th:text="${task.subject}"></td>
+                <td th:text="${task.topic}"></td>
+                <td th:text="${task.reviewStage}"></td>
+                <td th:text="${task.mastery} + '%'"></td>
+                <td th:text="${task.lastCause}"></td>
+            </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
 </html>

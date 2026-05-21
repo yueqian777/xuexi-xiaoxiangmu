@@ -1,88 +1,43 @@
-<!DOCTYPE html>
-<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
-<head th:replace="~{fragments/layout :: head(${pageTitle})}"></head>
-<body>
-<div class="app-shell">
-    <aside th:replace="~{fragments/layout :: sidebar(${active})}"></aside>
-    <main class="main">
-        <header th:replace="~{fragments/layout :: topbar(${pageTitle})}"></header>
-        <div th:replace="~{fragments/layout :: flash}"></div>
-
-        <section class="grid two">
-            <div class="panel">
-                <h2>添加今日学习记录</h2>
-                <form th:action="@{/study-sessions}" method="post">
-                    <div class="grid two">
-                        <label>日期 <input type="date" name="date" th:value="${today}"></label>
-                        <label>科目 <input name="subject" placeholder="例如：信号与系统"></label>
-                    </div>
-                    <div class="grid two">
-                        <label>章节 / 课程 <input name="chapter" placeholder="例如：Z 变换"></label>
-                        <label>今日学习主题 <input name="title" placeholder="例如：极零图与稳定性" required></label>
-                    </div>
-                    <label>核心问题 <textarea name="mainQuestion" placeholder="这个主题想解决什么问题？" required></textarea></label>
-                    <label>已掌握内容 <textarea name="masteredContent"></textarea></label>
-                    <label>卡点 <textarea name="blockers"></textarea></label>
-                    <label>错题或不会的问题 <textarea name="wrongQuestions"></textarea></label>
-                    <label>主线讲解整理 / 总结 <textarea name="summary"></textarea></label>
-                    <div class="grid three">
-                        <label>掌握度 <input type="number" name="mastery" min="0" max="100" value="50"></label>
-                        <label class="check-row"><input type="checkbox" name="needReview" checked> 加入复习</label>
-                        <label class="check-row"><input type="checkbox" name="key"> 关键记录</label>
-                    </div>
-                    <button type="submit">保存学习记录</button>
-                </form>
+<!doctype html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org" th:replace="~{layout :: layout('学习登记', ~{::section})}">
+<section>
+    <h1 class="h3 mb-3">学习登记</h1>
+    <div class="panel mb-3">
+        <form method="post" th:action="@{/study-sessions}" class="row g-3">
+            <div class="col-md-3"><label class="form-label">日期</label><input class="form-control" type="date" name="date" th:value="${today}"></div>
+            <div class="col-md-3"><label class="form-label">科目</label><input class="form-control" name="subject"></div>
+            <div class="col-md-3"><label class="form-label">章节 / PPT</label><input class="form-control" name="chapter"></div>
+            <div class="col-md-3"><label class="form-label">今日学习主题</label><input class="form-control" name="title"></div>
+            <div class="col-md-6"><label class="form-label">核心问题</label><textarea class="form-control" name="mainQuestion" rows="3"></textarea></div>
+            <div class="col-md-6"><label class="form-label">已掌握内容</label><textarea class="form-control" name="masteredContent" rows="3"></textarea></div>
+            <div class="col-md-4"><label class="form-label">卡点</label><textarea class="form-control" name="blockers" rows="3"></textarea></div>
+            <div class="col-md-4"><label class="form-label">错题或不会的问题</label><textarea class="form-control" name="wrongQuestions" rows="3"></textarea></div>
+            <div class="col-md-4"><label class="form-label">主线讲解整理 / 总结</label><textarea class="form-control" name="summary" rows="3"></textarea></div>
+            <div class="col-md-3"><label class="form-label">掌握度</label><input class="form-range" type="range" name="mastery" min="0" max="100" value="60"></div>
+            <div class="col-md-6 d-flex align-items-end gap-3">
+                <label class="form-check"><input class="form-check-input" type="checkbox" name="needReview" checked> 需要复习</label>
+                <label class="form-check"><input class="form-check-input" type="checkbox" name="isKey"> 加入重点知识点</label>
+                <label class="form-check"><input class="form-check-input" type="checkbox" name="createCard"> 同时创建知识点卡片</label>
             </div>
-
-            <div class="panel">
-                <h2>历史学习记录</h2>
-                <form class="toolbar" th:action="@{/study-sessions}" method="get">
-                    <label>按科目筛选
-                        <select name="subject">
-                            <option value="全部" th:selected="${selectedSubject == '全部'}">全部</option>
-                            <option th:each="subject : ${subjects}" th:value="${subject}" th:text="${subject}" th:selected="${subject == selectedSubject}"></option>
-                        </select>
-                    </label>
-                    <button class="secondary" type="submit">筛选</button>
-                </form>
-                <div class="empty" th:if="${#lists.isEmpty(sessions)}">没有符合条件的学习记录。</div>
-                <details th:each="session : ${sessions}">
-                    <summary>
-                        <span th:text="${session.date + ' · ' + session.subject + ' · ' + session.title}">学习记录</span>
-                        <span class="tag" th:text="${session.mastery + '%'}">掌握度</span>
-                    </summary>
-                    <div class="details-body">
-                        <p><strong>核心问题：</strong><span th:text="${session.mainQuestion}">问题</span></p>
-                        <p><strong>卡点：</strong><span th:text="${session.blockers}">卡点</span></p>
-                        <form th:action="@{/study-sessions/{id}/update(id=${session.id})}" method="post">
-                            <div class="grid two">
-                                <label>日期 <input type="date" name="date" th:value="${session.date}"></label>
-                                <label>科目 <input name="subject" th:value="${session.subject}"></label>
-                            </div>
-                            <div class="grid two">
-                                <label>章节 / 课程 <input name="chapter" th:value="${session.chapter}"></label>
-                                <label>今日学习主题 <input name="title" th:value="${session.title}" required></label>
-                            </div>
-                            <label>核心问题 <textarea name="mainQuestion" th:text="${session.mainQuestion}" required></textarea></label>
-                            <label>已掌握内容 <textarea name="masteredContent" th:text="${session.masteredContent}"></textarea></label>
-                            <label>卡点 <textarea name="blockers" th:text="${session.blockers}"></textarea></label>
-                            <label>错题或不会的问题 <textarea name="wrongQuestions" th:text="${session.wrongQuestions}"></textarea></label>
-                            <label>主线讲解整理 / 总结 <textarea name="summary" th:text="${session.summary}"></textarea></label>
-                            <div class="grid three">
-                                <label>掌握度 <input type="number" name="mastery" min="0" max="100" th:value="${session.mastery}"></label>
-                                <label class="check-row"><input type="checkbox" name="needReview" th:checked="${session.needReview}"> 加入复习</label>
-                                <label class="check-row"><input type="checkbox" name="key" th:checked="${session.key}"> 关键记录</label>
-                            </div>
-                            <button type="submit">更新记录</button>
-                        </form>
-                        <form th:action="@{/study-sessions/{id}/delete(id=${session.id})}" method="post">
-                            <button class="danger-button small-button" type="submit">删除记录</button>
-                        </form>
-                    </div>
-                </details>
-            </div>
-        </section>
-    </main>
-</div>
-</body>
+            <div class="col-md-3 d-flex align-items-end justify-content-end"><button class="btn btn-primary">保存学习记录</button></div>
+        </form>
+    </div>
+    <div class="panel">
+        <h2 class="h5">历史学习记录</h2>
+        <table class="table table-sm table-hover">
+            <thead><tr><th>ID</th><th>日期</th><th>科目</th><th>章节</th><th>主题</th><th>核心问题</th><th>掌握度</th></tr></thead>
+            <tbody>
+            <tr th:each="record : ${records}">
+                <td th:text="${record['id']}"></td>
+                <td th:text="${record['date']}"></td>
+                <td th:text="${record['subject']}"></td>
+                <td th:text="${record['chapter']}"></td>
+                <td th:text="${record['title']}"></td>
+                <td th:text="${record['main_question']}"></td>
+                <td th:text="${record['mastery']} + '%'"></td>
+            </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
 </html>
