@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-from db import BASE_DIR, fetch_all, fetch_one, insert_and_get_id
+from db import BASE_DIR, execute, fetch_all, fetch_one, insert_and_get_id
 from services.ai_service import (
     AIServiceError,
     DEFAULT_MODEL,
@@ -30,6 +30,8 @@ from services.study_asset_service import parse_study_assets, save_study_assets
 
 SYNCED_READER_COMPONENT_PATH = BASE_DIR / "components" / "synced_reader"
 SYNCED_READER_COMPONENT = None
+LAST_READER_POSITION_SETTING_KEY = "ppt_reader_last_position"
+LAST_READER_DECK_STATE_KEY = "ppt_reader_deck_id"
 
 
 def _get_synced_reader_component():
@@ -43,6 +45,99 @@ def _get_synced_reader_component():
         path=str(SYNCED_READER_COMPONENT_PATH),
     )
     return SYNCED_READER_COMPONENT
+
+
+def _read_last_reader_position() -> dict[str, int]:
+    row = fetch_one("SELECT value FROM app_settings WHERE key = ?", (LAST_READER_POSITION_SETTING_KEY,))
+    if not row:
+        return {}
+    try:
+        data = json.loads(row["value"])
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    position: dict[str, int] = {}
+    for key in ("deck_id", "slide_number"):
+        try:
+            value = int(data.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            position[key] = value
+    return position
+
+
+def _save_last_reader_position(deck_id: int, slide_number: int | None = None) -> None:
+    try:
+        deck_id = int(deck_id)
+    except (TypeError, ValueError):
+        return
+    if deck_id <= 0:
+        return
+
+    existing = _read_last_reader_position()
+    if slide_number is None and existing.get("deck_id") == deck_id:
+        slide_number = existing.get("slide_number")
+
+    payload = {"deck_id": deck_id}
+    try:
+        slide_number_value = int(slide_number or 0)
+    except (TypeError, ValueError):
+        slide_number_value = 0
+    if slide_number_value > 0:
+        payload["slide_number"] = slide_number_value
+
+    if existing == payload:
+        return
+
+    execute(
+        """
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, datetime('now', 'localtime'))
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        """,
+        (LAST_READER_POSITION_SETTING_KEY, json.dumps(payload, ensure_ascii=False)),
+    )
+
+
+def _default_reader_deck_id(deck_ids: list[int], last_position: dict[str, int]) -> int:
+    if not deck_ids:
+        return 0
+
+    remembered_deck_id = int(last_position.get("deck_id") or 0)
+    if remembered_deck_id in deck_ids:
+        return remembered_deck_id
+
+    state_deck_id = st.session_state.get(LAST_READER_DECK_STATE_KEY)
+    try:
+        state_deck_id = int(state_deck_id or 0)
+    except (TypeError, ValueError):
+        state_deck_id = 0
+    if state_deck_id in deck_ids:
+        return state_deck_id
+
+    return deck_ids[0]
+
+
+def _remember_reader_deck_selection(deck_id: int, last_position: dict[str, int]) -> None:
+    slide_number = None
+    if last_position.get("deck_id") == deck_id:
+        slide_number = last_position.get("slide_number")
+    _save_last_reader_position(deck_id, slide_number)
+
+
+def _initial_reader_slide_number(deck_id: int, slides: list[dict], last_position: dict[str, int]) -> int:
+    if not slides:
+        return 1
+    slide_numbers = {int(slide["slide_number"]) for slide in slides}
+    remembered_slide = int(last_position.get("slide_number") or 0)
+    if int(last_position.get("deck_id") or 0) == int(deck_id) and remembered_slide in slide_numbers:
+        return remembered_slide
+    return int(slides[0]["slide_number"])
 
 
 def render() -> None:
@@ -75,12 +170,20 @@ def render() -> None:
         st.info("请先上传一个 PPTX 或 PDF 文件。当前版本会解析每页文字内容，后续可继续增强真实页面渲染和 OCR。")
         return
 
-    deck_by_id = {deck["id"]: deck for deck in decks}
+    deck_by_id = {int(deck["id"]): deck for deck in decks}
+    deck_ids = list(deck_by_id)
+    last_position = _read_last_reader_position()
+    default_deck_id = _default_reader_deck_id(deck_ids, last_position)
+    if st.session_state.get(LAST_READER_DECK_STATE_KEY) not in deck_by_id:
+        st.session_state[LAST_READER_DECK_STATE_KEY] = default_deck_id
     deck_id = st.selectbox(
         "选择 PPT",
-        list(deck_by_id),
+        deck_ids,
         format_func=lambda item_id: _deck_label(deck_by_id, item_id),
+        key=LAST_READER_DECK_STATE_KEY,
     )
+    deck_id = int(deck_id)
+    _remember_reader_deck_selection(deck_id, last_position)
     deck = deck_by_id.get(deck_id)
     slides = fetch_all(
         "SELECT * FROM ppt_slides WHERE deck_id = ? ORDER BY slide_number ASC",
@@ -94,7 +197,7 @@ def render() -> None:
 
     st.divider()
     _render_deck_actions(deck, slides, latest_by_slide_id)
-    _render_synced_reader(deck, slides, latest_by_slide_id)
+    _render_synced_reader(deck, slides, latest_by_slide_id, last_position)
 
     st.divider()
     _render_study_asset_generator(deck)
@@ -264,7 +367,12 @@ def _render_deck_actions(deck: dict, slides: list[dict], latest_by_slide_id: dic
         )
 
 
-def _render_synced_reader(deck: dict, slides: list[dict], latest_by_slide_id: dict[int, dict]) -> None:
+def _render_synced_reader(
+    deck: dict,
+    slides: list[dict],
+    latest_by_slide_id: dict[int, dict],
+    last_position: dict[str, int],
+) -> None:
     st.subheader("同步阅读器")
     st.caption("提示：右侧固定插问栏会绑定当前页。你可以直接提问，或选中讲解文字后引用到插问。")
     question_by_slide_id = _questions_by_slide_ids([int(slide["id"]) for slide in slides])
@@ -285,6 +393,7 @@ def _render_synced_reader(deck: dict, slides: list[dict], latest_by_slide_id: di
         subject=deck.get("subject") or "未分类",
         active_model=_active_model_label(),
         pages=payload,
+        initial_slide_number=_initial_reader_slide_number(int(deck["id"]), slides, last_position),
         height=850,
         default=None,
         key=f"synced_reader_{deck['id']}",
@@ -299,7 +408,8 @@ def _handle_synced_reader_action(
     latest_by_slide_id: dict[int, dict],
     payload: dict,
 ) -> None:
-    if payload.get("action") != "canvas_question":
+    action = payload.get("action")
+    if action != "canvas_question":
         return
     try:
         query_deck_id = int(payload.get("deckId", 0))

@@ -308,10 +308,41 @@
       border-left-color: var(--accent);
       background: #effbf7;
     }
+    .note-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 0 0 10px;
+    }
     .note h3 {
       margin: 0 0 10px;
       color: var(--accent);
       font-size: 18px;
+    }
+    .note-header h3 {
+      margin: 0;
+    }
+    .note-refresh {
+      flex: 0 0 auto;
+      border: 1px solid #b9dde6;
+      border-radius: 999px;
+      padding: 5px 10px;
+      background: #f7fffd;
+      color: #087b70;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      box-shadow: 0 4px 12px rgba(24, 111, 130, 0.08);
+    }
+    .note-refresh:hover {
+      border-color: var(--accent);
+      background: var(--soft-green);
+    }
+    .note-refresh:disabled {
+      cursor: default;
+      opacity: 0.72;
     }
     .note-meta {
       margin-bottom: 12px;
@@ -414,6 +445,9 @@
       font-size: 13px;
     }
     .selection-toolbar.show { display: flex; }
+    body.reader-fullscreen .selection-toolbar {
+      z-index: 100001;
+    }
     .selection-toolbar button {
       border: 0;
       border-radius: 999px;
@@ -797,6 +831,9 @@
     let readingMode = 'paged';
     let pageWheelDelta = 0;
     let lastPageSwitchAt = 0;
+    let scrollStateSaveTimer = null;
+    let viewportAnchorTimers = [];
+    let suppressObserverUntil = 0;
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -807,26 +844,113 @@
         .replaceAll("'", '&#039;');
     }
 
+    function findUnescaped(source, token, start) {
+      let index = start;
+      while (index < source.length) {
+        const found = source.indexOf(token, index);
+        if (found < 0) return -1;
+        let slashCount = 0;
+        for (let i = found - 1; i >= 0 && source[i] === '\\'; i -= 1) {
+          slashCount += 1;
+        }
+        if (slashCount % 2 === 0) return found;
+        index = found + token.length;
+      }
+      return -1;
+    }
+
+    function normalizeMathDelimiters(value) {
+      return String(value ?? '').replace(/\\\\([()[\]])/g, '\\$1');
+    }
+
+    function protectMathSegments(value) {
+      const source = normalizeMathDelimiters(value);
+      const segments = [];
+      let protectedSource = '';
+      let index = 0;
+      const pushSegment = (endIndex, segment) => {
+        const token = `MATHJAXPLACEHOLDER${segments.length}TOKEN`;
+        segments.push({ token, segment });
+        protectedSource += token;
+        index = endIndex;
+      };
+
+      while (index < source.length) {
+        if (source.startsWith('$$', index)) {
+          const end = findUnescaped(source, '$$', index + 2);
+          if (end >= 0) {
+            pushSegment(end + 2, `\\[${source.slice(index + 2, end)}\\]`);
+            continue;
+          }
+        }
+        if (source.startsWith('\\[', index)) {
+          const end = findUnescaped(source, '\\]', index + 2);
+          if (end >= 0) {
+            pushSegment(end + 2, source.slice(index, end + 2));
+            continue;
+          }
+        }
+        if (source.startsWith('\\(', index)) {
+          const end = findUnescaped(source, '\\)', index + 2);
+          if (end >= 0) {
+            pushSegment(end + 2, source.slice(index, end + 2));
+            continue;
+          }
+        }
+        if (source[index] === '$' && source[index + 1] !== '$') {
+          const end = findUnescaped(source, '$', index + 1);
+          if (end >= 0) {
+            pushSegment(end + 1, `\\(${source.slice(index + 1, end)}\\)`);
+            continue;
+          }
+        }
+        protectedSource += source[index];
+        index += 1;
+      }
+      return { protectedSource, segments };
+    }
+
+    function restoreMathSegments(value, segments) {
+      let html = String(value ?? '');
+      segments.forEach(({ token, segment }) => {
+        const mathText = escapeHtml(segment);
+        html = html.replaceAll(new RegExp(`<code>\\s*${token}\\s*</code>`, 'g'), mathText);
+        html = html.replaceAll(token, mathText);
+      });
+      return html;
+    }
+
     function renderMarkdown(value) {
       const source = String(value ?? '');
       if (!window.marked || !window.DOMPurify) {
         return escapeHtml(source).replaceAll('\n', '<br>');
       }
-      const rawHtml = window.marked.parse(source, {
+      const { protectedSource, segments } = protectMathSegments(source);
+      const rawHtml = window.marked.parse(protectedSource, {
         gfm: true,
         breaks: true,
       });
-      return window.DOMPurify.sanitize(rawHtml, {
+      const sanitized = window.DOMPurify.sanitize(rawHtml, {
         USE_PROFILES: { html: true },
       });
+      return restoreMathSegments(sanitized, segments);
+    }
+
+    function typesetTargets(targets) {
+      if (!window.MathJax?.typesetPromise) {
+        window.setTimeout(() => typesetTargets(targets), 120);
+        return Promise.resolve();
+      }
+      try {
+        window.MathJax.typesetClear?.(targets);
+      } catch (error) {
+        console.error(error);
+      }
+      return window.MathJax.typesetPromise(targets).catch(error => console.error(error));
     }
 
     function typesetMath() {
-      if (!window.MathJax?.typesetPromise) {
-        window.setTimeout(typesetMath, 120);
-        return;
-      }
-      window.MathJax.typesetPromise([noteRoot, canvasMessages]).catch(error => console.error(error));
+      return typesetTargets([noteRoot, canvasMessages]);
     }
 
     function storageKey(name) {
@@ -931,18 +1055,45 @@
       saveLayoutState();
     }
 
-    function toggleFullscreen() {
-      const isFs = document.fullscreenElement;
-      if (!isFs) {
-        document.body.classList.add('reader-fullscreen');
-        document.documentElement.requestFullscreen().catch(() => {});
+    function syncFullscreenState(isFullscreen) {
+      document.body.classList.toggle('reader-fullscreen', isFullscreen);
+      if (!fullscreenButton) return;
+      if (isFullscreen) {
         fullscreenButton.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg>';
         fullscreenButton.title = '退出全屏';
       } else {
-        document.body.classList.remove('reader-fullscreen');
-        document.exitFullscreen();
         fullscreenButton.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>';
         fullscreenButton.title = '全屏放大';
+      }
+    }
+
+    function preserveCurrentSlideAfterViewportChange(slideNumber = currentSlideNumber) {
+      const targetSlide = Number(slideNumber || currentSlideNumber || 1);
+      if (!pageForSlide(targetSlide)) return;
+      suppressObserverUntil = Date.now() + 700;
+      viewportAnchorTimers.forEach(timer => window.clearTimeout(timer));
+      viewportAnchorTimers = [];
+      const anchor = () => {
+        setActive(targetSlide, { scrollPage: true, behavior: 'auto' });
+      };
+      window.requestAnimationFrame(anchor);
+      [80, 220, 420].forEach(delay => {
+        viewportAnchorTimers.push(window.setTimeout(anchor, delay));
+      });
+    }
+
+    function toggleFullscreen() {
+      const targetSlide = currentSlideNumber;
+      saveScrollState();
+      if (!document.fullscreenElement) {
+        syncFullscreenState(true);
+        document.documentElement.requestFullscreen()
+          .catch(() => syncFullscreenState(false))
+          .finally(() => preserveCurrentSlideAfterViewportChange(targetSlide));
+      } else {
+        document.exitFullscreen()
+          .catch(() => {})
+          .finally(() => preserveCurrentSlideAfterViewportChange(targetSlide));
       }
     }
 
@@ -993,6 +1144,11 @@
       localStorage.setItem(storageKey('currentSlide'), String(currentSlideNumber));
     }
 
+    function scheduleScrollStateSave() {
+      window.clearTimeout(scrollStateSaveTimer);
+      scrollStateSaveTimer = window.setTimeout(saveScrollState, 140);
+    }
+
     function readScrollState() {
       if (!deckId) return null;
       return {
@@ -1030,7 +1186,9 @@
     }
 
     function setActive(pageNumber, options = {}) {
-      currentSlideNumber = Number(pageNumber || 1);
+      const nextSlideNumber = Number(pageNumber || 1);
+      if (!pageForSlide(nextSlideNumber)) return;
+      currentSlideNumber = nextSlideNumber;
       document.querySelectorAll('.page.active,.note.active').forEach(el => el.classList.remove('active'));
       const page = document.getElementById(`page-${currentSlideNumber}`);
       const note = document.getElementById(`note-${currentSlideNumber}`);
@@ -1045,6 +1203,29 @@
         centerPage(currentSlideNumber, options.behavior || 'smooth');
       }
       saveScrollState();
+    }
+
+    function refreshNoteDisplay(slideNumber, button = null) {
+      const page = pageForSlide(slideNumber);
+      const note = document.getElementById(`note-${Number(slideNumber)}`);
+      const body = note?.querySelector?.('.note-body');
+      if (!page || !body) return;
+
+      const previousScrollTop = noteRoot.scrollTop;
+      body.innerHTML = renderMarkdown(page.explanation);
+      if (button) {
+        button.disabled = true;
+        button.textContent = '刷新中';
+      }
+      typesetTargets([body]).finally(() => {
+        noteRoot.scrollTop = previousScrollTop;
+        if (!button) return;
+        button.textContent = '已刷新';
+        window.setTimeout(() => {
+          button.disabled = false;
+          button.textContent = '刷新显示';
+        }, 900);
+      });
     }
 
     function renderReader(args) {
@@ -1094,13 +1275,17 @@
 
       noteRoot.innerHTML = pages.map(page => `
         <article class="note" id="note-${page.slideNumber}" data-page="${page.slideNumber}">
-          <h3>第 ${page.slideNumber} 页讲解</h3>
+          <div class="note-header">
+            <h3>第 ${page.slideNumber} 页讲解</h3>
+            <button type="button" class="note-refresh" data-refresh-page="${page.slideNumber}" title="重新渲染本页 Markdown 和公式">刷新显示</button>
+          </div>
           <div class="note-meta">${escapeHtml(page.model || '未生成')} ${page.createdAt ? '· ' + escapeHtml(page.createdAt) : ''}</div>
           <div class="note-body">${renderMarkdown(page.explanation)}</div>
         </article>
       `).join('');
 
       observer = new IntersectionObserver((entries) => {
+        if (Date.now() < suppressObserverUntil) return;
         const visible = entries
           .filter(entry => entry.isIntersecting)
           .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
@@ -1113,12 +1298,15 @@
 
       document.querySelectorAll('.page').forEach(page => observer.observe(page));
       const stored = readScrollState();
-      const targetSlide = stored?.currentSlide || restoreScrollAfterRender?.currentSlide || pages[0]?.slideNumber || 1;
+      const requestedSlide = Number(
+        stored?.currentSlide || args.initial_slide_number || restoreScrollAfterRender?.currentSlide || pages[0]?.slideNumber || 1
+      );
+      const targetSlide = pageForSlide(requestedSlide) ? requestedSlide : Number(pages[0]?.slideNumber || 1);
       if (pages.length) setActive(targetSlide);
       window.setTimeout(() => {
         const state = stored || restoreScrollAfterRender;
         if (!state) return;
-        if (readingMode === 'paged') {
+        if (readingMode === 'paged' || !stored) {
           centerPage(targetSlide, 'auto');
         } else {
           pageRoot.scrollTop = state.pageScroll || 0;
@@ -1362,8 +1550,15 @@
         sendCanvasQuestion();
       }
     });
-    pageRoot.addEventListener('scroll', saveScrollState, { passive: true });
-    noteRoot.addEventListener('scroll', saveScrollState, { passive: true });
+    pageRoot.addEventListener('scroll', scheduleScrollStateSave, { passive: true });
+    noteRoot.addEventListener('scroll', scheduleScrollStateSave, { passive: true });
+    noteRoot.addEventListener('click', (event) => {
+      const button = event.target?.closest?.('[data-refresh-page]');
+      if (!button) return;
+      event.preventDefault();
+      event.stopPropagation();
+      refreshNoteDisplay(Number(button.dataset.refreshPage), button);
+    });
     noteRoot.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
     noteRoot.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
     document.addEventListener('mousedown', (event) => {
@@ -1401,6 +1596,15 @@
     if (fullscreenButton) {
       fullscreenButton.addEventListener('click', toggleFullscreen);
     }
+    document.addEventListener('fullscreenchange', () => {
+      syncFullscreenState(Boolean(document.fullscreenElement));
+      preserveCurrentSlideAfterViewportChange(currentSlideNumber);
+    });
+    window.addEventListener('resize', () => {
+      if (document.fullscreenElement || document.body.classList.contains('reader-fullscreen')) {
+        preserveCurrentSlideAfterViewportChange(currentSlideNumber);
+      }
+    });
 
     window.addEventListener('message', (event) => {
       if (event.data?.type !== 'streamlit:render') return;
