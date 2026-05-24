@@ -22,37 +22,29 @@ def render_local_secret_unlock(
     target_session_key: str,
     key_prefix: str,
 ) -> bool:
-    if not secret_store_exists():
-        return False
-    if not CRYPTOGRAPHY_AVAILABLE:
-        st.warning("检测到本地加密 API Key 仓库，但当前 Python 环境缺少 cryptography，无法解锁。")
-        return False
-
-    candidates = _find_index_candidates(provider, model)
-    vault_data = st.session_state.get("secret_vault_data") if st.session_state.get("secret_vault_unlocked") else None
-    if not candidates and vault_data:
-        candidates = _find_decrypted_candidates(vault_data, provider, model)
-
+    candidates = find_local_secret_candidates(provider, model=model)
     if not candidates:
-        _render_legacy_unlock_hint(provider, model, target_session_key, key_prefix)
+        return False
+
+    if not CRYPTOGRAPHY_AVAILABLE:
+        st.warning("检测到匹配的本地加密 API Key，但当前 Python 环境缺少 cryptography，无法解锁。")
+        return False
+
+    vault_data = _unlocked_secret_data()
+    if vault_data:
+        if _apply_best_secret(vault_data, candidates, provider, target_session_key):
+            st.caption("已自动使用本次已解锁的本地加密 API Key。")
+            return True
+        decrypted_candidates = _find_decrypted_candidates(vault_data, provider, model)
+        if decrypted_candidates and _apply_best_secret(vault_data, decrypted_candidates, provider, target_session_key):
+            st.caption("已自动使用本次已解锁的本地加密 API Key。")
+            return True
         return False
 
     with st.container(border=True):
         st.markdown("**检测到匹配的本地加密 API Key**")
-        st.caption("只会在输入主密码后解密；API Key 会进入当前 Streamlit 会话，不会明文写入数据库。")
-        selected_provider_key = st.selectbox(
-            "选择本地 API Key",
-            [item["provider_key"] for item in candidates],
-            format_func=lambda item_key: _candidate_label(next(item for item in candidates if item["provider_key"] == item_key)),
-            key=f"{key_prefix}_local_secret_candidate",
-        )
-
-        if vault_data:
-            if st.button("使用已解锁密钥", key=f"{key_prefix}_apply_unlocked_secret"):
-                if _apply_secret(vault_data, selected_provider_key, target_session_key):
-                    st.success("已应用本地加密 API Key 到当前会话。")
-                    st.rerun()
-            return True
+        st.caption("输入一次主密码后，本次 Streamlit 会话会自动复用已解锁的 Key，不会明文写入数据库。")
+        selected_provider_key = _render_candidate_select(candidates, key_prefix)
 
         master_password = st.text_input(
             "输入主密码以解锁",
@@ -64,35 +56,19 @@ def render_local_secret_unlock(
         return True
 
 
-def _render_legacy_unlock_hint(
-    provider: dict[str, Any],
-    model: str,
-    target_session_key: str,
-    key_prefix: str,
-) -> None:
-    with st.expander("检测到本地加密 API Key 仓库，但没有可直接匹配的公开索引", expanded=False):
-        st.caption(
-            "旧版密钥库不会在未解锁状态暴露 Provider/模型索引。"
-            "可以输入主密码尝试匹配当前 Provider；成功后重新保存 Key 会自动生成索引。"
-        )
-        master_password = st.text_input("主密码", type="password", key=f"{key_prefix}_legacy_secret_password")
-        if st.button("解锁并尝试匹配当前 Provider", key=f"{key_prefix}_legacy_secret_unlock"):
-            try:
-                data = load_secret_store(master_password)
-            except SecretStoreError as exc:
-                st.error(str(exc))
-                return
-            _refresh_public_index(master_password, data)
-            st.session_state["secret_vault_unlocked"] = True
-            st.session_state["secret_vault_data"] = data
-            st.session_state["secret_vault_master_password"] = master_password
-            candidates = _find_decrypted_candidates(data, provider, model)
-            if not candidates:
-                st.warning("解锁成功，但没有找到与当前 Provider/模型匹配的 API Key。")
-                return
-            if _apply_secret(data, candidates[0]["provider_key"], target_session_key):
-                st.success("已应用本地加密 API Key 到当前会话。")
-                st.rerun()
+def has_matching_local_secret(provider: dict[str, Any], *, model: str) -> bool:
+    return bool(find_local_secret_candidates(provider, model=model))
+
+
+def find_local_secret_candidates(provider: dict[str, Any], *, model: str) -> list[dict[str, Any]]:
+    if not secret_store_exists():
+        return []
+
+    candidates = _find_index_candidates(provider, model)
+    vault_data = _unlocked_secret_data()
+    if not candidates and vault_data:
+        candidates = _find_decrypted_candidates(vault_data, provider, model)
+    return candidates
 
 
 def _unlock_and_apply(master_password: str, provider_key: str, target_session_key: str) -> None:
@@ -113,13 +89,69 @@ def _unlock_and_apply(master_password: str, provider_key: str, target_session_ke
         st.rerun()
 
 
-def _apply_secret(data: dict[str, Any], provider_key: str, target_session_key: str) -> bool:
+def _apply_secret(
+    data: dict[str, Any],
+    provider_key: str,
+    target_session_key: str,
+    *,
+    show_errors: bool = True,
+) -> bool:
     secret = get_provider_secret(data, provider_key)
     if not secret:
-        st.error("密钥库中没有找到这个 Provider 的 API Key。")
+        if show_errors:
+            st.error("密钥库中没有找到这个 Provider 的 API Key。")
         return False
     st.session_state[target_session_key] = secret
     return True
+
+
+def _apply_best_secret(
+    data: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    provider: dict[str, Any],
+    target_session_key: str,
+) -> bool:
+    if not candidates:
+        return False
+    ordered = [_best_candidate(candidates, provider)]
+    ordered.extend(item for item in candidates if item is not ordered[0])
+    for item in ordered:
+        if _apply_secret(data, str(item["provider_key"]), target_session_key, show_errors=False):
+            return True
+    return False
+
+
+def _best_candidate(candidates: list[dict[str, Any]], provider: dict[str, Any]) -> dict[str, Any]:
+    current_provider_key = str(provider.get("provider_key") or "")
+    for item in candidates:
+        if str(item.get("provider_key") or "") == current_provider_key:
+            return item
+    return candidates[0]
+
+
+def _render_candidate_select(candidates: list[dict[str, Any]], key_prefix: str) -> str:
+    if len(candidates) == 1:
+        item = candidates[0]
+        st.caption(f"匹配到：{_candidate_label(item)}")
+        return str(item["provider_key"])
+
+    return str(
+        st.selectbox(
+            "选择本地 API Key",
+            [item["provider_key"] for item in candidates],
+            format_func=lambda item_key: _candidate_label(
+                next(item for item in candidates if item["provider_key"] == item_key)
+            ),
+            key=f"{key_prefix}_local_secret_candidate",
+        )
+    )
+
+
+def _unlocked_secret_data() -> dict[str, Any] | None:
+    if not st.session_state.get("secret_vault_unlocked"):
+        return None
+    data = st.session_state.get("secret_vault_data")
+    return data if isinstance(data, dict) else None
 
 
 def _refresh_public_index(master_password: str, data: dict[str, Any]) -> None:
