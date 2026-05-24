@@ -36,7 +36,7 @@ PAGES = {
 }
 
 
-def _install_copy_shortcut_guard() -> None:
+def _install_browser_dom_guard() -> None:
     components.html(
         """
         <script>
@@ -48,8 +48,42 @@ def _install_copy_shortcut_guard() -> None:
           } catch {
             rootWindow = window;
           }
-          if (rootWindow.__intpCopyShortcutGuardInstalled) return;
+          const shouldInstallCopyGuard = !rootWindow.__intpCopyShortcutGuardInstalled;
           rootWindow.__intpCopyShortcutGuardInstalled = true;
+
+          try {
+            const doc = rootWindow.document;
+            doc.documentElement.setAttribute('translate', 'no');
+            doc.documentElement.classList.add('notranslate');
+            doc.body?.setAttribute('translate', 'no');
+            doc.body?.classList.add('notranslate');
+            if (!doc.querySelector('meta[name="google"][content="notranslate"]')) {
+              const meta = doc.createElement('meta');
+              meta.setAttribute('name', 'google');
+              meta.setAttribute('content', 'notranslate');
+              doc.head?.appendChild(meta);
+            }
+          } catch {}
+
+          if (!rootWindow.__intpSafeDomPatchInstalled && rootWindow.Node?.prototype) {
+            rootWindow.__intpSafeDomPatchInstalled = true;
+            const originalRemoveChild = rootWindow.Node.prototype.removeChild;
+            const originalInsertBefore = rootWindow.Node.prototype.insertBefore;
+
+            rootWindow.Node.prototype.removeChild = function(child) {
+              if (child && child.parentNode !== this) {
+                return child.parentNode ? originalRemoveChild.call(child.parentNode, child) : child;
+              }
+              return originalRemoveChild.call(this, child);
+            };
+
+            rootWindow.Node.prototype.insertBefore = function(newNode, referenceNode) {
+              if (referenceNode && referenceNode.parentNode !== this) {
+                return this.appendChild(newNode);
+              }
+              return originalInsertBefore.call(this, newNode, referenceNode);
+            };
+          }
 
           const isCopyShortcut = (event) =>
             (event.ctrlKey || event.metaKey) &&
@@ -65,13 +99,15 @@ def _install_copy_shortcut_guard() -> None:
             }
           };
 
-          rootWindow.addEventListener('keydown', stopStreamlitCacheShortcut, true);
-          rootWindow.document.addEventListener('keydown', stopStreamlitCacheShortcut, true);
+          if (shouldInstallCopyGuard) {
+            rootWindow.addEventListener('keydown', stopStreamlitCacheShortcut, true);
+            rootWindow.document.addEventListener('keydown', stopStreamlitCacheShortcut, true);
+          }
         })();
         </script>
         """,
-        height=0,
-        width=0,
+        height=1,
+        width=1,
     )
 
 
@@ -82,7 +118,7 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    _install_copy_shortcut_guard()
+    _install_browser_dom_guard()
     init_db()
     ensure_default_api_providers()
 

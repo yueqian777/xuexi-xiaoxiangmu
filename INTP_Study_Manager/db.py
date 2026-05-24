@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -191,7 +192,7 @@ def init_db() -> None:
             );
 
             CREATE TABLE IF NOT EXISTS api_providers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider_key TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
                 provider_type TEXT NOT NULL,
                 base_url TEXT DEFAULT '',
@@ -201,7 +202,11 @@ def init_db() -> None:
                 extra_headers_json TEXT DEFAULT '{}',
                 request_template_json TEXT DEFAULT '',
                 response_path TEXT DEFAULT '',
+                balance_query_enabled INTEGER NOT NULL DEFAULT 0,
+                balance_query_type TEXT NOT NULL DEFAULT 'auto_wallet',
+                balance_query_config_json TEXT NOT NULL DEFAULT '{}',
                 enabled INTEGER NOT NULL DEFAULT 1,
+                sort_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
@@ -223,7 +228,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS daily_ai_review_plans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 review_date TEXT NOT NULL UNIQUE,
-                provider_id INTEGER,
+                provider_key TEXT,
                 model TEXT DEFAULT '',
                 plan_json TEXT NOT NULL DEFAULT '{}',
                 source_snapshot_json TEXT NOT NULL DEFAULT '{}',
@@ -232,7 +237,7 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT '待回答',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 evaluated_at TEXT DEFAULT '',
-                FOREIGN KEY (provider_id) REFERENCES api_providers(id) ON DELETE SET NULL
+                FOREIGN KEY (provider_key) REFERENCES api_providers(provider_key) ON DELETE SET NULL
             );
             CREATE INDEX IF NOT EXISTS idx_study_sessions_date_id
                 ON study_sessions(date DESC, id DESC);
@@ -280,8 +285,6 @@ def init_db() -> None:
                 ON slide_explanations(slide_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_slide_questions_slide_created
                 ON slide_questions(slide_id, created_at DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_api_providers_enabled_id
-                ON api_providers(enabled, id ASC);
             CREATE INDEX IF NOT EXISTS idx_daily_ai_review_plans_date
                 ON daily_ai_review_plans(review_date DESC, id DESC);
             """
@@ -293,6 +296,11 @@ def init_db() -> None:
         _ensure_column(conn, "slide_questions", "category", "TEXT DEFAULT ''")
         _ensure_column(conn, "slide_questions", "sort_order", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_questions", "status", "TEXT NOT NULL DEFAULT '未整理'")
+        _ensure_column(conn, "api_providers", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "api_providers", "balance_query_enabled", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "api_providers", "balance_query_type", "TEXT NOT NULL DEFAULT 'auto_wallet'")
+        _ensure_column(conn, "api_providers", "balance_query_config_json", "TEXT NOT NULL DEFAULT '{}'")
+        _migrate_api_provider_identity(conn)
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_ppt_decks_manage
@@ -305,12 +313,246 @@ def init_db() -> None:
             ON slide_questions(status, category, sort_order ASC, created_at DESC, id DESC)
             """
         )
+        conn.execute("DROP INDEX IF EXISTS idx_api_providers_enabled_id")
+        conn.execute("DROP INDEX IF EXISTS idx_api_providers_enabled_order")
+        conn.execute("DROP INDEX IF EXISTS idx_api_providers_order")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_providers_enabled_order
+            ON api_providers(enabled, sort_order ASC, provider_key ASC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_providers_order
+            ON api_providers(sort_order ASC, provider_key ASC)
+            """
+        )
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_api_provider_identity(conn: sqlite3.Connection) -> None:
+    columns = _table_columns(conn, "api_providers")
+    if not columns or ("provider_key" in columns and "id" not in columns):
+        return
+
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM api_providers
+        ORDER BY
+            CASE WHEN sort_order <= 0 THEN 1 ELSE 0 END,
+            sort_order ASC,
+            name ASC
+        """
+    ).fetchall()
+    old_id_to_key: dict[int, str] = {}
+    used_keys: set[str] = set()
+    provider_rows: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        provider_key = str(item.get("provider_key") or "").strip()
+        if not provider_key:
+            provider_key = _unique_provider_key(str(item.get("name") or "provider"), used_keys)
+        else:
+            provider_key = _dedupe_provider_key(provider_key, used_keys)
+        item["provider_key"] = provider_key
+        if item.get("id") is not None:
+            old_id_to_key[int(item["id"])] = provider_key
+        provider_rows.append(item)
+
+    was_foreign_keys_enabled = bool(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+    conn.execute("PRAGMA foreign_keys = OFF")
+    _migrate_daily_ai_provider_identity(conn, old_id_to_key)
+    conn.execute("DROP INDEX IF EXISTS idx_api_providers_enabled_id")
+    conn.execute("DROP INDEX IF EXISTS idx_api_providers_enabled_order")
+    conn.execute("DROP INDEX IF EXISTS idx_api_providers_order")
+    conn.execute("ALTER TABLE api_providers RENAME TO api_providers_old_identity")
+    conn.execute(_api_providers_schema_sql())
+    conn.executemany(
+        """
+        INSERT INTO api_providers (
+            provider_key, name, provider_type, base_url, model, api_key_env,
+            auth_type, extra_headers_json, request_template_json, response_path,
+            balance_query_enabled, balance_query_type, balance_query_config_json,
+            enabled, sort_order, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                item["provider_key"],
+                item.get("name") or "",
+                item.get("provider_type") or "openai_chat",
+                item.get("base_url") or "",
+                item.get("model") or "",
+                item.get("api_key_env") or "",
+                item.get("auth_type") or "bearer",
+                item.get("extra_headers_json") or "{}",
+                item.get("request_template_json") or "",
+                item.get("response_path") or "",
+                int(item.get("balance_query_enabled") or 0),
+                item.get("balance_query_type") or "auto_wallet",
+                item.get("balance_query_config_json") or "{}",
+                int(bool(item.get("enabled", 1))),
+                int(item.get("sort_order") or 0),
+                item.get("created_at") or "",
+                item.get("updated_at") or "",
+            )
+            for item in provider_rows
+        ),
+    )
+    conn.execute("DROP TABLE api_providers_old_identity")
+    _migrate_default_api_config(conn, old_id_to_key)
+    if was_foreign_keys_enabled:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _migrate_daily_ai_provider_identity(conn: sqlite3.Connection, old_id_to_key: dict[int, str]) -> None:
+    columns = _table_columns(conn, "daily_ai_review_plans")
+    if not columns or "provider_id" not in columns:
+        return
+    rows = conn.execute("SELECT * FROM daily_ai_review_plans ORDER BY id ASC").fetchall()
+    conn.execute("DROP INDEX IF EXISTS idx_daily_ai_review_plans_date")
+    conn.execute("ALTER TABLE daily_ai_review_plans RENAME TO daily_ai_review_plans_old_provider_identity")
+    conn.execute(_daily_ai_review_plans_schema_sql())
+    conn.executemany(
+        """
+        INSERT INTO daily_ai_review_plans (
+            id, review_date, provider_key, model, plan_json, source_snapshot_json,
+            answers_json, evaluation_json, status, created_at, evaluated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                row["id"],
+                row["review_date"],
+                old_id_to_key.get(int(row["provider_id"])) if row["provider_id"] is not None else None,
+                row["model"] or "",
+                row["plan_json"] or "{}",
+                row["source_snapshot_json"] or "{}",
+                row["answers_json"] or "{}",
+                row["evaluation_json"] or "",
+                row["status"] or "待回答",
+                row["created_at"] or "",
+                row["evaluated_at"] or "",
+            )
+            for row in rows
+        ),
+    )
+    conn.execute("DROP TABLE daily_ai_review_plans_old_provider_identity")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_daily_ai_review_plans_date
+            ON daily_ai_review_plans(review_date DESC, id DESC)
+        """
+    )
+
+
+def _migrate_default_api_config(conn: sqlite3.Connection, old_id_to_key: dict[int, str]) -> None:
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", ("default_api_config",)).fetchone()
+    if not row:
+        return
+    try:
+        config = json.loads(row["value"])
+    except json.JSONDecodeError:
+        return
+    if not isinstance(config, dict) or config.get("provider_key"):
+        return
+    try:
+        old_provider_id = int(config.get("provider_id", 0))
+    except (TypeError, ValueError):
+        old_provider_id = 0
+    provider_key = old_id_to_key.get(old_provider_id)
+    if not provider_key:
+        return
+    updated = {"provider_key": provider_key, "model": str(config.get("model") or "")}
+    conn.execute(
+        """
+        UPDATE app_settings
+        SET value = ?, updated_at = datetime('now', 'localtime')
+        WHERE key = ?
+        """,
+        (json.dumps(updated, ensure_ascii=False), "default_api_config"),
+    )
+
+
+def _api_providers_schema_sql() -> str:
+    return """
+    CREATE TABLE api_providers (
+        provider_key TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        provider_type TEXT NOT NULL,
+        base_url TEXT DEFAULT '',
+        model TEXT DEFAULT '',
+        api_key_env TEXT DEFAULT '',
+        auth_type TEXT NOT NULL DEFAULT 'bearer',
+        extra_headers_json TEXT DEFAULT '{}',
+        request_template_json TEXT DEFAULT '',
+        response_path TEXT DEFAULT '',
+        balance_query_enabled INTEGER NOT NULL DEFAULT 0,
+        balance_query_type TEXT NOT NULL DEFAULT 'auto_wallet',
+        balance_query_config_json TEXT NOT NULL DEFAULT '{}',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+    """
+
+
+def _daily_ai_review_plans_schema_sql() -> str:
+    return """
+    CREATE TABLE daily_ai_review_plans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        review_date TEXT NOT NULL UNIQUE,
+        provider_key TEXT,
+        model TEXT DEFAULT '',
+        plan_json TEXT NOT NULL DEFAULT '{}',
+        source_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        answers_json TEXT DEFAULT '{}',
+        evaluation_json TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT '待回答',
+        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+        evaluated_at TEXT DEFAULT '',
+        FOREIGN KEY (provider_key) REFERENCES api_providers(provider_key) ON DELETE SET NULL
+    )
+    """
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _unique_provider_key(name: str, used_keys: set[str]) -> str:
+    return _dedupe_provider_key(_slugify_provider_key(name), used_keys)
+
+
+def _dedupe_provider_key(base_key: str, used_keys: set[str]) -> str:
+    base = base_key.strip("-") or "provider"
+    candidate = base
+    suffix = 2
+    while candidate in used_keys:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    used_keys.add(candidate)
+    return candidate
+
+
+def _slugify_provider_key(value: str) -> str:
+    chars: list[str] = []
+    for char in value.strip().lower():
+        if char.isalnum():
+            chars.append(char)
+        elif chars and chars[-1] != "-":
+            chars.append("-")
+    return "".join(chars).strip("-")[:80] or "provider"
 
 
 def fetch_all(query: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:

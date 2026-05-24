@@ -109,7 +109,7 @@ def load_secret_public_index() -> list[dict[str, Any]]:
 def upsert_provider_secret(
     data: dict[str, Any],
     *,
-    provider_id: int,
+    provider_key: str,
     provider_name: str,
     api_key: str,
     model: str = "",
@@ -120,8 +120,8 @@ def upsert_provider_secret(
     if not key:
         raise SecretStoreError("API Key 不能为空。")
     providers = dict(data.get("providers", {}))
-    providers[str(provider_id)] = {
-        "provider_id": provider_id,
+    providers[str(provider_key)] = {
+        "provider_key": provider_key,
         "provider_name": provider_name,
         "model": model,
         "provider_type": provider_type,
@@ -132,14 +132,14 @@ def upsert_provider_secret(
     return {**data, "providers": providers}
 
 
-def delete_provider_secret(data: dict[str, Any], provider_id: int) -> dict[str, Any]:
+def delete_provider_secret(data: dict[str, Any], provider_key: str) -> dict[str, Any]:
     providers = dict(data.get("providers", {}))
-    providers.pop(str(provider_id), None)
+    providers.pop(str(provider_key), None)
     return {**data, "providers": providers}
 
 
-def get_provider_secret(data: dict[str, Any], provider_id: int) -> str:
-    item = data.get("providers", {}).get(str(provider_id), {})
+def get_provider_secret(data: dict[str, Any], provider_key: str) -> str:
+    item = data.get("providers", {}).get(str(provider_key), {})
     return str(item.get("api_key") or "")
 
 
@@ -153,12 +153,12 @@ def masked_secret(value: str) -> str:
 
 def _build_public_index(data: dict[str, Any]) -> dict[str, Any]:
     providers = []
-    for raw_id, item in data.get("providers", {}).items():
+    for raw_key, item in data.get("providers", {}).items():
         if not isinstance(item, dict):
             continue
         providers.append(
             {
-                "provider_id": int(item.get("provider_id") or raw_id),
+                "provider_key": str(item.get("provider_key") or raw_key),
                 "provider_name": str(item.get("provider_name") or ""),
                 "model": str(item.get("model") or ""),
                 "provider_type": str(item.get("provider_type") or ""),

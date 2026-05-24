@@ -11,13 +11,13 @@ from services.ai_service import DEFAULT_MODEL
 DEFAULT_API_SETTING_KEY = "default_api_config"
 
 
-def provider_model_state_key(provider_id: int) -> str:
-    return f"api_model_provider_{provider_id}"
+def provider_model_state_key(provider_key: str) -> str:
+    return f"api_model_provider_{provider_key}"
 
 
 def ensure_provider_model(provider: dict[str, Any]) -> str:
-    provider_id = int(provider["id"])
-    key = provider_model_state_key(provider_id)
+    provider_key = str(provider["provider_key"])
+    key = provider_model_state_key(provider_key)
     if key not in st.session_state:
         st.session_state[key] = provider.get("model") or DEFAULT_MODEL
     model = str(st.session_state.get(key) or provider.get("model") or DEFAULT_MODEL).strip()
@@ -25,8 +25,8 @@ def ensure_provider_model(provider: dict[str, Any]) -> str:
     return model
 
 
-def set_active_provider(provider_id: int, model: str) -> None:
-    st.session_state["active_api_provider_id"] = provider_id
+def set_active_provider(provider_key: str, model: str) -> None:
+    st.session_state["active_api_provider_key"] = provider_key
     st.session_state["active_api_model"] = model.strip() or DEFAULT_MODEL
 
 
@@ -41,9 +41,9 @@ def get_default_api_config() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def save_default_api_config(provider_id: int, model: str) -> None:
+def save_default_api_config(provider_key: str, model: str) -> None:
     payload = json.dumps(
-        {"provider_id": int(provider_id), "model": model.strip() or DEFAULT_MODEL},
+        {"provider_key": provider_key, "model": model.strip() or DEFAULT_MODEL},
         ensure_ascii=False,
     )
     execute(
@@ -58,40 +58,34 @@ def save_default_api_config(provider_id: int, model: str) -> None:
     )
 
 
-def default_provider_id_from_config(providers: list[dict[str, Any]]) -> int | None:
+def default_provider_key_from_config(providers: list[dict[str, Any]]) -> str | None:
     if not providers:
         return None
-    provider_ids = {int(provider["id"]) for provider in providers}
+    provider_keys = {str(provider["provider_key"]) for provider in providers}
     config = get_default_api_config()
-    try:
-        provider_id = int(config.get("provider_id", 0))
-    except (TypeError, ValueError):
-        provider_id = 0
-    return provider_id if provider_id in provider_ids else None
+    provider_key = str(config.get("provider_key") or "")
+    return provider_key if provider_key in provider_keys else None
 
 
-def ensure_active_provider(providers: list[dict[str, Any]]) -> tuple[int | None, str]:
+def ensure_active_provider(providers: list[dict[str, Any]]) -> tuple[str | None, str]:
     if not providers:
         return None, DEFAULT_MODEL
 
-    provider_ids = {int(provider["id"]) for provider in providers}
-    try:
-        active_id = int(st.session_state.get("active_api_provider_id", 0))
-    except (TypeError, ValueError):
-        active_id = 0
-    if active_id in provider_ids:
-        provider = next(item for item in providers if int(item["id"]) == int(active_id))
+    provider_keys = {str(provider["provider_key"]) for provider in providers}
+    active_key = str(st.session_state.get("active_api_provider_key") or "")
+    if active_key in provider_keys:
+        provider = next(item for item in providers if str(item["provider_key"]) == active_key)
         model = str(st.session_state.get("active_api_model") or ensure_provider_model(provider)).strip()
-        set_active_provider(int(active_id), model)
-        return int(active_id), model
+        set_active_provider(active_key, model)
+        return active_key, model
 
-    default_id = default_provider_id_from_config(providers)
-    if default_id is None:
-        default_id = int(providers[0]["id"])
-    provider = next(item for item in providers if int(item["id"]) == default_id)
+    default_key = default_provider_key_from_config(providers)
+    if default_key is None:
+        default_key = str(providers[0]["provider_key"])
+    provider = next(item for item in providers if str(item["provider_key"]) == default_key)
     config = get_default_api_config()
     model = str(config.get("model") or ensure_provider_model(provider) or provider.get("model") or DEFAULT_MODEL)
     ensure_provider_model(provider)
-    st.session_state[provider_model_state_key(default_id)] = model.strip() or DEFAULT_MODEL
-    set_active_provider(default_id, model)
-    return default_id, model
+    st.session_state[provider_model_state_key(default_key)] = model.strip() or DEFAULT_MODEL
+    set_active_provider(default_key, model)
+    return default_key, model

@@ -42,24 +42,24 @@ def _render_default_api_and_daily_ai_review() -> None:
         st.warning("没有启用的 API Provider。请先进入“API 接入设置”创建或启用一个 Provider。")
         return
 
-    provider_id, _ = ensure_active_provider(providers)
-    provider_ids = [int(provider["id"]) for provider in providers]
-    selected_index = provider_ids.index(int(provider_id)) if provider_id in provider_ids else 0
+    provider_key, _ = ensure_active_provider(providers)
+    provider_keys = [str(provider["provider_key"]) for provider in providers]
+    selected_index = provider_keys.index(str(provider_key)) if provider_key in provider_keys else 0
 
     with st.container(border=True):
         cols = st.columns([1.4, 1, 1])
-        selected_provider_id = cols[0].selectbox(
+        selected_provider_key = cols[0].selectbox(
             "项目默认 API",
-            provider_ids,
+            provider_keys,
             index=selected_index,
-            format_func=lambda item_id: provider_label(next(p for p in providers if int(p["id"]) == int(item_id))),
+            format_func=lambda item_key: provider_label(next(p for p in providers if str(p["provider_key"]) == str(item_key))),
             key="dashboard_default_api_provider",
         )
-        provider = next(p for p in providers if int(p["id"]) == int(selected_provider_id))
+        provider = next(p for p in providers if str(p["provider_key"]) == str(selected_provider_key))
         ensure_provider_model(provider)
         model = cols[1].text_input(
             "默认模型",
-            key=provider_model_state_key(int(selected_provider_id)),
+            key=provider_model_state_key(str(selected_provider_key)),
             help="后续页面没有主动切换 API 时，会沿用这个默认 Provider 和模型。",
         )
         max_tokens = cols[2].number_input(
@@ -72,26 +72,26 @@ def _render_default_api_and_daily_ai_review() -> None:
         st.session_state["daily_ai_review_max_tokens"] = int(max_tokens)
 
         active_model = model.strip() or provider.get("model") or DEFAULT_MODEL
-        set_active_provider(int(selected_provider_id), active_model)
-        key_name = f"api_key_provider_{selected_provider_id}"
+        set_active_provider(str(selected_provider_key), active_model)
+        key_name = f"api_key_provider_{selected_provider_key}"
         render_local_secret_unlock(
             provider,
             model=active_model,
             target_session_key=key_name,
-            key_prefix=f"dashboard_default_provider_{selected_provider_id}",
+            key_prefix=f"dashboard_default_provider_{selected_provider_key}",
         )
         api_key = st.text_input(
             "默认 API Key",
             value=st.session_state.get(key_name, ""),
             type="password",
             placeholder=f"不填则读取环境变量 {provider.get('api_key_env') or '未设置'}；也可以使用上方本地加密 Key 解锁。",
-            key=f"dashboard_api_key_{selected_provider_id}",
+            key=f"dashboard_api_key_{selected_provider_key}",
         )
         st.session_state[key_name] = api_key
 
         cols = st.columns([1, 1, 2])
         if cols[0].button("保存为项目默认 API", type="primary"):
-            save_default_api_config(int(selected_provider_id), active_model)
+            save_default_api_config(str(selected_provider_key), active_model)
             st.success("项目默认 API 已保存。后续 API 任务未主动切换时会使用它。")
             st.rerun()
 
@@ -113,7 +113,7 @@ def _render_default_api_and_daily_ai_review() -> None:
         try:
             with st.spinner("正在自动生成今天的轻量复习提问..."):
                 plan = generate_today_ai_review_plan(
-                    provider_id=int(selected_provider_id),
+                    provider_key=str(selected_provider_key),
                     api_key=api_key,
                     model=active_model,
                     max_output_tokens=int(max_tokens),
@@ -127,7 +127,7 @@ def _render_default_api_and_daily_ai_review() -> None:
         try:
             with st.spinner("正在生成今日轻量复习提问..."):
                 plan = regenerate_today_ai_review_plan(
-                    provider_id=int(selected_provider_id),
+                    provider_key=str(selected_provider_key),
                     api_key=api_key,
                     model=active_model,
                     max_output_tokens=int(max_tokens),
@@ -144,7 +144,7 @@ def _render_default_api_and_daily_ai_review() -> None:
 
     _render_daily_ai_review_plan(
         plan,
-        provider_id=int(selected_provider_id),
+        provider_key=str(selected_provider_key),
         api_key=api_key,
         model=active_model,
         max_tokens=int(max_tokens),
@@ -154,7 +154,7 @@ def _render_default_api_and_daily_ai_review() -> None:
 def _render_daily_ai_review_plan(
     plan_row: dict,
     *,
-    provider_id: int,
+    provider_key: str,
     api_key: str,
     model: str,
     max_tokens: int,
@@ -191,7 +191,7 @@ def _render_daily_ai_review_plan(
                     evaluate_today_ai_review(
                         plan_row=plan_row,
                         answers=answers,
-                        provider_id=provider_id,
+                        provider_key=provider_key,
                         api_key=api_key,
                         model=model,
                         max_output_tokens=max_tokens,

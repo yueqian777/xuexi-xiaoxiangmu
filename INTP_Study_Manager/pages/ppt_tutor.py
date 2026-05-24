@@ -108,24 +108,24 @@ def _render_api_settings() -> None:
             st.warning("没有启用的 Provider。请先到「API 接入设置」页面创建。")
             return
 
-        current_provider_id, _ = ensure_active_provider(providers)
-        provider_ids = [provider["id"] for provider in providers]
-        selected_index = provider_ids.index(current_provider_id) if current_provider_id in provider_ids else 0
-        provider_id = st.selectbox(
+        current_provider_key, _ = ensure_active_provider(providers)
+        provider_keys = [provider["provider_key"] for provider in providers]
+        selected_index = provider_keys.index(current_provider_key) if current_provider_key in provider_keys else 0
+        provider_key = st.selectbox(
             "Provider",
-            provider_ids,
+            provider_keys,
             index=selected_index,
-            format_func=lambda item_id: provider_label(next(p for p in providers if p["id"] == item_id)),
+            format_func=lambda item_key: provider_label(next(p for p in providers if p["provider_key"] == item_key)),
         )
-        provider = next(p for p in providers if p["id"] == provider_id)
+        provider = next(p for p in providers if p["provider_key"] == provider_key)
         ensure_provider_model(provider)
 
-        key_name = f"api_key_provider_{provider_id}"
+        key_name = f"api_key_provider_{provider_key}"
         render_local_secret_unlock(
             provider,
             model=provider.get("model") or DEFAULT_MODEL,
             target_session_key=key_name,
-            key_prefix=f"ppt_provider_{provider_id}",
+            key_prefix=f"ppt_provider_{provider_key}",
         )
         api_key = st.text_input(
             "临时 API Key",
@@ -139,7 +139,7 @@ def _render_api_settings() -> None:
         if api_key or os.getenv(provider.get("api_key_env") or ""):
             available_models = list_available_models(provider, api_key=api_key)
 
-        model_key = provider_model_state_key(provider_id)
+        model_key = provider_model_state_key(provider_key)
         current_model = st.session_state.get(model_key, "").strip()
         if not current_model:
             current_model = provider.get("model") or DEFAULT_MODEL
@@ -165,7 +165,7 @@ def _render_api_settings() -> None:
             )
             st.caption("⚠️ 无法扫描到此 Provider 的可用模型列表，请手动填写模型名。")
         active_model = model.strip() or provider.get("model") or DEFAULT_MODEL
-        set_active_provider(provider_id, active_model)
+        set_active_provider(provider_key, active_model)
         max_tokens = st.number_input(
             "最大输出 token",
             min_value=512,
@@ -177,7 +177,7 @@ def _render_api_settings() -> None:
         st.session_state["active_api_max_tokens"] = int(max_tokens)
         reasoning_depth = st.selectbox(
             "推理深度",
-            ["关闭", "低", "中", "高"],
+            ["关闭", "低", "中", "高", "超高"],
             index=0,
             help="部分模型支持 extended thinking / reasoning_effort。开启后会消耗更多 token。",
         )
@@ -234,13 +234,19 @@ def _render_deck_actions(deck: dict, slides: list[dict], latest_by_slide_id: dic
 
     only_missing = cols[1].checkbox("只生成缺失讲解", value=True)
     cols[2].caption("左侧滚动到某页时，右侧讲解会自动同步滚动到对应页。")
-    send_image_when_no_text = st.checkbox(
-        "PDF 无法提取文字时，把当前页原图直接发给支持视觉的 API",
-        value=True,
-        help="仅 OpenAI 兼容的视觉模型可用；如果所选模型不支持图片，API 会返回错误。",
+    input_mode = st.radio(
+        "页面内容发送方式",
+        ("文字优先，缺文字时发原图", "只用识别文字，不发原图", "直接发原图，不使用识别文字"),
+        horizontal=True,
+        help="公式、符号或扫描页识别不准时，可选择直接把原页面图片发给支持视觉输入的 API。",
+        key=f"ppt_generation_input_mode_{deck['id']}",
     )
+    send_image_when_no_text = input_mode != "只用识别文字，不发原图"
+    force_image_input = input_mode == "直接发原图，不使用识别文字"
     supports_image_input = _active_provider_supports_image_input()
-    if send_image_when_no_text and not supports_image_input:
+    if force_image_input and not supports_image_input:
+        st.warning("当前 Provider / 模型看起来不支持图片输入。直接发原图模式无法生成；请切换视觉模型后再试。")
+    elif send_image_when_no_text and not supports_image_input:
         st.warning("当前 Provider / 模型看起来不支持图片输入。空白扫描页会被跳过；请切换视觉模型，或重新导入可提取文字的 PDF。")
     selected_slides, range_label = _select_generation_range(slides)
     st.caption(f"当前生成范围：{range_label}；将逐页调用 API 并保存到右侧讲解区。")
@@ -251,6 +257,7 @@ def _render_deck_actions(deck: dict, slides: list[dict], latest_by_slide_id: dic
             selected_slides,
             only_missing=only_missing,
             send_image_when_no_text=send_image_when_no_text,
+            force_image_input=force_image_input,
             supports_image_input=supports_image_input,
             latest_by_slide_id=latest_by_slide_id,
             background=run_in_background,
@@ -320,7 +327,7 @@ def _handle_synced_reader_action(
         with st.spinner(f"正在回答第 {slide_number} 页插问..."):
             answer = generate_text(
                 prompt,
-                provider_id=st.session_state.get("active_api_provider_id"),
+                provider_key=st.session_state.get("active_api_provider_key"),
                 api_key=_active_api_key(),
                 model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
@@ -524,7 +531,7 @@ def _render_study_asset_generator_inner(deck: dict) -> None:
             with st.spinner("正在调用 API 生成结构化学习资产..."):
                 output = generate_text(
                     prompt,
-                    provider_id=st.session_state.get("active_api_provider_id"),
+                    provider_key=st.session_state.get("active_api_provider_key"),
                     api_key=_active_api_key(),
                     model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
                     max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
@@ -646,7 +653,33 @@ def _clip_text(text: str, limit: int) -> str:
 def _render_main_explanation(deck: dict, slide: dict) -> None:
     st.subheader("当前页主线讲解")
     latest = _latest_explanation(slide["id"])
-    prompt = _build_slide_prompt(deck, slide, image_attached=False)
+    supports_image_input = _active_provider_supports_image_input()
+    force_image_input = st.checkbox(
+        "本页直接发原图给 API，不使用识别文字",
+        value=False,
+        help="适合公式、符号或版式复杂页面。需要当前 Provider / 模型支持图片输入。",
+        key=f"ppt_current_force_image_{slide['id']}",
+    )
+    image_paths = (
+        _image_paths_for_generation(
+            slide,
+            True,
+            supports_image_input=supports_image_input,
+            force_image_input=force_image_input,
+        )
+        if force_image_input
+        else []
+    )
+    if force_image_input and not supports_image_input:
+        st.warning("当前 Provider / 模型看起来不支持图片输入。请切换视觉模型后再直接发原图。")
+    elif force_image_input and not image_paths:
+        st.warning("本页还没有可用原页面图片。请先点击上方“生成 / 修复原页面图片”。")
+    prompt = _build_slide_prompt(
+        deck,
+        slide,
+        image_attached=bool(image_paths),
+        ignore_extracted_text=force_image_input,
+    )
 
     cols = st.columns(2)
     generate = cols[0].button("生成 / 更新本页讲解", type="primary")
@@ -655,14 +688,17 @@ def _render_main_explanation(deck: dict, slide: dict) -> None:
     if show_prompt:
         st.code(prompt, language="markdown")
 
-    if generate:
+    if generate and force_image_input and not image_paths:
+        st.warning("直接发原图模式需要支持图片输入的模型和已生成的原页面图片，本次没有调用 API。")
+    elif generate:
         try:
             with st.spinner("GPT 正在按当前页生成主线讲解..."):
                 explanation = generate_text(
                     prompt,
-                    provider_id=st.session_state.get("active_api_provider_id"),
+                    provider_key=st.session_state.get("active_api_provider_key"),
                     api_key=_active_api_key(),
                     model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
+                    image_paths=image_paths,
                     max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
                     reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
                 )
@@ -751,7 +787,7 @@ def _render_branch_question_form(
         with st.spinner("GPT 正在回答插问..."):
             answer = generate_text(
                 prompt,
-                provider_id=st.session_state.get("active_api_provider_id"),
+                provider_key=st.session_state.get("active_api_provider_key"),
                 api_key=_active_api_key(),
                 model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
@@ -866,6 +902,7 @@ def _generate_whole_deck_explanations(
     *,
     only_missing: bool,
     send_image_when_no_text: bool,
+    force_image_input: bool,
     supports_image_input: bool,
     latest_by_slide_id: dict[int, dict],
     background: bool = False,
@@ -881,7 +918,7 @@ def _generate_whole_deck_explanations(
         st.info("所有页面都已有讲解。")
         return
 
-    provider_id = st.session_state.get("active_api_provider_id")
+    provider_key = st.session_state.get("active_api_provider_key")
     api_key = _active_api_key()
     active_model = st.session_state.get("active_api_model", DEFAULT_MODEL)
     max_tokens = int(st.session_state.get("active_api_max_tokens", 4096))
@@ -898,8 +935,9 @@ def _generate_whole_deck_explanations(
             "targets": [int(s["id"]) for s in targets],
             "only_missing": only_missing,
             "send_image_when_no_text": send_image_when_no_text,
+            "force_image_input": force_image_input,
             "supports_image_input": supports_image_input,
-            "provider_id": provider_id,
+            "provider_key": provider_key,
             "api_key": api_key,
             "active_model": active_model,
             "max_tokens": max_tokens,
@@ -925,12 +963,22 @@ def _generate_whole_deck_explanations(
             slide,
             send_image_when_no_text,
             supports_image_input=supports_image_input,
+            force_image_input=force_image_input,
         )
+        if force_image_input and not image_paths:
+            st.warning(f"第 {slide['slide_number']} 页直接发原图模式没有可用图片，或当前模型不能读图片，已跳过。")
+            skipped += 1
+            continue
         if _is_text_empty(slide) and not image_paths:
             st.warning(f"第 {slide['slide_number']} 页没有提取到文字，且当前模型不能读图片，已跳过。")
             skipped += 1
             continue
-        prompt = _build_slide_prompt(deck, slide, image_attached=bool(image_paths))
+        prompt = _build_slide_prompt(
+            deck,
+            slide,
+            image_attached=bool(image_paths),
+            ignore_extracted_text=force_image_input,
+        )
         try:
             progress.progress(
                 (index - 1) / len(targets),
@@ -938,7 +986,7 @@ def _generate_whole_deck_explanations(
             )
             explanation = generate_text(
                 prompt,
-                provider_id=provider_id,
+                provider_key=provider_key,
                 api_key=api_key,
                 model_override=active_model,
                 image_paths=image_paths,
@@ -955,6 +1003,9 @@ def _generate_whole_deck_explanations(
             generated += 1
         except AIServiceError as exc:
             if image_paths and _is_image_input_error(exc):
+                if force_image_input:
+                    st.error(f"第 {slide['slide_number']} 页：当前模型拒绝图片输入。直接发原图模式不会自动回退识别文字，已停止。")
+                    break
                 st.warning(f"第 {slide['slide_number']} 页：当前模型拒绝图片输入，已自动改为文本模式重试。")
                 if _is_text_empty(slide):
                     st.warning(f"第 {slide['slide_number']} 页没有可用文字，文本模式无法生成有效讲解，已跳过。")
@@ -963,7 +1014,7 @@ def _generate_whole_deck_explanations(
                 try:
                     explanation = generate_text(
                         _build_slide_prompt(deck, slide, image_attached=False),
-                        provider_id=provider_id,
+                        provider_key=provider_key,
                         api_key=api_key,
                         model_override=active_model,
                         max_output_tokens=max_tokens,
@@ -1014,15 +1065,24 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
             slide,
             task["send_image_when_no_text"],
             supports_image_input=task["supports_image_input"],
+            force_image_input=task.get("force_image_input", False),
         )
+        if task.get("force_image_input") and not image_paths:
+            skipped += 1
+            continue
         if _is_text_empty(slide) and not image_paths:
             skipped += 1
             continue
-        prompt = _build_slide_prompt(deck, slide, image_attached=bool(image_paths))
+        prompt = _build_slide_prompt(
+            deck,
+            slide,
+            image_attached=bool(image_paths),
+            ignore_extracted_text=task.get("force_image_input", False),
+        )
         try:
             explanation = generate_text(
                 prompt,
-                provider_id=task["provider_id"],
+                provider_key=task["provider_key"],
                 api_key=task["api_key"],
                 model_override=task["active_model"],
                 image_paths=image_paths,
@@ -1640,14 +1700,15 @@ def _image_paths_for_generation(
     send_image_when_no_text: bool,
     *,
     supports_image_input: bool | None = None,
+    force_image_input: bool = False,
 ) -> list[str]:
-    if not send_image_when_no_text:
+    if not send_image_when_no_text and not force_image_input:
         return []
     if supports_image_input is None:
         supports_image_input = _active_provider_supports_image_input()
     if not supports_image_input:
         return []
-    if not _is_text_empty(slide):
+    if not force_image_input and not _is_text_empty(slide):
         return []
     image_path = slide.get("image_path") or ""
     if image_path and Path(image_path).exists():
@@ -1729,10 +1790,20 @@ def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
     return grouped
 
 
-def _build_slide_prompt(deck: dict, slide: dict, *, image_attached: bool = False) -> str:
-    slide_text = slide["slide_text"] or ""
+def _build_slide_prompt(
+    deck: dict,
+    slide: dict,
+    *,
+    image_attached: bool = False,
+    ignore_extracted_text: bool = False,
+) -> str:
+    slide_text = "" if ignore_extracted_text else (slide["slide_text"] or "")
     subject = deck.get("subject") or "未分类"
-    if not slide_text.strip() and image_attached and _image_exists(slide):
+    if ignore_extracted_text and image_attached and _image_exists(slide):
+        slide_text = "本次已选择不使用 PPT/PDF 识别文字。我会随请求附上该页原图，请直接根据页面图片内容讲解，尤其注意公式、符号、图表和推导步骤；不要依赖 OCR 文本，也不要编造图片中不存在的信息。"
+    elif ignore_extracted_text:
+        slide_text = "本次已选择不使用 PPT/PDF 识别文字，但当前请求没有附带页面图片。请提醒我：需要切换支持图片输入的视觉模型，或先生成 / 修复原页面图片。"
+    elif not slide_text.strip() and image_attached and _image_exists(slide):
         slide_text = "这一页没有提取到可用文字。我会随请求附上该页原图，请直接根据页面图片内容讲解；不要编造图片中不存在的信息。"
     elif not slide_text.strip() and _image_exists(slide):
         slide_text = "这一页没有提取到可用文字，当前请求没有附带页面图片。请提醒我：需要切换支持图片输入的视觉模型，或先对 PDF 做 OCR 后重新导入。"
@@ -1816,8 +1887,8 @@ def _is_pdf_deck(deck: dict) -> bool:
 
 
 def _active_api_key() -> str:
-    provider_id = st.session_state.get("active_api_provider_id")
-    return st.session_state.get(f"api_key_provider_{provider_id}", "")
+    provider_key = st.session_state.get("active_api_provider_key")
+    return st.session_state.get(f"api_key_provider_{provider_key}", "")
 
 
 def _is_text_empty(slide: dict) -> bool:
@@ -1825,9 +1896,9 @@ def _is_text_empty(slide: dict) -> bool:
 
 
 def _active_provider_supports_image_input() -> bool:
-    provider_id = st.session_state.get("active_api_provider_id")
+    provider_key = st.session_state.get("active_api_provider_key")
     providers = list_api_providers()
-    provider = next((item for item in providers if item["id"] == provider_id), None)
+    provider = next((item for item in providers if item["provider_key"] == provider_key), None)
     if not provider:
         return False
     if provider.get("provider_type") != "openai_chat":
@@ -1877,10 +1948,10 @@ def _is_image_input_error(exc: AIServiceError) -> bool:
 
 
 def _active_model_label() -> str:
-    provider_id = st.session_state.get("active_api_provider_id")
+    provider_key = st.session_state.get("active_api_provider_key")
     model = st.session_state.get("active_api_model", DEFAULT_MODEL)
     providers = list_api_providers()
-    provider = next((item for item in providers if item["id"] == provider_id), None)
+    provider = next((item for item in providers if item["provider_key"] == provider_key), None)
     if not provider:
         return model
     return f"{provider['name']} / {model}"

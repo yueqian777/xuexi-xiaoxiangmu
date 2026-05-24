@@ -82,7 +82,7 @@ def collect_review_candidates(limit: int = MAX_DAILY_REVIEW_QUESTIONS) -> list[d
 
 def generate_today_ai_review_plan(
     *,
-    provider_id: int,
+    provider_key: str,
     api_key: str,
     model: str,
     max_output_tokens: int = 1800,
@@ -102,14 +102,14 @@ def generate_today_ai_review_plan(
     )
     raw = generate_text(
         prompt,
-        provider_id=provider_id,
+        provider_key=provider_key,
         api_key=api_key,
         model_override=model,
         max_output_tokens=max_output_tokens,
     )
     plan = _normalize_plan_payload(_load_json_payload(raw), candidates, max_questions)
     _save_today_plan(
-        provider_id=provider_id,
+        provider_key=provider_key,
         model=model,
         plan=plan,
         candidates=candidates,
@@ -123,14 +123,14 @@ def generate_today_ai_review_plan(
 
 def regenerate_today_ai_review_plan(
     *,
-    provider_id: int,
+    provider_key: str,
     api_key: str,
     model: str,
     max_output_tokens: int = 1800,
 ) -> dict[str, Any]:
     execute("DELETE FROM daily_ai_review_plans WHERE review_date = ?", (date.today().isoformat(),))
     return generate_today_ai_review_plan(
-        provider_id=provider_id,
+        provider_key=provider_key,
         api_key=api_key,
         model=model,
         max_output_tokens=max_output_tokens,
@@ -141,7 +141,7 @@ def evaluate_today_ai_review(
     *,
     plan_row: dict[str, Any],
     answers: dict[str, str],
-    provider_id: int,
+    provider_key: str,
     api_key: str,
     model: str,
     max_output_tokens: int = 2200,
@@ -162,7 +162,7 @@ def evaluate_today_ai_review(
     )
     raw = generate_text(
         prompt,
-        provider_id=provider_id,
+        provider_key=provider_key,
         api_key=api_key,
         model_override=model,
         max_output_tokens=max_output_tokens,
@@ -207,7 +207,7 @@ def answers_payload(plan_row: dict[str, Any]) -> dict[str, str]:
 
 def _save_today_plan(
     *,
-    provider_id: int,
+    provider_key: str,
     model: str,
     plan: dict[str, Any],
     candidates: list[dict[str, Any]],
@@ -216,11 +216,11 @@ def _save_today_plan(
     execute(
         """
         INSERT INTO daily_ai_review_plans (
-            review_date, provider_id, model, plan_json, source_snapshot_json, status
+            review_date, provider_key, model, plan_json, source_snapshot_json, status
         )
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(review_date) DO UPDATE SET
-            provider_id = excluded.provider_id,
+            provider_key = excluded.provider_key,
             model = excluded.model,
             plan_json = excluded.plan_json,
             source_snapshot_json = excluded.source_snapshot_json,
@@ -232,7 +232,7 @@ def _save_today_plan(
         """,
         (
             date.today().isoformat(),
-            provider_id,
+            provider_key,
             model,
             json.dumps(plan, ensure_ascii=False),
             json.dumps(candidates, ensure_ascii=False),

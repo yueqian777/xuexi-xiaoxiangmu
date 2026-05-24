@@ -40,16 +40,16 @@ def render_local_secret_unlock(
     with st.container(border=True):
         st.markdown("**检测到匹配的本地加密 API Key**")
         st.caption("只会在输入主密码后解密；API Key 会进入当前 Streamlit 会话，不会明文写入数据库。")
-        selected_provider_id = st.selectbox(
+        selected_provider_key = st.selectbox(
             "选择本地 API Key",
-            [item["provider_id"] for item in candidates],
-            format_func=lambda item_id: _candidate_label(next(item for item in candidates if item["provider_id"] == item_id)),
+            [item["provider_key"] for item in candidates],
+            format_func=lambda item_key: _candidate_label(next(item for item in candidates if item["provider_key"] == item_key)),
             key=f"{key_prefix}_local_secret_candidate",
         )
 
         if vault_data:
             if st.button("使用已解锁密钥", key=f"{key_prefix}_apply_unlocked_secret"):
-                if _apply_secret(vault_data, int(selected_provider_id), target_session_key):
+                if _apply_secret(vault_data, selected_provider_key, target_session_key):
                     st.success("已应用本地加密 API Key 到当前会话。")
                     st.rerun()
             return True
@@ -60,7 +60,7 @@ def render_local_secret_unlock(
             key=f"{key_prefix}_local_secret_password",
         )
         if st.button("解锁并使用本地 API Key", key=f"{key_prefix}_unlock_local_secret", type="primary"):
-            _unlock_and_apply(master_password, int(selected_provider_id), target_session_key)
+            _unlock_and_apply(master_password, selected_provider_key, target_session_key)
         return True
 
 
@@ -90,12 +90,12 @@ def _render_legacy_unlock_hint(
             if not candidates:
                 st.warning("解锁成功，但没有找到与当前 Provider/模型匹配的 API Key。")
                 return
-            if _apply_secret(data, int(candidates[0]["provider_id"]), target_session_key):
+            if _apply_secret(data, candidates[0]["provider_key"], target_session_key):
                 st.success("已应用本地加密 API Key 到当前会话。")
                 st.rerun()
 
 
-def _unlock_and_apply(master_password: str, provider_id: int, target_session_key: str) -> None:
+def _unlock_and_apply(master_password: str, provider_key: str, target_session_key: str) -> None:
     if not master_password:
         st.error("请输入主密码。")
         return
@@ -108,13 +108,13 @@ def _unlock_and_apply(master_password: str, provider_id: int, target_session_key
     st.session_state["secret_vault_unlocked"] = True
     st.session_state["secret_vault_data"] = data
     st.session_state["secret_vault_master_password"] = master_password
-    if _apply_secret(data, provider_id, target_session_key):
+    if _apply_secret(data, provider_key, target_session_key):
         st.success("已应用本地加密 API Key 到当前会话。")
         st.rerun()
 
 
-def _apply_secret(data: dict[str, Any], provider_id: int, target_session_key: str) -> bool:
-    secret = get_provider_secret(data, provider_id)
+def _apply_secret(data: dict[str, Any], provider_key: str, target_session_key: str) -> bool:
+    secret = get_provider_secret(data, provider_key)
     if not secret:
         st.error("密钥库中没有找到这个 Provider 的 API Key。")
         return False
@@ -132,6 +132,7 @@ def _refresh_public_index(master_password: str, data: dict[str, Any]) -> None:
 def _find_index_candidates(provider: dict[str, Any], model: str) -> list[dict[str, Any]]:
     candidates = []
     for item in load_secret_public_index():
+        item = _normalize_public_item(item)
         score = _match_score(item, provider, model)
         if score <= 0:
             continue
@@ -142,11 +143,11 @@ def _find_index_candidates(provider: dict[str, Any], model: str) -> list[dict[st
 
 def _find_decrypted_candidates(data: dict[str, Any], provider: dict[str, Any], model: str) -> list[dict[str, Any]]:
     candidates = []
-    for raw_id, item in data.get("providers", {}).items():
+    for raw_key, item in data.get("providers", {}).items():
         if not isinstance(item, dict):
             continue
         public_item = {
-            "provider_id": int(item.get("provider_id") or raw_id),
+            "provider_key": str(item.get("provider_key") or raw_key),
             "provider_name": str(item.get("provider_name") or ""),
             "model": str(item.get("model") or ""),
             "provider_type": str(item.get("provider_type") or ""),
@@ -161,7 +162,7 @@ def _find_decrypted_candidates(data: dict[str, Any], provider: dict[str, Any], m
 
 
 def _match_score(item: dict[str, Any], provider: dict[str, Any], model: str) -> int:
-    if int(item.get("provider_id") or 0) == int(provider.get("id") or 0):
+    if str(item.get("provider_key") or "") == str(provider.get("provider_key") or ""):
         return 100
 
     item_model = _normalize(item.get("model"))
@@ -182,12 +183,21 @@ def _match_score(item: dict[str, Any], provider: dict[str, Any], model: str) -> 
 
 def _candidate_label(item: dict[str, Any]) -> str:
     parts = [
-        f"#{item.get('provider_id')} · {item.get('provider_name') or '未命名 Provider'}",
+        item.get("provider_name") or "未命名 Provider",
         item.get("model") or "未记录模型",
     ]
     if item.get("updated_at"):
         parts.append(f"更新：{item['updated_at']}")
     return " · ".join(parts)
+
+
+def _normalize_public_item(item: dict[str, Any]) -> dict[str, Any]:
+    if "provider_key" in item:
+        return item
+    return {
+        **item,
+        "provider_key": str(item.get("provider_id") or ""),
+    }
 
 
 def _normalize(value: Any) -> str:

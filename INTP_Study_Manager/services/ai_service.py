@@ -5,13 +5,15 @@ import os
 import base64
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import requests
 
-from db import execute, execute_many, fetch_all, fetch_one, insert_and_get_id
+from db import execute, execute_many, fetch_all, fetch_one
 
 DEFAULT_MODEL = "gpt-5.5"
+DEFAULT_PROVIDERS_SEEDED_KEY = "default_api_providers_seeded"
+REASONING_EFFORTS = {"低": "low", "中": "medium", "高": "high", "超高": "xhigh"}
 
 PROVIDER_TYPES = {
     "openai_responses": "OpenAI Responses API",
@@ -246,7 +248,7 @@ class AIServiceError(RuntimeError):
 
 @dataclass
 class AIProvider:
-    id: int | None
+    provider_key: str
     name: str
     provider_type: str
     base_url: str
@@ -260,16 +262,23 @@ class AIProvider:
 
 
 def ensure_default_api_providers() -> None:
-    execute_many(
-        """
-        INSERT OR IGNORE INTO api_providers (
-            name, provider_type, base_url, model, api_key_env, auth_type,
-            extra_headers_json, request_template_json, response_path, enabled
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-        """,
-        (
+    seeded = fetch_one("SELECT value FROM app_settings WHERE key = ?", (DEFAULT_PROVIDERS_SEEDED_KEY,))
+    existing = fetch_one("SELECT COUNT(*) AS count FROM api_providers")
+    if seeded and seeded["value"] == "1":
+        normalize_api_provider_sort_orders()
+        return
+
+    if existing and int(existing["count"] or 0) > 0:
+        _mark_default_api_providers_seeded()
+        normalize_api_provider_sort_orders()
+        return
+
+    used_keys: set[str] = set()
+    default_rows = []
+    for provider in DEFAULT_PROVIDERS:
+        default_rows.append(
             (
+                _dedupe_provider_key(_slugify_provider_key(provider["name"]), used_keys),
                 provider["name"],
                 provider["provider_type"],
                 provider["base_url"],
@@ -280,33 +289,47 @@ def ensure_default_api_providers() -> None:
                 provider["request_template_json"],
                 provider["response_path"],
             )
-            for provider in DEFAULT_PROVIDERS
-        ),
+        )
+
+    execute_many(
+        """
+        INSERT OR IGNORE INTO api_providers (
+            provider_key, name, provider_type, base_url, model, api_key_env, auth_type,
+            extra_headers_json, request_template_json, response_path, enabled
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        default_rows,
     )
+    normalize_api_provider_sort_orders()
+    _mark_default_api_providers_seeded()
 
 
 def list_api_providers(enabled_only: bool = False) -> list[dict[str, Any]]:
+    normalize_api_provider_sort_orders()
     where = "WHERE enabled = 1" if enabled_only else ""
     return fetch_all(
         f"""
         SELECT *
         FROM api_providers
         {where}
-        ORDER BY id ASC
+        ORDER BY sort_order ASC, provider_key ASC
         """
     )
 
 
-def get_api_provider(provider_id: int | None) -> AIProvider:
+def get_api_provider(provider_key: str | None) -> AIProvider:
     row = None
-    if provider_id:
-        row = fetch_one("SELECT * FROM api_providers WHERE id = ?", (provider_id,))
+    if provider_key:
+        row = fetch_one("SELECT * FROM api_providers WHERE provider_key = ?", (str(provider_key),))
     if row is None:
-        row = fetch_one("SELECT * FROM api_providers WHERE enabled = 1 ORDER BY id ASC LIMIT 1")
+        row = fetch_one(
+            "SELECT * FROM api_providers WHERE enabled = 1 ORDER BY sort_order ASC, provider_key ASC LIMIT 1"
+        )
     if row is None:
         raise AIServiceError("没有可用 API Provider，请先到\"API 接入设置\"创建。")
     return AIProvider(
-        id=row["id"],
+        provider_key=row["provider_key"],
         name=row["name"],
         provider_type=row["provider_type"],
         base_url=row["base_url"] or "",
@@ -320,7 +343,8 @@ def get_api_provider(provider_id: int | None) -> AIProvider:
     )
 
 
-def save_api_provider(data: dict[str, Any], provider_id: int | None = None) -> int:
+def save_api_provider(data: dict[str, Any], provider_key: str | None = None) -> str:
+    target_order = _positive_int(data.get("sort_order"), default=0)
     values = (
         data["name"].strip(),
         data["provider_type"],
@@ -333,41 +357,204 @@ def save_api_provider(data: dict[str, Any], provider_id: int | None = None) -> i
         data.get("response_path", "").strip(),
         int(bool(data.get("enabled", True))),
     )
-    if provider_id:
+    if provider_key:
         execute(
             """
             UPDATE api_providers
             SET name = ?, provider_type = ?, base_url = ?, model = ?, api_key_env = ?,
                 auth_type = ?, extra_headers_json = ?, request_template_json = ?,
                 response_path = ?, enabled = ?, updated_at = datetime('now', 'localtime')
-            WHERE id = ?
+            WHERE provider_key = ?
             """,
-            values + (provider_id,),
+            values + (provider_key,),
         )
-        return provider_id
-    return insert_and_get_id(
+        saved_key = provider_key
+    else:
+        saved_key = _new_provider_key(data["name"])
+        execute(
+            """
+            INSERT INTO api_providers (
+                provider_key, name, provider_type, base_url, model, api_key_env, auth_type,
+                extra_headers_json, request_template_json, response_path, enabled
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (saved_key,) + values,
+        )
+
+    _place_api_provider(saved_key, target_order or None)
+    return saved_key
+
+
+def save_api_provider_order(updates: Iterable[dict[str, Any]]) -> None:
+    providers = list_api_providers()
+    if not providers:
+        return
+    update_by_key = {str(item["provider_key"]): item for item in updates if item.get("provider_key")}
+    ordered = sorted(
+        providers,
+        key=lambda provider: (
+            _positive_int(update_by_key.get(str(provider["provider_key"]), {}).get("sort_order"), int(provider["sort_order"])),
+            int(provider["sort_order"] or 0),
+            str(provider["provider_key"]),
+        ),
+    )
+    execute_many(
         """
-        INSERT INTO api_providers (
-            name, provider_type, base_url, model, api_key_env, auth_type,
-            extra_headers_json, request_template_json, response_path, enabled
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        UPDATE api_providers
+        SET sort_order = ?, enabled = ?, updated_at = datetime('now', 'localtime')
+        WHERE provider_key = ?
         """,
-        values,
+        (
+            (
+                index,
+                int(bool(update_by_key.get(str(provider["provider_key"]), {}).get("enabled", provider["enabled"]))),
+                str(provider["provider_key"]),
+            )
+            for index, provider in enumerate(ordered, start=1)
+        ),
+    )
+
+
+def move_api_provider(provider_key: str, *, offset: int = 0, to_top: bool = False) -> bool:
+    providers = list_api_providers()
+    provider_keys = [str(provider["provider_key"]) for provider in providers]
+    if provider_key not in provider_keys:
+        return False
+
+    current_index = provider_keys.index(provider_key)
+    item = provider_keys.pop(current_index)
+    if to_top:
+        new_index = 0
+    else:
+        new_index = max(0, min(len(provider_keys), current_index + offset))
+    provider_keys.insert(new_index, item)
+    _write_api_provider_order(provider_keys)
+    return new_index != current_index
+
+
+def delete_api_providers(provider_keys: Iterable[str]) -> int:
+    keys = sorted({str(provider_key) for provider_key in provider_keys if str(provider_key).strip()})
+    if not keys:
+        return 0
+    execute_many("DELETE FROM api_providers WHERE provider_key = ?", ((provider_key,) for provider_key in keys))
+    normalize_api_provider_sort_orders()
+    return len(keys)
+
+
+def delete_api_provider(provider_key: str) -> bool:
+    return bool(delete_api_providers([provider_key]))
+
+
+def normalize_api_provider_sort_orders() -> None:
+    rows = fetch_all(
+        """
+        SELECT provider_key, sort_order
+        FROM api_providers
+        ORDER BY
+            CASE WHEN sort_order <= 0 THEN 1 ELSE 0 END,
+            sort_order ASC,
+            provider_key ASC
+        """,
+    )
+    provider_keys = [str(row["provider_key"]) for row in rows]
+    desired = {provider_key: index for index, provider_key in enumerate(provider_keys, start=1)}
+    if all(int(row["sort_order"] or 0) == desired[str(row["provider_key"])] for row in rows):
+        return
+    _write_api_provider_order(provider_keys)
+
+
+def _place_api_provider(provider_key: str, target_order: int | None) -> None:
+    rows = fetch_all(
+        """
+        SELECT provider_key
+        FROM api_providers
+        WHERE provider_key <> ?
+        ORDER BY
+            CASE WHEN sort_order <= 0 THEN 1 ELSE 0 END,
+            sort_order ASC,
+            provider_key ASC
+        """,
+        (provider_key,),
+    )
+    provider_keys = [str(row["provider_key"]) for row in rows]
+    if target_order is None:
+        target_index = len(provider_keys)
+    else:
+        target_index = max(0, min(len(provider_keys), target_order - 1))
+    provider_keys.insert(target_index, provider_key)
+    _write_api_provider_order(provider_keys)
+
+
+def _write_api_provider_order(provider_keys: list[str]) -> None:
+    execute_many(
+        """
+        UPDATE api_providers
+        SET sort_order = ?, updated_at = datetime('now', 'localtime')
+        WHERE provider_key = ?
+        """,
+        ((index, provider_key) for index, provider_key in enumerate(provider_keys, start=1)),
+    )
+
+
+def _new_provider_key(name: str) -> str:
+    existing = {str(row["provider_key"]) for row in fetch_all("SELECT provider_key FROM api_providers")}
+    return _dedupe_provider_key(_slugify_provider_key(name), existing)
+
+
+def _dedupe_provider_key(base_key: str, used_keys: set[str]) -> str:
+    base = base_key.strip("-") or "provider"
+    candidate = base
+    suffix = 2
+    while candidate in used_keys:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    used_keys.add(candidate)
+    return candidate
+
+
+def _slugify_provider_key(value: str) -> str:
+    chars: list[str] = []
+    for char in value.strip().lower():
+        if char.isalnum():
+            chars.append(char)
+        elif chars and chars[-1] != "-":
+            chars.append("-")
+    return "".join(chars).strip("-")[:80] or "provider"
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return default
+    return result if result > 0 else default
+
+
+def _mark_default_api_providers_seeded() -> None:
+    execute(
+        """
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, '1', datetime('now', 'localtime'))
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        """,
+        (DEFAULT_PROVIDERS_SEEDED_KEY,),
     )
 
 
 def generate_text(
     prompt: str,
     *,
-    provider_id: int | None = None,
+    provider_key: str | None = None,
     api_key: str | None = None,
     model_override: str | None = None,
     max_output_tokens: int = 1600,
     image_paths: list[str] | None = None,
     reasoning_depth: str | None = None,
 ) -> str:
-    provider = get_api_provider(provider_id)
+    provider = get_api_provider(provider_key)
     model = (model_override or provider.model or DEFAULT_MODEL).strip()
     key = _resolve_api_key(provider, api_key)
     request = _build_request(provider, prompt, key, model, max_output_tokens, image_paths or [], reasoning_depth)
@@ -414,7 +601,9 @@ def provider_label(provider: dict[str, Any]) -> str:
     type_label = PROVIDER_TYPES.get(provider["provider_type"], provider["provider_type"])
     model = provider.get("model") or "未设置模型"
     state = "启用" if provider.get("enabled") else "停用"
-    return f"#{provider['id']} · {provider['name']} · {type_label} · {model} · {state}"
+    number = _positive_int(provider.get("sort_order"), 0)
+    number_label = f"编号 {number}" if number else "未排序"
+    return f"{number_label} · {provider['name']} · {type_label} · {model} · {state}"
 
 
 def is_quota_error(exc: Exception) -> bool:
@@ -596,6 +785,8 @@ def _build_request(
     if provider.provider_type == "openai_responses":
         url = _join_url(provider.base_url or "https://api.openai.com/v1", "responses")
         body = {"model": model, "input": prompt, "max_output_tokens": max_output_tokens}
+        if reasoning_depth and reasoning_depth != "关闭":
+            body["reasoning"] = {"effort": _reasoning_effort_value(reasoning_depth)}
     elif provider.provider_type == "openai_chat":
         url = _join_url(provider.base_url or "https://api.openai.com/v1", "chat/completions")
         user_content: str | list[dict[str, Any]]
@@ -617,8 +808,7 @@ def _build_request(
             "max_tokens": max_output_tokens,
         }
         if reasoning_depth and reasoning_depth != "关闭":
-            effort_map = {"低": "low", "中": "medium", "高": "high"}
-            body["reasoning_effort"] = effort_map.get(reasoning_depth, "medium")
+            body["reasoning_effort"] = _reasoning_effort_value(reasoning_depth)
     elif provider.provider_type == "anthropic_messages":
         if image_paths:
             raise AIServiceError("当前 Anthropic Provider 尚未实现图片直传，请改用 OpenAI 兼容视觉接口。")
@@ -635,7 +825,7 @@ def _build_request(
             "messages": [{"role": "user", "content": prompt}],
         }
         if reasoning_depth and reasoning_depth != "关闭":
-            budget_map = {"低": 1024, "中": 4096, "高": 10240}
+            budget_map = {"低": 1024, "中": 4096, "高": 10240, "超高": 16000}
             body["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": budget_map.get(reasoning_depth, 4096),
@@ -710,6 +900,10 @@ def _apply_auth(url: str, headers: dict[str, str], auth_type: str, api_key: str)
     else:
         raise AIServiceError(f"不支持的鉴权方式：{auth_type}")
     return url, headers
+
+
+def _reasoning_effort_value(reasoning_depth: str) -> str:
+    return REASONING_EFFORTS.get(reasoning_depth, "medium")
 
 
 def _join_url(base_url: str, path: str) -> str:
