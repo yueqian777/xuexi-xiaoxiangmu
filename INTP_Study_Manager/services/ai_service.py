@@ -387,9 +387,9 @@ def generate_text(
         raise _build_http_error(response)
 
     try:
-        payload = response.json()
+        payload = _parse_response_json(response)
     except ValueError as exc:
-        raise AIServiceError(f"API 没有返回 JSON：{response.text[:1200]}") from exc
+        raise AIServiceError(f"API 没有返回 JSON：{_decode_response_text(response)[:1200]}") from exc
 
     output = _extract_path(payload, provider.response_path or _default_response_path(provider.provider_type))
     if isinstance(output, list):
@@ -400,7 +400,7 @@ def generate_text(
         if reasoning and finish_reason == "length":
             raise AIServiceError("模型只返回了 reasoning，最终回答为空。请把\"最大输出 token\"调高后重试。")
         raise AIServiceError(f"没有从响应路径中提取到文本：{provider.response_path}")
-    output_str = str(output).strip()
+    output_str = _repair_utf8_mojibake(str(output)).strip()
     # 对 MiniMax 始终执行思考内容移除（MiniMax 的思考内容无论是否开启推理都会出现）
     # 其他模型仅在推理深度非"关闭"时移除
     if provider.provider_type == "minimax_chat":
@@ -424,13 +424,13 @@ def is_quota_error(exc: Exception) -> bool:
 
 
 def _build_http_error(response: requests.Response) -> AIServiceError:
-    raw_text = response.text or ""
+    raw_text = _decode_response_text(response)
     error_message = raw_text.strip()
     error_type = ""
     error_code = ""
 
     try:
-        payload = response.json()
+        payload = _parse_response_json(response)
     except ValueError:
         payload = None
 
@@ -499,6 +499,39 @@ def _build_http_error(response: requests.Response) -> AIServiceError:
         category=category,
         status_code=response.status_code,
     )
+
+
+def _repair_utf8_mojibake(text: str) -> str:
+    markers = ("Ã", "Â", "â€", "â€œ", "ç", "é", "æ", "è", "å", "ï¼", "ã€")
+    if not text or not any(marker in text for marker in markers):
+        return text
+    try:
+        repaired = text.encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        return text
+    return repaired if _mojibake_score(repaired) < _mojibake_score(text) else text
+
+
+def _mojibake_score(text: str) -> int:
+    return sum(text.count(marker) for marker in ("�", "Ã", "Â", "â€", "ç", "é", "æ", "è", "å", "ï¼", "ã€"))
+
+
+def _decode_response_text(response: requests.Response) -> str:
+    content = response.content or b""
+    if not content:
+        return ""
+    for encoding in ("utf-8-sig", "utf-8", response.encoding, response.apparent_encoding):
+        if not encoding:
+            continue
+        try:
+            return content.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+def _parse_response_json(response: requests.Response) -> Any:
+    return json.loads(_decode_response_text(response))
 
 
 def _classify_api_error_text(text: str, status_code: int | None) -> str:
