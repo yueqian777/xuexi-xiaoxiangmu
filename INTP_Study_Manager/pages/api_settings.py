@@ -826,23 +826,14 @@ def _render_locked_secret_vault(providers: list[dict]) -> None:
 
 def _render_unlocked_secret_vault(providers: list[dict]) -> None:
     data = st.session_state.get("secret_vault_data") or {"providers": {}}
-    saved = data.get("providers", {})
+    saved = _saved_secret_items(data)
     st.success(f"密钥库已解锁。当前保存 {len(saved)} 个 Provider Key。")
 
-    rows = []
-    for provider in providers:
-        provider_key = str(provider["provider_key"])
-        secret = get_provider_secret(data, provider_key)
-        rows.append(
-            {
-                "编号": _positive_int(provider.get("sort_order"), 1),
-                "Provider": provider["name"],
-                "模型": provider.get("model") or "",
-                "Key": masked_secret(secret),
-                "更新时间": saved.get(provider_key, {}).get("updated_at", ""),
-            }
-        )
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    rows = _secret_vault_rows(providers, data)
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("当前密钥库还没有保存任何 API Key。")
 
     provider_key = st.selectbox(
         "选择要保存 / 更新 Key 的 Provider",
@@ -902,11 +893,91 @@ def _render_unlocked_secret_vault(providers: list[dict]) -> None:
 
 
 def _apply_vault_to_session(providers: list[dict], data: dict) -> None:
-    for provider in providers:
-        provider_key = str(provider["provider_key"])
-        secret = get_provider_secret(data, provider_key)
+    for raw_key, item in _saved_secret_items(data).items():
+        provider = _provider_for_saved_secret(providers, raw_key, item)
+        if not provider:
+            continue
+        secret = str(item.get("api_key") or "")
         if secret:
-            st.session_state[f"api_key_provider_{provider_key}"] = secret
+            st.session_state[f"api_key_provider_{provider['provider_key']}"] = secret
+
+
+def _secret_vault_rows(providers: list[dict], data: dict) -> list[dict]:
+    rows = []
+    for raw_key, item in _saved_secret_items(data).items():
+        provider = _provider_for_saved_secret(providers, raw_key, item)
+        provider_name = str(item.get("provider_name") or "")
+        provider_model = str(item.get("model") or "")
+        matched = provider is not None
+        if provider:
+            provider_name = provider.get("name") or provider_name
+            provider_model = provider.get("model") or provider_model
+        rows.append(
+            {
+                "匹配状态": "已匹配当前 Provider" if matched else "未匹配当前 Provider",
+                "编号": _positive_int(provider.get("sort_order"), 0) if provider else "",
+                "Provider": provider_name or "未命名 Provider",
+                "模型": provider_model,
+                "Key": masked_secret(str(item.get("api_key") or "")),
+                "更新时间": str(item.get("updated_at") or ""),
+            }
+        )
+    rows.sort(key=lambda row: (_positive_int(row.get("编号"), 999999), str(row.get("Provider") or "")))
+    return rows
+
+
+def _saved_secret_items(data: dict) -> dict[str, dict]:
+    providers = data.get("providers", {})
+    if not isinstance(providers, dict):
+        return {}
+    return {
+        str(raw_key): item
+        for raw_key, item in providers.items()
+        if isinstance(item, dict) and str(item.get("api_key") or "")
+    }
+
+
+def _provider_for_saved_secret(providers: list[dict], raw_key: str, item: dict) -> dict | None:
+    by_key = {str(provider.get("provider_key") or ""): provider for provider in providers}
+    provider = by_key.get(str(item.get("provider_key") or raw_key))
+    if provider:
+        return provider
+
+    matches = [
+        provider
+        for provider in providers
+        if _provider_shape_matches_saved_secret(provider, item)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+
+    name_matches = [
+        provider
+        for provider in providers
+        if _normalized(provider.get("name")) == _normalized(item.get("provider_name"))
+    ]
+    return name_matches[0] if len(name_matches) == 1 else None
+
+
+def _provider_shape_matches_saved_secret(provider: dict, item: dict) -> bool:
+    item_type = _normalized(item.get("provider_type"))
+    item_model = _normalized(item.get("model"))
+    item_base = _normalized_url(item.get("base_url"))
+    if not item_type or not item_model:
+        return False
+    return (
+        item_type == _normalized(provider.get("provider_type"))
+        and item_model == _normalized(provider.get("model"))
+        and (not item_base or item_base == _normalized_url(provider.get("base_url")))
+    )
+
+
+def _normalized(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalized_url(value: object) -> str:
+    return _normalized(value).rstrip("/")
 
 
 def _lock_secret_vault(providers: list[dict]) -> None:
