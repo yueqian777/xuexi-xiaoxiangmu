@@ -1,7 +1,26 @@
+# Local app data and uploads
 data/
+
+# Local secrets and API key stores
 data/api_keys.enc.json
 *.enc.json
+
+# Runtime logs
 streamlit_stdout.log
 streamlit_stderr.log
+
+# Python generated files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+env/
+ENV/
