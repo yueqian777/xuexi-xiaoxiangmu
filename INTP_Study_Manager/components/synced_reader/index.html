@@ -81,8 +81,46 @@
       font-size: 13px;
     }
     .current {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      min-width: 82px;
+      height: 32px;
+      padding: 0 8px;
+      border: 1px solid #b9dde6;
+      border-radius: 8px;
+      background: #ffffff;
       color: var(--accent);
       font-weight: 800;
+      box-shadow: 0 4px 12px rgba(24, 111, 130, 0.08);
+    }
+    .page-jump-input {
+      width: 34px;
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: var(--accent);
+      font: inherit;
+      font-weight: 900;
+      text-align: right;
+      outline: none;
+      appearance: textfield;
+    }
+    .page-jump-input::-webkit-outer-spin-button,
+    .page-jump-input::-webkit-inner-spin-button {
+      margin: 0;
+      appearance: none;
+    }
+    .page-jump-separator {
+      color: #7c9aa2;
+      font-weight: 800;
+    }
+    .page-jump-total {
+      min-width: 18px;
+      color: #5d7780;
+      font-weight: 800;
+      text-align: left;
     }
     .layout-controls {
       display: flex;
@@ -137,6 +175,29 @@
       display: flex;
       align-items: center;
       gap: 10px;
+    }
+    .section-select {
+      width: min(260px, 28vw);
+      min-width: 160px;
+      height: 32px;
+      border: 1px solid #b9dde6;
+      border-radius: 8px;
+      padding: 0 9px;
+      background: #ffffff;
+      color: #24606f;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      outline: none;
+      box-shadow: 0 4px 12px rgba(24, 111, 130, 0.08);
+    }
+    .section-select:focus {
+      border-color: var(--accent);
+    }
+    .section-select:disabled {
+      color: #8aa3aa;
+      background: #f5fbfd;
+      cursor: not-allowed;
     }
     .fullscreen-btn {
       display: flex;
@@ -255,6 +316,7 @@
     }
     .page-label {
       display: flex;
+      flex-wrap: wrap;
       justify-content: space-between;
       gap: 10px;
       padding: 2px 4px 10px;
@@ -323,6 +385,15 @@
     .note-header h3 {
       margin: 0;
     }
+    .note-actions,
+    .note-edit-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 7px;
+    }
+    .note-action-button,
     .note-refresh {
       flex: 0 0 auto;
       border: 1px solid #b9dde6;
@@ -336,21 +407,102 @@
       cursor: pointer;
       box-shadow: 0 4px 12px rgba(24, 111, 130, 0.08);
     }
+    .note-action-button:hover,
     .note-refresh:hover {
       border-color: var(--accent);
       background: var(--soft-green);
     }
+    .note-action-button:disabled,
     .note-refresh:disabled {
       cursor: default;
       opacity: 0.72;
+    }
+    .note-save {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: var(--accent);
+    }
+    .note-cancel {
+      background: #eef8ff;
+      color: #1f6b86;
     }
     .note-meta {
       margin-bottom: 12px;
       color: var(--muted);
       font-size: 12px;
     }
+    .note-context {
+      display: grid;
+      gap: 5px;
+      margin: 0 0 12px;
+      padding: 9px 10px;
+      border: 1px solid #cbece3;
+      border-radius: 8px;
+      background: #f3fffb;
+      color: #2b6971;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .note-context-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+    .note-chip {
+      display: inline-flex;
+      align-items: center;
+      max-width: 100%;
+      min-height: 22px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: #e5f7ff;
+      color: #1e6882;
+      font-size: 12px;
+      font-weight: 900;
+      overflow-wrap: anywhere;
+    }
+    .note-context-text {
+      overflow-wrap: anywhere;
+    }
     .note-body {
       overflow-wrap: anywhere;
+    }
+    .note-edit-panel {
+      display: none;
+      margin-top: 12px;
+    }
+    .note.editing .note-body {
+      display: none;
+    }
+    .note.editing .note-edit-panel {
+      display: block;
+    }
+    .note-editor {
+      width: 100%;
+      min-height: 380px;
+      resize: vertical;
+      border: 1px solid #b9dde6;
+      border-radius: 8px;
+      padding: 12px;
+      background: #ffffff;
+      color: var(--ink);
+      font: inherit;
+      font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif;
+      line-height: 1.65;
+      outline: none;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+    .note-editor:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(24, 165, 143, 0.14);
+    }
+    .reader-highlight {
+      padding: 0 2px;
+      border-radius: 3px;
+      background: #fff09a;
+      box-shadow: 0 0 0 1px rgba(219, 165, 0, 0.2);
     }
     .note-body h1,
     .note-body h2,
@@ -700,6 +852,7 @@
       .notes,
       .canvas-chat { display: none; }
       .pages { border-right: 0; }
+      .section-select { display: none; }
       .layout-controls { display: none; }
       .mode-controls { display: none; }
       .fullscreen-btn { display: none; }
@@ -714,6 +867,7 @@
         <div class="meta" id="deckMeta">未分类 · 原页面同步阅读</div>
       </div>
       <div class="topbar-right">
+        <select class="section-select" id="sectionSelect" title="目录跳转"></select>
         <div class="mode-controls" aria-label="PPT 阅读模式">
           <button type="button" data-reading-mode="paged">逐页</button>
           <button type="button" data-reading-mode="continuous">连续</button>
@@ -727,7 +881,11 @@
         <button type="button" class="fullscreen-btn" id="fullscreenButton" title="全屏放大">
           <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
         </button>
-        <div class="current" id="currentPage">第 1 页</div>
+        <div class="current" id="currentPage" title="输入页码后按 Enter 跳转">
+          <input type="number" class="page-jump-input" id="pageJumpInput" min="1" step="1" value="1" aria-label="跳转页码" />
+          <span class="page-jump-separator">/</span>
+          <span class="page-jump-total" id="pageJumpTotal">1</span>
+        </div>
       </div>
     </div>
     <div class="grid" id="readerGrid">
@@ -764,6 +922,7 @@
   </div>
   <div class="selection-toolbar" id="selectionToolbar">
     <button type="button" id="askSelectionButton">引用到插问</button>
+    <button type="button" class="secondary" id="highlightSelectionButton">高亮</button>
     <button type="button" class="secondary" id="copySelectionButton">复制引用</button>
     <span id="selectionHint">将引用选中文本</span>
   </div>
@@ -798,10 +957,13 @@
     const deckMeta = document.getElementById('deckMeta');
     const pageRoot = document.getElementById('pages');
     const noteRoot = document.getElementById('notes');
-    const current = document.getElementById('currentPage');
+    const pageJumpInput = document.getElementById('pageJumpInput');
+    const pageJumpTotal = document.getElementById('pageJumpTotal');
+    const sectionSelect = document.getElementById('sectionSelect');
     const fullscreenButton = document.getElementById('fullscreenButton');
     const selectionToolbar = document.getElementById('selectionToolbar');
     const askSelectionButton = document.getElementById('askSelectionButton');
+    const highlightSelectionButton = document.getElementById('highlightSelectionButton');
     const copySelectionButton = document.getElementById('copySelectionButton');
     const selectionHint = document.getElementById('selectionHint');
     const canvasChat = document.getElementById('canvasChat');
@@ -818,6 +980,7 @@
     const clearQuoteButton = document.getElementById('clearQuoteButton');
 
     let pages = [];
+    let sections = [];
     let deckId = 0;
     let activeModel = '';
     let observer = null;
@@ -834,6 +997,15 @@
     let scrollStateSaveTimer = null;
     let viewportAnchorTimers = [];
     let suppressObserverUntil = 0;
+    let viewportAnchorState = null;
+    let viewportAnchorReleaseTimer = null;
+    let hasCenteredOnEntry = false;
+    let parentCenterTimer = null;
+    let lastFullscreenState = false;
+    let readerStructureSignature = '';
+    const pendingExplanationSaves = new Map();
+    const PENDING_SAVE_TTL_MS = 30000;
+    const VIEWPORT_ANCHOR_MS = 1400;
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -920,20 +1092,56 @@
       return html;
     }
 
+    function protectHighlightSegments(value) {
+      const source = String(value ?? '');
+      const segments = [];
+      let protectedSource = '';
+      let index = 0;
+      while (index < source.length) {
+        if (source.startsWith('==', index)) {
+          const end = findUnescaped(source, '==', index + 2);
+          if (end >= 0) {
+            const token = `HIGHLIGHTPLACEHOLDER${segments.length}TOKEN`;
+            segments.push({ token, segment: source.slice(index + 2, end) });
+            protectedSource += token;
+            index = end + 2;
+            continue;
+          }
+        }
+        protectedSource += source[index];
+        index += 1;
+      }
+      return { protectedSource, segments };
+    }
+
+    function restoreHighlightSegments(value, segments) {
+      let html = String(value ?? '');
+      segments.forEach(({ token, segment }) => {
+        html = html.replaceAll(token, `<mark class="reader-highlight">${escapeHtml(segment)}</mark>`);
+      });
+      return html;
+    }
+
     function renderMarkdown(value) {
       const source = String(value ?? '');
       if (!window.marked || !window.DOMPurify) {
-        return escapeHtml(source).replaceAll('\n', '<br>');
+        return escapeHtml(source)
+          .replace(/==([^=\n][\s\S]*?[^=\n])==/g, '<mark class="reader-highlight">$1</mark>')
+          .replaceAll('\n', '<br>');
       }
-      const { protectedSource, segments } = protectMathSegments(source);
-      const rawHtml = window.marked.parse(protectedSource, {
+      const mathProtected = protectMathSegments(source);
+      const highlightProtected = protectHighlightSegments(mathProtected.protectedSource);
+      const rawHtml = window.marked.parse(highlightProtected.protectedSource, {
         gfm: true,
         breaks: true,
       });
       const sanitized = window.DOMPurify.sanitize(rawHtml, {
         USE_PROFILES: { html: true },
       });
-      return restoreMathSegments(sanitized, segments);
+      return restoreMathSegments(
+        restoreHighlightSegments(sanitized, highlightProtected.segments),
+        mathProtected.segments
+      );
     }
 
     function typesetTargets(targets) {
@@ -963,6 +1171,93 @@
 
     function clamp(value, min, max) {
       return Math.min(max, Math.max(min, value));
+    }
+
+    function parentScrollContext() {
+      try {
+        const parentWindow = window.parent;
+        if (!parentWindow || parentWindow === window) return null;
+        const frameElement = window.frameElement;
+        const parentDocument = parentWindow.document;
+        if (!frameElement || !parentDocument) return null;
+        const scrollingElement = parentDocument.scrollingElement || parentDocument.documentElement || parentDocument.body;
+        const candidates = [
+          scrollingElement,
+          parentDocument.documentElement,
+          parentDocument.body,
+          ...parentDocument.querySelectorAll('[data-testid="stAppViewContainer"], [data-testid="stMain"], section.main, .main'),
+        ].filter(Boolean);
+        const scrollElement = candidates.find(element => (
+          element.clientHeight > 0 && element.scrollHeight > element.clientHeight + 24
+        )) || scrollingElement;
+        if (!scrollElement) return null;
+        const useWindow = scrollElement === scrollingElement
+          || scrollElement === parentDocument.documentElement
+          || scrollElement === parentDocument.body;
+        return { parentWindow, parentDocument, frameElement, scrollElement, useWindow };
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function parentViewportHeight(context) {
+      if (context.useWindow) {
+        return context.parentWindow.innerHeight || context.scrollElement.clientHeight || 0;
+      }
+      return context.scrollElement.clientHeight || 0;
+    }
+
+    function parentScrollTop(context) {
+      if (context.useWindow) {
+        return context.parentWindow.scrollY
+          || context.parentWindow.pageYOffset
+          || context.scrollElement.scrollTop
+          || 0;
+      }
+      return context.scrollElement.scrollTop || 0;
+    }
+
+    function parentMaxScrollTop(context, viewportHeight) {
+      const maxHeight = Math.max(
+        context.scrollElement.scrollHeight || 0,
+        context.parentDocument.documentElement?.scrollHeight || 0,
+        context.parentDocument.body?.scrollHeight || 0
+      );
+      return Math.max(0, maxHeight - viewportHeight);
+    }
+
+    function centerReaderInParent(options = {}) {
+      const context = parentScrollContext();
+      if (!context) return false;
+      const frameRect = context.frameElement.getBoundingClientRect();
+      const viewportHeight = parentViewportHeight(context);
+      if (!viewportHeight || !frameRect.height) return false;
+      if (options.skipIfAboveViewport && frameRect.bottom < 24) return false;
+
+      const scrollTop = parentScrollTop(context);
+      const containerTop = context.useWindow ? 0 : context.scrollElement.getBoundingClientRect().top;
+      const relativeTop = frameRect.top - containerTop;
+      const targetTop = clamp(
+        scrollTop + relativeTop + (frameRect.height / 2) - (viewportHeight / 2),
+        0,
+        parentMaxScrollTop(context, viewportHeight)
+      );
+      if (Math.abs(scrollTop - targetTop) < 6) return true;
+
+      const behavior = options.behavior || 'auto';
+      if (context.useWindow) {
+        context.parentWindow.scrollTo({ top: targetTop, behavior });
+      } else {
+        context.scrollElement.scrollTo({ top: targetTop, behavior });
+      }
+      return true;
+    }
+
+    function scheduleParentReaderCenter(options = {}) {
+      window.clearTimeout(parentCenterTimer);
+      parentCenterTimer = window.setTimeout(() => {
+        window.requestAnimationFrame(() => centerReaderInParent(options));
+      }, Number(options.delay || 120));
     }
 
     function loadLayoutState() {
@@ -1067,24 +1362,73 @@
       }
     }
 
+    function noteAnchorForSlide(slideNumber) {
+      const note = document.getElementById(`note-${Number(slideNumber)}`);
+      if (!note) {
+        return { slideNumber: Number(slideNumber), absoluteTop: noteRoot.scrollTop, relativeTop: 0 };
+      }
+      const noteTop = note.offsetTop - noteRoot.offsetTop;
+      return {
+        slideNumber: Number(slideNumber),
+        absoluteTop: noteRoot.scrollTop,
+        relativeTop: noteRoot.scrollTop - noteTop,
+      };
+    }
+
+    function restoreNoteAnchor(anchor) {
+      if (!anchor) return;
+      const note = document.getElementById(`note-${Number(anchor.slideNumber)}`);
+      const maxTop = Math.max(0, noteRoot.scrollHeight - noteRoot.clientHeight);
+      const rawTop = note
+        ? (note.offsetTop - noteRoot.offsetTop) + Number(anchor.relativeTop || 0)
+        : Number(anchor.absoluteTop || 0);
+      noteRoot.scrollTo({ top: clamp(rawTop, 0, maxTop), behavior: 'auto' });
+    }
+
     function preserveCurrentSlideAfterViewportChange(slideNumber = currentSlideNumber) {
       const targetSlide = Number(slideNumber || currentSlideNumber || 1);
       if (!pageForSlide(targetSlide)) return;
-      suppressObserverUntil = Date.now() + 700;
+      const now = Date.now();
+      if (!viewportAnchorState || now > viewportAnchorState.until) {
+        viewportAnchorState = {
+          targetSlide,
+          noteAnchor: noteAnchorForSlide(targetSlide),
+          until: now + VIEWPORT_ANCHOR_MS,
+        };
+      } else {
+        viewportAnchorState.until = now + VIEWPORT_ANCHOR_MS;
+      }
+      suppressObserverUntil = viewportAnchorState.until;
       viewportAnchorTimers.forEach(timer => window.clearTimeout(timer));
       viewportAnchorTimers = [];
+      window.clearTimeout(viewportAnchorReleaseTimer);
       const anchor = () => {
-        setActive(targetSlide, { scrollPage: true, behavior: 'auto' });
+        const state = viewportAnchorState;
+        if (!state) return;
+        setActive(state.targetSlide, {
+          scrollPage: true,
+          scrollNote: false,
+          behavior: 'auto',
+          skipSave: true,
+          skipChatRender: true,
+        });
+        restoreNoteAnchor(state.noteAnchor);
+        saveScrollState();
       };
       window.requestAnimationFrame(anchor);
-      [80, 220, 420].forEach(delay => {
+      [80, 180, 360, 700, 1100].forEach(delay => {
         viewportAnchorTimers.push(window.setTimeout(anchor, delay));
       });
+      viewportAnchorReleaseTimer = window.setTimeout(() => {
+        anchor();
+        viewportAnchorState = null;
+      }, VIEWPORT_ANCHOR_MS + 80);
     }
 
     function toggleFullscreen() {
       const targetSlide = currentSlideNumber;
       saveScrollState();
+      preserveCurrentSlideAfterViewportChange(targetSlide);
       if (!document.fullscreenElement) {
         syncFullscreenState(true);
         document.documentElement.requestFullscreen()
@@ -1093,7 +1437,10 @@
       } else {
         document.exitFullscreen()
           .catch(() => {})
-          .finally(() => preserveCurrentSlideAfterViewportChange(targetSlide));
+          .finally(() => {
+            preserveCurrentSlideAfterViewportChange(targetSlide);
+            scheduleParentReaderCenter({ behavior: 'auto', delay: 180 });
+          });
       }
     }
 
@@ -1145,6 +1492,7 @@
     }
 
     function scheduleScrollStateSave() {
+      if (viewportAnchorState) return;
       window.clearTimeout(scrollStateSaveTimer);
       scrollStateSaveTimer = window.setTimeout(saveScrollState, 140);
     }
@@ -1164,6 +1512,204 @@
 
     function pageIndexForSlide(slideNumber) {
       return pages.findIndex(item => Number(item.slideNumber) === Number(slideNumber));
+    }
+
+    function maxSlideNumber() {
+      if (!pages.length) return 1;
+      return Math.max(...pages.map(page => Number(page.slideNumber || 1)));
+    }
+
+    function updatePageJumpDisplay() {
+      const maxPage = maxSlideNumber();
+      if (pageJumpInput && document.activeElement !== pageJumpInput) {
+        pageJumpInput.value = String(currentSlideNumber || 1);
+      }
+      if (pageJumpInput) {
+        pageJumpInput.max = String(maxPage);
+      }
+      if (pageJumpTotal) {
+        pageJumpTotal.textContent = String(maxPage);
+      }
+    }
+
+    function nearestSlideNumber(value) {
+      if (!pages.length) return 1;
+      const requested = clamp(
+        Math.round(Number(value) || currentSlideNumber || 1),
+        1,
+        maxSlideNumber()
+      );
+      if (pageForSlide(requested)) return requested;
+
+      return pages.reduce((closest, page) => {
+        const slideNumber = Number(page.slideNumber || 1);
+        return Math.abs(slideNumber - requested) < Math.abs(closest - requested)
+          ? slideNumber
+          : closest;
+      }, Number(pages[0].slideNumber || 1));
+    }
+
+    function jumpToPageInputValue() {
+      if (!pageJumpInput) return;
+      const targetSlide = nearestSlideNumber(pageJumpInput.value);
+      pageJumpInput.value = String(targetSlide);
+      if (targetSlide === currentSlideNumber) {
+        updatePageJumpDisplay();
+        return;
+      }
+      setActive(targetSlide, { scrollPage: true, behavior: 'smooth' });
+    }
+
+    function sectionForSlide(slideNumber) {
+      const page = pageForSlide(slideNumber);
+      const sectionIndex = Number(page?.sectionIndex || 0);
+      if (sectionIndex) {
+        const direct = sections.find(item => Number(item.sectionIndex) === sectionIndex);
+        if (direct) return direct;
+      }
+      return sections.find(item => {
+        const start = Number(item.startSlide || 0);
+        const end = Number(item.endSlide || 0);
+        return start <= Number(slideNumber) && Number(slideNumber) <= end;
+      }) || null;
+    }
+
+    function createComponentToken() {
+      return `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    }
+
+    function noteMetaText(page) {
+      return `${String(page.model || '未生成')} ${page.createdAt ? '· ' + String(page.createdAt) : ''}`;
+    }
+
+    function applyPendingExplanationOverrides(nextPages) {
+      const now = Date.now();
+      return nextPages.map(page => {
+        const slideNumber = Number(page.slideNumber);
+        const pending = pendingExplanationSaves.get(slideNumber);
+        if (!pending) return page;
+        if (now - pending.startedAt > PENDING_SAVE_TTL_MS) {
+          pendingExplanationSaves.delete(slideNumber);
+          return page;
+        }
+        if (String(page.explanation || '') === pending.explanation) {
+          pendingExplanationSaves.delete(slideNumber);
+          return page;
+        }
+        return { ...page, explanation: pending.explanation };
+      });
+    }
+
+    function buildReaderStructureSignature(nextDeckId, nextPages, nextSections) {
+      return JSON.stringify({
+        deckId: Number(nextDeckId || 0),
+        pages: nextPages.map(page => [
+          Number(page.slideNumber || 0),
+          String(page.image || ''),
+          String(page.title || ''),
+          String(page.pageType || ''),
+          Number(page.sectionIndex || 0),
+          String(page.summary || ''),
+          String(page.slideRole || ''),
+          String(page.keyPoints || ''),
+        ]),
+        sections: nextSections.map(section => [
+          Number(section.sectionIndex || 0),
+          Number(section.startSlide || 0),
+          Number(section.endSlide || 0),
+          String(section.title || ''),
+          String(section.summary || ''),
+        ]),
+      });
+    }
+
+    function applyLocalExplanationUpdate(slideNumber, explanation, options = {}) {
+      const page = pageForSlide(slideNumber);
+      const note = document.getElementById(`note-${Number(slideNumber)}`);
+      const body = note?.querySelector?.('.note-body');
+      const editor = note?.querySelector?.('.note-editor');
+      if (!page || !note || !body) return Promise.resolve(false);
+
+      const previousNoteScroll = noteRoot.scrollTop;
+      const previousPageScroll = pageRoot.scrollTop;
+      page.explanation = explanation;
+      body.innerHTML = renderMarkdown(explanation);
+      if (editor) editor.value = explanation;
+      if (!options.keepEditing) note.classList.remove('editing');
+
+      return typesetTargets([body]).finally(() => {
+        noteRoot.scrollTop = previousNoteScroll;
+        pageRoot.scrollTop = previousPageScroll;
+        if (options.statusText) selectionHint.textContent = options.statusText;
+      }).then(() => true);
+    }
+
+    function sendExplanationSave(slideNumber, explanation) {
+      const token = createComponentToken();
+      const normalizedSlideNumber = Number(slideNumber);
+      pendingExplanationSaves.set(normalizedSlideNumber, {
+        token,
+        explanation,
+        startedAt: Date.now(),
+      });
+      Streamlit.setComponentValue({
+        action: 'save_explanation_edit',
+        token,
+        deckId,
+        slideNumber: normalizedSlideNumber,
+        explanation,
+      });
+    }
+
+    function patchRenderedReader(previousPages) {
+      const previousBySlide = new Map(
+        previousPages.map(page => [Number(page.slideNumber), page])
+      );
+      const typesetQueue = [];
+
+      pages.forEach(page => {
+        const slideNumber = Number(page.slideNumber);
+        const previous = previousBySlide.get(slideNumber) || {};
+        const note = document.getElementById(`note-${slideNumber}`);
+        if (!note) return;
+
+        const meta = note.querySelector('.note-meta');
+        if (meta && meta.textContent !== noteMetaText(page)) {
+          meta.textContent = noteMetaText(page);
+        }
+
+        if (String(previous.explanation || '') === String(page.explanation || '')) return;
+        if (note.classList.contains('editing')) return;
+
+        const body = note.querySelector('.note-body');
+        const editor = note.querySelector('.note-editor');
+        if (!body) return;
+        body.innerHTML = renderMarkdown(page.explanation);
+        if (editor) editor.value = String(page.explanation || '');
+        typesetQueue.push(body);
+      });
+
+      return typesetQueue;
+    }
+
+    function renderSectionSelect() {
+      if (!sectionSelect) return;
+      if (!sections.length) {
+        sectionSelect.innerHTML = '<option value="">未生成目录分块</option>';
+        sectionSelect.disabled = true;
+        return;
+      }
+      sectionSelect.disabled = false;
+      sectionSelect.innerHTML = sections.map(section => {
+        const label = `${section.sectionIndex}. ${section.title || '未命名目录块'}（${section.startSlide}-${section.endSlide}页）`;
+        return `<option value="${Number(section.sectionIndex)}">${escapeHtml(label)}</option>`;
+      }).join('');
+    }
+
+    function updateSectionSelect(slideNumber) {
+      if (!sectionSelect || !sections.length) return;
+      const section = sectionForSlide(slideNumber);
+      if (section) sectionSelect.value = String(Number(section.sectionIndex));
     }
 
     function centerPage(slideNumber, behavior = 'smooth') {
@@ -1188,6 +1734,7 @@
     function setActive(pageNumber, options = {}) {
       const nextSlideNumber = Number(pageNumber || 1);
       if (!pageForSlide(nextSlideNumber)) return;
+      const sameSlide = nextSlideNumber === currentSlideNumber;
       currentSlideNumber = nextSlideNumber;
       document.querySelectorAll('.page.active,.note.active').forEach(el => el.classList.remove('active'));
       const page = document.getElementById(`page-${currentSlideNumber}`);
@@ -1195,14 +1742,249 @@
       if (page) page.classList.add('active');
       if (note) {
         note.classList.add('active');
-        noteRoot.scrollTo({ top: note.offsetTop - noteRoot.offsetTop, behavior: 'smooth' });
+        if (options.scrollNote !== false && (!sameSlide || options.forceNoteScroll)) {
+          noteRoot.scrollTo({
+            top: note.offsetTop - noteRoot.offsetTop,
+            behavior: options.noteBehavior || options.behavior || 'smooth',
+          });
+        }
       }
-      current.textContent = `第 ${currentSlideNumber} 页`;
-      renderChatForPage(currentSlideNumber);
+      updatePageJumpDisplay();
+      updateSectionSelect(currentSlideNumber);
+      if (!options.skipChatRender) renderChatForPage(currentSlideNumber);
       if (options.scrollPage) {
         centerPage(currentSlideNumber, options.behavior || 'smooth');
       }
-      saveScrollState();
+      if (!options.skipSave) saveScrollState();
+    }
+
+    function startEditExplanation(slideNumber) {
+      const page = pageForSlide(slideNumber);
+      const note = document.getElementById(`note-${Number(slideNumber)}`);
+      const editor = note?.querySelector?.('.note-editor');
+      if (!page || !note || !editor) return;
+      editor.value = String(page.explanation || '');
+      note.classList.add('editing');
+      editor.focus();
+    }
+
+    function cancelEditExplanation(slideNumber) {
+      const page = pageForSlide(slideNumber);
+      const note = document.getElementById(`note-${Number(slideNumber)}`);
+      const editor = note?.querySelector?.('.note-editor');
+      if (!page || !note || !editor) return;
+      editor.value = String(page.explanation || '');
+      note.classList.remove('editing');
+    }
+
+    function saveEditedExplanation(slideNumber, button = null) {
+      const page = pageForSlide(slideNumber);
+      const note = document.getElementById(`note-${Number(slideNumber)}`);
+      const editor = note?.querySelector?.('.note-editor');
+      if (!page || !note || !editor) return;
+      const explanation = editor.value.trim();
+      if (!explanation) {
+        editor.focus();
+        return;
+      }
+      if (button) {
+        button.disabled = true;
+        button.textContent = '保存中';
+      }
+      applyLocalExplanationUpdate(slideNumber, explanation, {
+        statusText: `第 ${Number(slideNumber)} 页修改已显示，正在后台保存`,
+      }).finally(() => {
+        if (!button) return;
+        button.textContent = '已保存';
+        window.setTimeout(() => {
+          button.disabled = false;
+          button.textContent = '保存修改';
+        }, 700);
+      });
+      sendExplanationSave(slideNumber, explanation);
+    }
+
+    function markdownSearchText(source) {
+      let text = '';
+      const map = [];
+      let lastWasSpace = false;
+      const markdownMarkers = new Set(['#', '*', '_', '`', '>', '|']);
+      for (let index = 0; index < source.length; index += 1) {
+        const char = source[index];
+        if (source.startsWith('==', index)) {
+          index += 1;
+          continue;
+        }
+        if (markdownMarkers.has(char)) continue;
+        if (/\s/.test(char)) {
+          if (!lastWasSpace) {
+            text += ' ';
+            map.push(index);
+            lastWasSpace = true;
+          }
+          continue;
+        }
+        text += char;
+        map.push(index);
+        lastWasSpace = false;
+      }
+      return { text, map };
+    }
+
+    function collapsedSearchText(source) {
+      let text = '';
+      let lastWasSpace = false;
+      const sourceText = String(source || '');
+      for (let index = 0; index < sourceText.length; index += 1) {
+        const char = sourceText[index];
+        if (/\s/.test(char)) {
+          if (!lastWasSpace) {
+            text += ' ';
+            lastWasSpace = true;
+          }
+          continue;
+        }
+        text += char;
+        lastWasSpace = false;
+      }
+      return text;
+    }
+
+    function locateMarkdownSelection(source, payload) {
+      const candidates = [
+        payload.selectedTextRaw,
+        payload.selectedText,
+      ].map(value => String(value || '').trim()).filter(Boolean);
+
+      const normalizedTarget = String(payload.selectedText || '').replace(/\s+/g, ' ').trim();
+      if (normalizedTarget) {
+        const searchable = markdownSearchText(source);
+        const beforeContext = String(payload.contextBefore || '').replace(/\s+/g, ' ').trim();
+        const afterContext = String(payload.contextAfter || '').replace(/\s+/g, ' ').trim();
+        const beforeAnchor = beforeContext.slice(-100);
+        const afterAnchor = afterContext.slice(0, 100);
+        const expectedStart = Number.isFinite(Number(payload.selectionStartOffset))
+          ? Number(payload.selectionStartOffset)
+          : null;
+        let bestIndex = -1;
+        let bestScore = Number.NEGATIVE_INFINITY;
+        let searchFrom = 0;
+        while (searchFrom <= searchable.text.length) {
+          const found = searchable.text.indexOf(normalizedTarget, searchFrom);
+          if (found < 0) break;
+          let score = 0;
+          if (expectedStart !== null) {
+            score -= Math.abs(found - expectedStart) * 4;
+          }
+          if (beforeAnchor) {
+            const beforeWindow = searchable.text.slice(Math.max(0, found - beforeAnchor.length - 20), found);
+            if (beforeWindow.endsWith(beforeAnchor)) score += beforeAnchor.length;
+          }
+          if (afterAnchor) {
+            const afterStart = found + normalizedTarget.length;
+            const afterWindow = searchable.text.slice(afterStart, afterStart + afterAnchor.length + 20);
+            if (afterWindow.startsWith(afterAnchor)) score += afterAnchor.length;
+          }
+          if (score > bestScore) {
+            bestScore = score;
+            bestIndex = found;
+          }
+          searchFrom = found + Math.max(1, normalizedTarget.length);
+        }
+        if (bestIndex >= 0) {
+          const start = searchable.map[bestIndex];
+          const endMapIndex = bestIndex + normalizedTarget.length - 1;
+          const end = (searchable.map[endMapIndex] ?? start) + 1;
+          return { start, end };
+        }
+      }
+
+      for (const candidate of candidates) {
+        const index = source.indexOf(candidate);
+        if (index >= 0) return { start: index, end: index + candidate.length };
+      }
+
+      return null;
+    }
+
+    function markdownHighlightBounds(source, location) {
+      if (!location) return null;
+      let index = 0;
+      while (index < source.length) {
+        const open = source.indexOf('==', index);
+        if (open < 0) return null;
+        const close = findUnescaped(source, '==', open + 2);
+        if (close < 0) return null;
+        const contentStart = open + 2;
+        const contentEnd = close;
+        if (contentStart <= location.start && location.end <= contentEnd) {
+          return { open, closeEnd: close + 2, contentStart, contentEnd };
+        }
+        index = close + 2;
+      }
+      return null;
+    }
+
+    function markdownSelectionHighlightState(source, payload) {
+      const location = locateMarkdownSelection(source, payload);
+      const bounds = markdownHighlightBounds(source, location);
+      return {
+        location,
+        bounds,
+        isHighlighted: Boolean(location && bounds),
+      };
+    }
+
+    function removeMarkdownHighlight(source, location, bounds) {
+      const before = source.slice(bounds.contentStart, location.start);
+      const selected = source.slice(location.start, location.end);
+      const after = source.slice(location.end, bounds.contentEnd);
+      return [
+        source.slice(0, bounds.open),
+        before ? `==${before}==` : '',
+        selected,
+        after ? `==${after}==` : '',
+        source.slice(bounds.closeEnd),
+      ].join('');
+    }
+
+    function wrapMarkdownSelection(source, payload) {
+      const state = markdownSelectionHighlightState(source, payload);
+      if (!state.location) return null;
+      if (state.isHighlighted) {
+        return {
+          source: removeMarkdownHighlight(source, state.location, state.bounds),
+          action: 'remove',
+        };
+      }
+      const start = state.location.start;
+      const end = state.location.end;
+      return {
+        source: `${source.slice(0, start)}==${source.slice(start, end)}==${source.slice(end)}`,
+        action: 'add',
+      };
+    }
+
+    function highlightCurrentSelection() {
+      const payload = currentSelectionPayload || buildSelectionPayload();
+      if (!payload) return;
+      const page = pageForSlide(payload.slideNumber);
+      if (!page) return;
+      const result = wrapMarkdownSelection(String(page.explanation || ''), payload);
+      if (!result) {
+        selectionHint.textContent = '未能在讲解 Markdown 中定位选中文本';
+        return;
+      }
+      const statusText = result.action === 'remove'
+        ? '已取消 Markdown 高亮，正在后台保存'
+        : '已添加 Markdown 高亮，正在后台保存';
+      selectionHint.textContent = statusText;
+      window.getSelection()?.removeAllRanges();
+      hideSelectionToolbar();
+      applyLocalExplanationUpdate(payload.slideNumber, result.source, {
+        statusText: result.action === 'remove' ? '高亮已取消，正在后台保存' : '高亮已显示，正在后台保存',
+      });
+      sendExplanationSave(payload.slideNumber, result.source);
     }
 
     function refreshNoteDisplay(slideNumber, button = null) {
@@ -1228,14 +2010,52 @@
       });
     }
 
+    function renderPageContext(page) {
+      const section = sectionForSlide(page.slideNumber);
+      const chips = [
+        page.pageType ? `<span class="note-chip">${escapeHtml(page.pageType)}</span>` : '',
+        section ? `<span class="note-chip">${escapeHtml(section.title || '未命名目录块')}</span>` : '',
+      ].filter(Boolean).join('');
+      const summary = page.summary ? `<div class="note-context-text">摘要：${escapeHtml(page.summary)}</div>` : '';
+      const role = page.slideRole ? `<div class="note-context-text">作用：${escapeHtml(page.slideRole)}</div>` : '';
+      const keyPoints = page.keyPoints ? `<div class="note-context-text">抓手：${escapeHtml(page.keyPoints)}</div>` : '';
+      if (!chips && !summary && !role && !keyPoints) return '';
+      return `
+        <div class="note-context">
+          ${chips ? `<div class="note-context-row">${chips}</div>` : ''}
+          ${summary}
+          ${role}
+          ${keyPoints}
+        </div>
+      `;
+    }
+
     function renderReader(args) {
+      const previousPages = pages;
       restoreScrollAfterRender = {
         pageScroll: pageRoot.scrollTop,
         noteScroll: noteRoot.scrollTop,
         currentSlide: currentSlideNumber,
       };
-      pages = Array.isArray(args.pages) ? args.pages : [];
-      deckId = Number(args.deck_id || 0);
+      const incomingPages = Array.isArray(args.pages) ? args.pages : [];
+      const incomingSections = Array.isArray(args.sections) ? args.sections : [];
+      const nextDeckId = Number(args.deck_id || 0);
+      if (nextDeckId && nextDeckId !== deckId) {
+        hasCenteredOnEntry = false;
+        pendingExplanationSaves.clear();
+      }
+      const nextPages = applyPendingExplanationOverrides(incomingPages);
+      const nextStructureSignature = buildReaderStructureSignature(nextDeckId, nextPages, incomingSections);
+      const canPatchRenderedReader = Boolean(
+        nextDeckId
+        && nextDeckId === deckId
+        && readerStructureSignature === nextStructureSignature
+        && pageRoot.children.length
+        && noteRoot.children.length
+      );
+      deckId = nextDeckId;
+      pages = nextPages;
+      sections = incomingSections;
       activeModel = String(args.active_model || '');
       const height = Number(args.height || 850);
       frame.style.height = `${Math.max(360, height - 15)}px`;
@@ -1245,7 +2065,11 @@
 
       deckTitle.textContent = String(args.title || '学习资料');
       deckMeta.textContent = `${String(args.subject || '未分类')} · 原页面同步阅读`;
-      selectionHint.textContent = `将引用选中文本，并用当前模型：${activeModel || '当前模型'}`;
+      updatePageJumpDisplay();
+      renderSectionSelect();
+      if (!pendingExplanationSaves.size) {
+        selectionHint.textContent = '可引用到插问、复制或高亮选中文本';
+      }
       canvasChatMeta.textContent = `当前模型：${activeModel || '当前模型'} · 回答保存为对应页插问`;
       if (canvasSendButton.disabled) {
         canvasInput.value = '';
@@ -1256,31 +2080,73 @@
       canvasSendButton.disabled = false;
       canvasSendButton.textContent = '问当前模型';
 
+      if (canPatchRenderedReader) {
+        const previousPageScroll = restoreScrollAfterRender.pageScroll;
+        const previousNoteScroll = restoreScrollAfterRender.noteScroll;
+        const typesetQueue = patchRenderedReader(previousPages);
+        const targetSlide = pageForSlide(currentSlideNumber)
+          ? currentSlideNumber
+          : Number(pages[0]?.slideNumber || 1);
+        currentSlideNumber = targetSlide;
+        updatePageJumpDisplay();
+        updateSectionSelect(currentSlideNumber);
+        renderChatForPage(currentSlideNumber);
+        pageRoot.scrollTop = previousPageScroll;
+        noteRoot.scrollTop = previousNoteScroll;
+        if (typesetQueue.length) {
+          typesetTargets(typesetQueue).finally(() => {
+            pageRoot.scrollTop = previousPageScroll;
+            noteRoot.scrollTop = previousNoteScroll;
+          });
+        }
+        return;
+      }
+
+      readerStructureSignature = nextStructureSignature;
       if (observer) {
         observer.disconnect();
         observer = null;
       }
 
-      pageRoot.innerHTML = pages.map(page => `
-        <article class="page" id="page-${page.slideNumber}" data-page="${page.slideNumber}">
-          <div class="page-label">
-            <span>第 ${page.slideNumber} 页</span>
-            <span>${escapeHtml(page.title)}</span>
-          </div>
-          <div class="page-visual">
-            <img src="${page.image}" alt="第 ${page.slideNumber} 页原页面" loading="lazy" />
-          </div>
-        </article>
-      `).join('');
+      pageRoot.innerHTML = pages.map(page => {
+        const section = sectionForSlide(page.slideNumber);
+        const pageMeta = [
+          page.pageType || '',
+          section ? section.title || '' : '',
+        ].filter(Boolean).join(' · ');
+        return `
+          <article class="page" id="page-${page.slideNumber}" data-page="${page.slideNumber}">
+            <div class="page-label">
+              <span>第 ${page.slideNumber} 页</span>
+              <span>${escapeHtml(page.title)}</span>
+              ${pageMeta ? `<span>${escapeHtml(pageMeta)}</span>` : ''}
+            </div>
+            <div class="page-visual">
+              <img src="${page.image}" alt="第 ${page.slideNumber} 页原页面" loading="lazy" />
+            </div>
+          </article>
+        `;
+      }).join('');
 
       noteRoot.innerHTML = pages.map(page => `
         <article class="note" id="note-${page.slideNumber}" data-page="${page.slideNumber}">
           <div class="note-header">
             <h3>第 ${page.slideNumber} 页讲解</h3>
-            <button type="button" class="note-refresh" data-refresh-page="${page.slideNumber}" title="重新渲染本页 Markdown 和公式">刷新显示</button>
+            <div class="note-actions">
+              <button type="button" class="note-action-button" data-edit-page="${page.slideNumber}" title="手动修改本页讲解">编辑讲解</button>
+              <button type="button" class="note-refresh" data-refresh-page="${page.slideNumber}" title="重新渲染本页 Markdown 和公式">刷新显示</button>
+            </div>
           </div>
           <div class="note-meta">${escapeHtml(page.model || '未生成')} ${page.createdAt ? '· ' + escapeHtml(page.createdAt) : ''}</div>
+          ${renderPageContext(page)}
           <div class="note-body">${renderMarkdown(page.explanation)}</div>
+          <div class="note-edit-panel">
+            <textarea class="note-editor" spellcheck="false">${escapeHtml(page.explanation || '')}</textarea>
+            <div class="note-edit-actions">
+              <button type="button" class="note-action-button note-cancel" data-cancel-edit-page="${page.slideNumber}">取消</button>
+              <button type="button" class="note-action-button note-save" data-save-edit-page="${page.slideNumber}">保存修改</button>
+            </div>
+          </div>
         </article>
       `).join('');
 
@@ -1315,10 +2181,24 @@
         renderChatForPage(currentSlideNumber);
       }, 80);
       typesetMath();
+      if (!hasCenteredOnEntry && pages.length) {
+        hasCenteredOnEntry = true;
+        scheduleParentReaderCenter({
+          behavior: 'auto',
+          delay: 160,
+          skipIfAboveViewport: true,
+        });
+      }
     }
 
     function clipText(value, limit) {
       const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+      if (text.length <= limit) return text;
+      return text.slice(0, limit).trim() + '...';
+    }
+
+    function clipRawText(value, limit) {
+      const text = String(value ?? '').trim();
       if (text.length <= limit) return text;
       return text.slice(0, limit).trim() + '...';
     }
@@ -1337,30 +2217,48 @@
       const range = selection.getRangeAt(0);
       const startElement = nodeElement(range.startContainer);
       const endElement = nodeElement(range.endContainer);
+      if (startElement?.closest?.('.note-editor') || endElement?.closest?.('.note-editor')) return null;
       const note = startElement?.closest?.('.note');
       if (!note || !noteRoot.contains(note) || !endElement || !note.contains(endElement)) return null;
 
       const noteBody = note.querySelector('.note-body');
-      const fullText = noteBody?.innerText || note.innerText || '';
-      const normalizedFullText = fullText.replace(/\s+/g, ' ');
-      const normalizedSelected = selectedText.replace(/\s+/g, ' ');
-      const start = normalizedFullText.indexOf(normalizedSelected);
-      const before = start >= 0 ? normalizedFullText.slice(Math.max(0, start - 700), start) : '';
-      const after = start >= 0
-        ? normalizedFullText.slice(start + normalizedSelected.length, start + normalizedSelected.length + 700)
-        : '';
+      if (!noteBody) return null;
+      if (!noteBody.contains(startElement) || !noteBody.contains(endElement)) return null;
+
+      const beforeRange = document.createRange();
+      beforeRange.selectNodeContents(noteBody);
+      beforeRange.setEnd(range.startContainer, range.startOffset);
+      const beforeRaw = beforeRange.toString();
+
+      const afterRange = document.createRange();
+      afterRange.selectNodeContents(noteBody);
+      afterRange.setStart(range.endContainer, range.endOffset);
+      const afterRaw = afterRange.toString();
+
+      const before = collapsedSearchText(beforeRaw);
+      const after = collapsedSearchText(afterRaw);
+      const selectionStartOffset = before.length;
       const slideNumber = Number(note.dataset.page);
       const page = pages.find(item => Number(item.slideNumber) === slideNumber) || {};
-      return {
+      const startHighlight = startElement?.closest?.('.reader-highlight');
+      const endHighlight = endElement?.closest?.('.reader-highlight');
+      const payload = {
         action: 'branch_quote',
         token: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
         deckId,
         slideNumber,
         slideTitle: page.title || `第 ${slideNumber} 页`,
         selectedText: clipText(selectedText, 1200),
-        contextBefore: clipText(before, 700),
-        contextAfter: clipText(after, 700),
+        selectedTextRaw: clipRawText(selectedText, 1200),
+        contextBefore: clipText(before.slice(-700), 700),
+        contextAfter: clipText(after.slice(0, 700), 700),
+        selectionStartOffset,
       };
+      const markdownState = markdownSelectionHighlightState(String(page.explanation || ''), payload);
+      payload.isHighlighted = Boolean(
+        markdownState.isHighlighted || (startHighlight && startHighlight === endHighlight)
+      );
+      return payload;
     }
 
     function showSelectionToolbar() {
@@ -1370,13 +2268,14 @@
         return;
       }
       currentSelectionPayload = payload;
-      openCanvasChat(false);
       const selection = window.getSelection();
       const rect = selection.getRangeAt(0).getBoundingClientRect();
       const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - 570));
       const top = Math.max(8, rect.top - 52);
       selectionToolbar.style.left = `${left}px`;
       selectionToolbar.style.top = `${top}px`;
+      highlightSelectionButton.textContent = payload.isHighlighted ? '取消高亮' : '高亮';
+      highlightSelectionButton.title = payload.isHighlighted ? '取消所选文字的 Markdown 高亮' : '用 Markdown 高亮所选文字';
       selectionHint.textContent = `第 ${payload.slideNumber} 页：${clipText(payload.selectedText, 42)}`;
       selectionToolbar.classList.add('show');
     }
@@ -1417,7 +2316,14 @@
         canvasMessages.innerHTML = '<div class="canvas-empty">还没有可用上下文。</div>';
         return;
       }
-      canvasContext.textContent = `当前上下文：第 ${page.slideNumber} 页 · ${page.title || '未命名页面'}`;
+      const section = sectionForSlide(slideNumber);
+      const contextParts = [
+        `第 ${page.slideNumber} 页`,
+        page.title || '未命名页面',
+        section ? `目录块：${section.title || '未命名目录块'}` : '',
+        page.pageType || '',
+      ].filter(Boolean);
+      canvasContext.textContent = `当前上下文：${contextParts.join(' · ')}`;
       const messages = Array.isArray(page.questions) ? page.questions : [];
       if (!messages.length) {
         canvasMessages.innerHTML = `
@@ -1523,18 +2429,45 @@
     }
 
     askSelectionButton.addEventListener('mousedown', event => event.preventDefault());
+    highlightSelectionButton.addEventListener('mousedown', event => event.preventDefault());
     copySelectionButton.addEventListener('mousedown', event => event.preventDefault());
     askSelectionButton.addEventListener('click', sendSelectionToBranch);
+    highlightSelectionButton.addEventListener('click', highlightCurrentSelection);
     copySelectionButton.addEventListener('click', copyCurrentSelection);
     canvasSendButton.addEventListener('click', sendCanvasQuestion);
     toggleCanvasButton.addEventListener('click', toggleCanvasChat);
     openCanvasButton.addEventListener('click', () => openCanvasChat(true));
+    sectionSelect.addEventListener('change', () => {
+      const sectionIndex = Number(sectionSelect.value || 0);
+      const section = sections.find(item => Number(item.sectionIndex) === sectionIndex);
+      if (!section) return;
+      setActive(Number(section.startSlide || 1), { scrollPage: true, behavior: 'smooth' });
+    });
     document.querySelectorAll('[data-layout-preset]').forEach(button => {
       button.addEventListener('click', () => setLayoutPreset(button.dataset.layoutPreset));
     });
     document.querySelectorAll('[data-reading-mode]').forEach(button => {
       button.addEventListener('click', () => setReadingMode(button.dataset.readingMode));
     });
+    if (pageJumpInput) {
+      pageJumpInput.addEventListener('focus', () => pageJumpInput.select());
+      pageJumpInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          jumpToPageInputValue();
+          pageJumpInput.blur();
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          updatePageJumpDisplay();
+          pageJumpInput.blur();
+        }
+      });
+      pageJumpInput.addEventListener('blur', jumpToPageInputValue);
+      pageJumpInput.addEventListener('wheel', event => {
+        event.preventDefault();
+        event.stopPropagation();
+      }, { passive: false });
+    }
     readerGrid.addEventListener('mousedown', startResize);
     window.addEventListener('mousemove', updateResize);
     window.addEventListener('mouseup', stopResize);
@@ -1553,11 +2486,19 @@
     pageRoot.addEventListener('scroll', scheduleScrollStateSave, { passive: true });
     noteRoot.addEventListener('scroll', scheduleScrollStateSave, { passive: true });
     noteRoot.addEventListener('click', (event) => {
-      const button = event.target?.closest?.('[data-refresh-page]');
+      const button = event.target?.closest?.('[data-refresh-page],[data-edit-page],[data-save-edit-page],[data-cancel-edit-page]');
       if (!button) return;
       event.preventDefault();
       event.stopPropagation();
-      refreshNoteDisplay(Number(button.dataset.refreshPage), button);
+      if (button.dataset.refreshPage) {
+        refreshNoteDisplay(Number(button.dataset.refreshPage), button);
+      } else if (button.dataset.editPage) {
+        startEditExplanation(Number(button.dataset.editPage));
+      } else if (button.dataset.saveEditPage) {
+        saveEditedExplanation(Number(button.dataset.saveEditPage), button);
+      } else if (button.dataset.cancelEditPage) {
+        cancelEditExplanation(Number(button.dataset.cancelEditPage));
+      }
     });
     noteRoot.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
     noteRoot.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
@@ -1572,12 +2513,26 @@
 
     function nearestScrollPanel(target) {
       if (target?.closest?.('.canvas-input')) return null;
+      if (target?.closest?.('.page-jump-input')) return null;
+      if (target?.closest?.('.note-editor')) return null;
       const element = target?.closest?.('.pages, .notes, .canvas-messages');
       if (element) return element;
       return pageRoot;
     }
 
+    function scrollNoteEditor(event) {
+      const editor = event.target?.closest?.('.note-editor');
+      if (!editor) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      editor.scrollTop += event.deltaY;
+      editor.scrollLeft += event.deltaX;
+      return true;
+    }
+
     function containedWheelScroll(event) {
+      if (scrollNoteEditor(event)) return;
       const panel = nearestScrollPanel(event.target);
       if (!panel) return;
       if (panel === pageRoot && readingMode === 'paged') {
@@ -1597,8 +2552,14 @@
       fullscreenButton.addEventListener('click', toggleFullscreen);
     }
     document.addEventListener('fullscreenchange', () => {
-      syncFullscreenState(Boolean(document.fullscreenElement));
+      const isFullscreen = Boolean(document.fullscreenElement);
+      const exitedFullscreen = lastFullscreenState && !isFullscreen;
+      lastFullscreenState = isFullscreen;
+      syncFullscreenState(isFullscreen);
       preserveCurrentSlideAfterViewportChange(currentSlideNumber);
+      if (exitedFullscreen) {
+        scheduleParentReaderCenter({ behavior: 'auto', delay: 180 });
+      }
     });
     window.addEventListener('resize', () => {
       if (document.fullscreenElement || document.body.classList.contains('reader-fullscreen')) {

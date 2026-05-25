@@ -4,6 +4,7 @@ import base64
 import html
 import json
 import os
+import re
 import threading
 from datetime import date
 from pathlib import Path
@@ -24,6 +25,16 @@ from services.ai_service import (
 )
 from services.api_key_ui import render_local_secret_unlock
 from services.api_runtime import ensure_active_provider, ensure_provider_model, provider_model_state_key, set_active_provider
+from services.ppt_context_service import (
+    build_lightweight_explanation,
+    build_slide_context_map,
+    fetch_deck_sections,
+    format_pages_for_structure_prompt,
+    format_slide_context_package,
+    parse_document_structure_response,
+    save_deck_structure,
+    should_use_lightweight_explanation,
+)
 from services.ppt_service import import_deck, refresh_pdf_slide_text, render_missing_page_images
 from services.prompt_service import render_template
 from services.study_asset_service import parse_study_assets, save_study_assets
@@ -130,6 +141,24 @@ def _remember_reader_deck_selection(deck_id: int, last_position: dict[str, int])
     _save_last_reader_position(deck_id, slide_number)
 
 
+def _activate_newly_uploaded_deck(deck_id: int, slides: list[dict]) -> None:
+    try:
+        deck_id = int(deck_id)
+    except (TypeError, ValueError):
+        return
+    if deck_id <= 0:
+        return
+
+    first_slide_number = 1
+    if slides:
+        try:
+            first_slide_number = int(slides[0]["slide_number"])
+        except (KeyError, TypeError, ValueError):
+            first_slide_number = 1
+    st.session_state[LAST_READER_DECK_STATE_KEY] = deck_id
+    _save_last_reader_position(deck_id, first_slide_number)
+
+
 def _initial_reader_slide_number(deck_id: int, slides: list[dict], last_position: dict[str, int]) -> int:
     if not slides:
         return 1
@@ -144,6 +173,7 @@ def render() -> None:
     st.title("PPT 逐页讲解")
     st.caption("边看 PPT 边让 GPT 按页讲解；插问单独进入浮窗，不覆盖当前页主线讲解。")
 
+    _resume_interrupted_structure_generation()
     _resume_interrupted_generation()
     _render_api_settings()
     decks = fetch_all(
@@ -192,15 +222,16 @@ def render() -> None:
     if not deck or not slides:
         st.warning("这个 PPT 暂无可用页面，请重新上传。")
         return
+    sections = fetch_deck_sections(deck_id)
     slide_by_id = {slide["id"]: slide for slide in slides}
     latest_by_slide_id = _latest_explanations_by_slide_ids(list(slide_by_id))
 
     st.divider()
-    _render_deck_actions(deck, slides, latest_by_slide_id)
-    _render_synced_reader(deck, slides, latest_by_slide_id, last_position)
+    _render_deck_actions(deck, slides, latest_by_slide_id, sections)
+    _render_synced_reader(deck, slides, latest_by_slide_id, last_position, sections)
 
     st.divider()
-    _render_study_asset_generator(deck)
+    _render_study_asset_generator(deck, sections)
 
 
 def _render_api_settings() -> None:
@@ -309,10 +340,23 @@ def _render_upload_form(*, expanded: bool = False) -> None:
             st.error(f"资料导入失败：{exc}")
             return
         st.success(f"资料已导入，编号 #{deck_id}。")
+        deck = fetch_one("SELECT * FROM ppt_decks WHERE id = ?", (deck_id,))
+        slides = fetch_all(
+            "SELECT * FROM ppt_slides WHERE deck_id = ? ORDER BY slide_number ASC",
+            (deck_id,),
+        )
+        _activate_newly_uploaded_deck(deck_id, slides)
+        if deck and slides:
+            _start_document_structure_generation(deck, slides, source="upload")
         st.rerun()
 
 
-def _render_deck_actions(deck: dict, slides: list[dict], latest_by_slide_id: dict[int, dict]) -> None:
+def _render_deck_actions(
+    deck: dict,
+    slides: list[dict],
+    latest_by_slide_id: dict[int, dict],
+    sections: list[dict],
+) -> None:
     st.subheader("整份资料逐页分析")
     missing_images = [slide for slide in slides if not _image_exists(slide)]
     cols = st.columns([1.3, 1.3, 2])
@@ -335,6 +379,8 @@ def _render_deck_actions(deck: dict, slides: list[dict], latest_by_slide_id: dic
             except Exception as exc:
                 st.error(f"重新提取 PDF 文字失败：{exc}")
 
+    _render_document_structure_controls(deck, slides, sections)
+
     only_missing = cols[1].checkbox("只生成缺失讲解", value=True)
     cols[2].caption("左侧滚动到某页时，右侧讲解会自动同步滚动到对应页。")
     input_mode = st.radio(
@@ -351,20 +397,201 @@ def _render_deck_actions(deck: dict, slides: list[dict], latest_by_slide_id: dic
         st.warning("当前 Provider / 模型看起来不支持图片输入。直接发原图模式无法生成；请切换视觉模型后再试。")
     elif send_image_when_no_text and not supports_image_input:
         st.warning("当前 Provider / 模型看起来不支持图片输入。空白扫描页会被跳过；请切换视觉模型，或重新导入可提取文字的 PDF。")
-    selected_slides, range_label = _select_generation_range(slides)
+    selected_slides, range_label, force_regenerate = _select_generation_range(slides, sections)
     st.caption(f"当前生成范围：{range_label}；将逐页调用 API 并保存到右侧讲解区。")
     run_in_background = st.checkbox("后台运行（切换页面时继续生成）", value=True)
     if st.button("生成所选范围逐页讲解", type="primary"):
         _generate_whole_deck_explanations(
             deck,
             selected_slides,
-            only_missing=only_missing,
+            only_missing=only_missing and not force_regenerate,
             send_image_when_no_text=send_image_when_no_text,
             force_image_input=force_image_input,
             supports_image_input=supports_image_input,
             latest_by_slide_id=latest_by_slide_id,
+            all_slides=slides,
+            sections=sections,
             background=run_in_background,
         )
+
+
+def _render_document_structure_controls(deck: dict, slides: list[dict], sections: list[dict]) -> None:
+    generated_at = deck.get("outline_generated_at") or ""
+    with st.expander("AI 文档目录与分块", expanded=not bool(sections)):
+        if sections:
+            st.caption(
+                f"已生成 {len(sections)} 个目录块。"
+                + (f" 最近更新时间：{generated_at}" if generated_at else "")
+            )
+            st.caption("当前目录整理只生成块级标题、摘要和上下文，不再额外生成逐页摘要。")
+            outline = (deck.get("outline") or "").strip()
+            if outline:
+                st.markdown("**文档大纲**")
+                st.write(outline)
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "目录块": f"{section['section_index']}. {section['title']}",
+                            "页码": f"{section['start_slide']}-{section['end_slide']}",
+                            "核心问题": section.get("core_question") or "",
+                            "摘要": section.get("summary") or "",
+                        }
+                        for section in sections
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("还没有 AI 文档目录分块。建议先生成分块，再按目录块生成逐页讲解。")
+
+        if st.button("生成 / 更新文档目录分块", key=f"ppt_structure_generate_{deck['id']}"):
+            try:
+                with st.spinner("正在启动后台目录分块任务..."):
+                    _start_document_structure_generation(deck, slides, source="manual")
+            except Exception as exc:
+                st.error(f"生成文档目录分块失败：{exc}")
+
+
+def _start_document_structure_generation(deck: dict, slides: list[dict], *, source: str = "manual") -> None:
+    existing = st.session_state.get("ppt_structure_task")
+    if existing and existing.get("status") == "running":
+        st.info("AI 文档目录分块正在后台生成，不会重复启动。")
+        st.rerun()
+        return
+
+    task = {
+        "status": "running",
+        "progress": 0.03,
+        "status_text": "正在后台整理文档目录分块...",
+        "deck_id": int(deck["id"]),
+        "source": source,
+        "provider_key": st.session_state.get("active_api_provider_key"),
+        "api_key": _active_api_key(),
+        "active_model": st.session_state.get("active_api_model", DEFAULT_MODEL),
+        "max_tokens": int(st.session_state.get("active_api_max_tokens", 4096)),
+        "reasoning_depth": st.session_state.get("active_api_reasoning_depth"),
+        "sections": 0,
+        "stop_requested": False,
+    }
+    st.session_state["ppt_structure_task"] = task
+    thread = threading.Thread(
+        target=_background_document_structure_worker,
+        args=(task, deck, slides),
+        daemon=True,
+    )
+    thread.start()
+    st.success("已开始后台生成 AI 文档目录分块；切换页面后会继续执行。")
+    st.rerun()
+
+
+def _resume_interrupted_structure_generation() -> None:
+    task = st.session_state.get("ppt_structure_task")
+    if not task:
+        return
+
+    status = task.get("status")
+    if task.get("stop_requested") and status == "running":
+        task["status"] = "stopped"
+        task["status_text"] = task.get("status_text", "文档目录分块已停止")
+        status = "stopped"
+
+    if status == "completed":
+        st.success(f"AI 文档目录分块完成：{task.get('sections', 0)} 个目录块。")
+        return
+    if status == "failed":
+        st.error(f"AI 文档目录分块失败：{task.get('error') or task.get('status_text') or '未知错误'}")
+        return
+    if status == "stopped":
+        st.warning(f"AI 文档目录分块已停止：{task.get('status_text', '已中断')}")
+        return
+    if status != "running":
+        return
+
+    col1, col2 = st.columns([1, 0.15])
+    with col1:
+        st.info("AI 文档目录分块正在后台进行...")
+        st.progress(float(task.get("progress") or 0.05), text=task.get("status_text", "正在整理目录分块..."))
+    with col2:
+        if st.button("停止", key="stop_structure_generation"):
+            task["stop_requested"] = True
+            st.rerun()
+            return
+
+    import time
+    time.sleep(1.5)
+    st.rerun()
+
+
+def _background_document_structure_worker(task: dict, deck: dict, slides: list[dict]) -> None:
+    try:
+        if task.get("stop_requested"):
+            task["status"] = "stopped"
+            task["status_text"] = "文档目录分块已停止"
+            return
+        task["progress"] = 0.12
+        task["status_text"] = "正在读取已提取文本并整理目录块..."
+        structure = _generate_document_structure(
+            deck,
+            slides,
+            provider_key=task.get("provider_key"),
+            api_key=task.get("api_key"),
+            active_model=task.get("active_model") or DEFAULT_MODEL,
+            max_tokens=int(task.get("max_tokens") or 4096),
+            reasoning_depth=task.get("reasoning_depth"),
+        )
+        if task.get("stop_requested"):
+            task["status"] = "stopped"
+            task["status_text"] = "文档目录分块已停止"
+            return
+        task["status"] = "completed"
+        task["progress"] = 1.0
+        task["sections"] = len(structure.get("sections") or [])
+        task["status_text"] = f"目录分块完成：{task['sections']} 个目录块"
+    except Exception as exc:
+        task["status"] = "failed"
+        task["progress"] = 1.0
+        task["error"] = str(exc)
+        task["status_text"] = f"目录分块失败：{exc}"
+
+
+def _generate_document_structure(
+    deck: dict,
+    slides: list[dict],
+    *,
+    provider_key: str | None = None,
+    api_key: str | None = None,
+    active_model: str | None = None,
+    max_tokens: int | None = None,
+    reasoning_depth: str | None = None,
+) -> dict:
+    per_page_limit = 420
+    if len(slides) > 80:
+        per_page_limit = 180
+    elif len(slides) > 40:
+        per_page_limit = 260
+    page_list = format_pages_for_structure_prompt(slides, per_page_limit=per_page_limit)
+    prompt = render_template(
+        "ppt_document_structure.md",
+        {
+            "subject": deck.get("subject") or "未分类",
+            "deck_title": deck.get("title") or "学习资料",
+            "slide_count": str(len(slides)),
+            "page_list": page_list,
+        },
+    )
+    response = generate_text(
+        prompt,
+        provider_key=provider_key if provider_key is not None else st.session_state.get("active_api_provider_key"),
+        api_key=api_key if api_key is not None else _active_api_key(),
+        model_override=active_model or st.session_state.get("active_api_model", DEFAULT_MODEL),
+        max_output_tokens=min(max(2048, int(max_tokens or st.session_state.get("active_api_max_tokens", 4096))), 4096),
+        reasoning_depth=reasoning_depth if reasoning_depth is not None else st.session_state.get("active_api_reasoning_depth"),
+    )
+    structure = parse_document_structure_response(response, [int(slide["slide_number"]) for slide in slides])
+    save_deck_structure(int(deck["id"]), structure)
+    return structure
 
 
 def _render_synced_reader(
@@ -372,9 +599,10 @@ def _render_synced_reader(
     slides: list[dict],
     latest_by_slide_id: dict[int, dict],
     last_position: dict[str, int],
+    sections: list[dict],
 ) -> None:
     st.subheader("同步阅读器")
-    st.caption("提示：右侧固定插问栏会绑定当前页。你可以直接提问，或选中讲解文字后引用到插问。")
+    st.caption("提示：右侧固定插问栏会绑定当前页。你可以直接提问；选中讲解文字后可高亮、复制，或点击“引用到插问”再展开插问栏。")
     question_by_slide_id = _questions_by_slide_ids([int(slide["id"]) for slide in slides])
     payload = _build_reader_payload(slides, latest_by_slide_id, question_by_slide_id)
     if not payload:
@@ -393,13 +621,14 @@ def _render_synced_reader(
         subject=deck.get("subject") or "未分类",
         active_model=_active_model_label(),
         pages=payload,
+        sections=_reader_sections_payload(sections),
         initial_slide_number=_initial_reader_slide_number(int(deck["id"]), slides, last_position),
         height=850,
         default=None,
         key=f"synced_reader_{deck['id']}",
     )
     if isinstance(component_payload, dict):
-        _handle_synced_reader_action(deck, slides, latest_by_slide_id, component_payload)
+        _handle_synced_reader_action(deck, slides, latest_by_slide_id, component_payload, sections)
 
 
 def _handle_synced_reader_action(
@@ -407,9 +636,10 @@ def _handle_synced_reader_action(
     slides: list[dict],
     latest_by_slide_id: dict[int, dict],
     payload: dict,
+    sections: list[dict],
 ) -> None:
     action = payload.get("action")
-    if action != "canvas_question":
+    if action not in {"canvas_question", "save_explanation_edit"}:
         return
     try:
         query_deck_id = int(payload.get("deckId", 0))
@@ -419,20 +649,34 @@ def _handle_synced_reader_action(
     if query_deck_id != int(deck["id"]):
         return
 
+    slide = next((item for item in slides if int(item["slide_number"]) == slide_number), None)
+    if not slide:
+        return
+
+    if action == "save_explanation_edit":
+        _handle_reader_explanation_edit(deck, slide, payload)
+        return
+
     token = str(payload.get("token") or "").strip()
     last_token_key = f"ppt_canvas_question_last_token_{deck['id']}"
     if token and st.session_state.get(last_token_key) == token:
         return
 
-    slide = next((item for item in slides if int(item["slide_number"]) == slide_number), None)
     question = str(payload.get("question") or "").strip()
-    if not slide or not question:
+    if not question:
         return
 
     quote_payload = payload.get("quote") if isinstance(payload.get("quote"), dict) else None
     quote = _quote_from_component_payload(deck, slide, quote_payload) if quote_payload else None
     full_question = _compose_quoted_branch_question(quote, question) if quote else question
-    prompt = _build_branch_prompt(deck, slide, latest_by_slide_id.get(int(slide["id"])), full_question)
+    context_by_slide = build_slide_context_map(deck, slides, sections)
+    prompt = _build_branch_prompt(
+        deck,
+        slide,
+        latest_by_slide_id.get(int(slide["id"])),
+        full_question,
+        context=context_by_slide.get(int(slide["slide_number"])),
+    )
     try:
         with st.spinner(f"正在回答第 {slide_number} 页插问..."):
             answer = generate_text(
@@ -457,6 +701,33 @@ def _handle_synced_reader_action(
     if token:
         st.session_state[last_token_key] = token
     st.rerun()
+
+
+def _handle_reader_explanation_edit(deck: dict, slide: dict, payload: dict) -> None:
+    token = str(payload.get("token") or "").strip()
+    last_token_key = f"ppt_explanation_edit_last_token_{deck['id']}"
+    if token and st.session_state.get(last_token_key) == token:
+        return
+
+    explanation = str(payload.get("explanation") or "").strip()
+    if not explanation:
+        st.warning("讲解内容不能为空，未保存本次修改。")
+        return
+
+    _save_manual_explanation(int(slide["id"]), explanation)
+    if token:
+        st.session_state[last_token_key] = token
+    st.toast(f"第 {slide['slide_number']} 页讲解已保存。")
+
+
+def _save_manual_explanation(slide_id: int, explanation: str) -> int:
+    return insert_and_get_id(
+        """
+        INSERT INTO slide_explanations (slide_id, model, explanation)
+        VALUES (?, ?, ?)
+        """,
+        (int(slide_id), f"手动编辑 / {_active_model_label()}", explanation),
+    )
 
 
 def _quote_from_component_payload(deck: dict, slide: dict, payload: dict) -> dict | None:
@@ -523,25 +794,69 @@ def _branch_quote_state_key(deck_id: int) -> str:
     return f"ppt_branch_quote_{deck_id}"
 
 
-def _select_generation_range(slides: list[dict]) -> tuple[list[dict], str]:
+def _select_generation_range(slides: list[dict], sections: list[dict]) -> tuple[list[dict], str, bool]:
+    modes = ["按目录块生成", "手动选择单页重新生成"]
+    if sections:
+        modes.append("全部页面按块生成")
+    else:
+        modes.append("全部页面生成")
+        st.warning("当前资料还没有 AI 目录分块；会临时把整份资料作为一个上下文。")
     mode = st.radio(
         "生成范围",
-        ["全部生成", "10 页一组", "20 页一组"],
+        modes,
         horizontal=True,
-        help="资料很长时建议分组生成，便于控制 API 消耗和失败重试。",
+        help="按目录块生成会让同一块页面共享块摘要、关键符号、前后页摘要等上下文。",
     )
-    if mode == "全部生成":
-        return slides, f"全部 {len(slides)} 页"
+    slide_by_number = {int(slide["slide_number"]): slide for slide in slides}
+    if mode == "按目录块生成" and sections:
+        selected_index = st.selectbox(
+            "选择目录块",
+            [int(section["section_index"]) for section in sections],
+            format_func=lambda index: _section_label(sections, index),
+        )
+        section = next(item for item in sections if int(item["section_index"]) == int(selected_index))
+        selected = [
+            slide
+            for slide in slides
+            if int(section["start_slide"]) <= int(slide["slide_number"]) <= int(section["end_slide"])
+        ]
+        return selected, _section_label(sections, int(selected_index)), False
 
-    group_size = 10 if mode == "10 页一组" else 20
-    groups = _build_slide_groups(slides, group_size)
-    selected_index = st.selectbox(
-        "选择批次",
-        list(range(len(groups))),
-        format_func=lambda index: _group_label(groups[index]),
+    if mode == "按目录块生成":
+        return slides, f"全部 {len(slides)} 页（未分块）", False
+
+    if mode == "手动选择单页重新生成":
+        slide_number = st.selectbox(
+            "选择要重新生成的页",
+            list(slide_by_number),
+            format_func=lambda number: _slide_regeneration_label(number, sections),
+        )
+        slide = slide_by_number[int(slide_number)]
+        return [slide], f"第 {slide_number} 页（强制重新生成）", True
+
+    return slides, f"全部 {len(slides)} 页", False
+
+
+def _section_label(sections: list[dict], section_index: int) -> str:
+    section = next(item for item in sections if int(item["section_index"]) == int(section_index))
+    return (
+        f"{section['section_index']}. {section['title']} "
+        f"（第 {section['start_slide']}-{section['end_slide']} 页）"
     )
-    selected = groups[selected_index]
-    return selected, _group_label(selected)
+
+
+def _slide_regeneration_label(slide_number: int, sections: list[dict]) -> str:
+    section = next(
+        (
+            item
+            for item in sections
+            if int(item["start_slide"]) <= int(slide_number) <= int(item["end_slide"])
+        ),
+        None,
+    )
+    if not section:
+        return f"第 {slide_number} 页"
+    return f"第 {slide_number} 页 · {section.get('title') or '未命名目录块'}"
 
 
 def _build_slide_groups(slides: list[dict], group_size: int) -> list[list[dict]]:
@@ -556,13 +871,13 @@ def _group_label(group: list[dict]) -> str:
     return f"第 {start}-{end} 页（共 {len(group)} 页）"
 
 
-def _render_study_asset_generator(deck: dict) -> None:
+def _render_study_asset_generator(deck: dict, sections: list[dict]) -> None:
     with st.expander("学习沉淀：从今日阅读内容生成学习登记和知识卡片", expanded=False):
-        _render_study_asset_generator_inner(deck)
+        _render_study_asset_generator_inner(deck, sections)
 
 
-def _render_study_asset_generator_inner(deck: dict) -> None:
-    st.caption("根据当前资料里已识别文字和已生成讲解，调用当前 API 生成草稿；确认后写入学习登记、知识点卡片和 1-3-7-14 复习计划。")
+def _render_study_asset_generator_inner(deck: dict, sections: list[dict]) -> None:
+    st.caption("根据当前资料的目录块、手动选择的今日学习页码范围和已生成讲解，调用当前 API 生成草稿；确认后写入学习登记、知识点卡片和 1-3-7-14 复习计划。")
 
     slides = _slides_with_latest_explanations(deck["id"])
     recognized = [slide for slide in slides if _slide_has_learning_content(slide)]
@@ -571,13 +886,9 @@ def _render_study_asset_generator_inner(deck: dict) -> None:
         st.info("当前资料还没有可沉淀的文字或讲解。请先重新提取 PDF 文字，或生成逐页讲解。")
         return
 
-    source_options = []
-    if today_slides:
-        source_options.append("今天已生成讲解的页面")
-    source_options.extend(["当前资料全部已识别页面", "当前资料按批次选择"])
+    selected_slides, range_label = _select_study_asset_scope(deck, recognized, sections, today_slides)
 
-    cols = st.columns([1.2, 1, 1])
-    source_mode = cols[0].selectbox("内容来源", source_options, key=f"asset_source_mode_{deck['id']}")
+    cols = st.columns([1, 1])
     max_chars = cols[1].number_input(
         "最大输入字符",
         min_value=8000,
@@ -585,37 +896,18 @@ def _render_study_asset_generator_inner(deck: dict) -> None:
         value=24000,
         step=2000,
         key=f"asset_max_chars_{deck['id']}",
-        help="太长的 PPT 会超过模型上下文，建议先用 10 或 20 页批次生成。",
+        help="太长的 PPT 会超过模型上下文，建议先手动缩小今日学习页码范围，或选择单个目录块。",
     )
-    include_ai_explanation = cols[2].checkbox(
+    include_ai_explanation = cols[0].checkbox(
         "包含 AI 讲解",
         value=True,
         key=f"asset_include_ai_{deck['id']}",
         help="勾选后会把逐页讲解也作为沉淀依据；如果讲解质量不稳定，可以只用 PPT/PDF 识别文字。",
     )
 
-    selected_slides = today_slides if source_mode == "今天已生成讲解的页面" else recognized
-    range_label = source_mode
-    if source_mode == "当前资料按批次选择":
-        group_size = st.radio(
-            "沉淀批次大小",
-            [10, 20],
-            horizontal=True,
-            format_func=lambda value: f"{value} 页一组",
-            key=f"asset_group_size_{deck['id']}",
-        )
-        groups = _build_slide_groups(recognized, int(group_size))
-        group_index = st.selectbox(
-            "选择要沉淀的批次",
-            list(range(len(groups))),
-            format_func=lambda index: _group_label(groups[index]),
-            key=f"asset_group_index_{deck['id']}",
-        )
-        selected_slides = groups[group_index]
-        range_label = _group_label(selected_slides)
-
     reading_content, used_pages, truncated = _build_reading_content(
         selected_slides,
+        sections=sections,
         max_chars=int(max_chars),
         include_ai_explanation=include_ai_explanation,
     )
@@ -623,6 +915,7 @@ def _render_study_asset_generator_inner(deck: dict) -> None:
 
     draft_key = f"study_asset_draft_{deck['id']}"
     raw_key = f"study_asset_raw_{deck['id']}"
+    meta_key = f"study_asset_meta_{deck['id']}"
     if st.button("调用 API 生成学习登记 / 知识卡片草稿", type="primary", key=f"generate_assets_{deck['id']}"):
         if not reading_content.strip():
             st.error("没有可发送给 API 的阅读内容。")
@@ -649,6 +942,7 @@ def _render_study_asset_generator_inner(deck: dict) -> None:
             assets = parse_study_assets(output)
             st.session_state[draft_key] = assets
             st.session_state[raw_key] = output
+            st.session_state[meta_key] = {"range_label": range_label, "used_pages": used_pages}
             st.success("草稿已生成，请先预览再写入数据库。")
         except (AIServiceError, ValueError, json.JSONDecodeError) as exc:
             st.error(f"生成或解析失败：{exc}")
@@ -661,6 +955,11 @@ def _render_study_asset_generator_inner(deck: dict) -> None:
         return
 
     with st.expander("预览将写入的学习登记和知识卡片", expanded=True):
+        draft_meta = st.session_state.get(meta_key) or {}
+        if draft_meta:
+            st.caption(f"当前草稿来源：{draft_meta.get('range_label')}；纳入 {draft_meta.get('used_pages')} 页。")
+            if draft_meta.get("range_label") != range_label:
+                st.warning("你已经调整了登记范围，但当前预览仍是上一次生成的草稿；需要重新调用 API 才会使用新范围。")
         st.json(draft)
         cols = st.columns(2)
         if cols[0].button("确认写入学习登记和知识卡片", key=f"save_assets_{deck['id']}"):
@@ -675,11 +974,78 @@ def _render_study_asset_generator_inner(deck: dict) -> None:
                 return
             st.success(f"已写入学习记录 #{session_id}，知识点卡片 {len(knowledge_ids)} 张，并已生成复习计划。")
             del st.session_state[draft_key]
+            st.session_state.pop(meta_key, None)
             st.rerun()
         if cols[1].button("清除草稿", key=f"clear_assets_{deck['id']}"):
             del st.session_state[draft_key]
             st.session_state.pop(raw_key, None)
+            st.session_state.pop(meta_key, None)
             st.rerun()
+
+
+def _select_study_asset_scope(
+    deck: dict,
+    slides: list[dict],
+    sections: list[dict],
+    today_slides: list[dict],
+) -> tuple[list[dict], str]:
+    modes = ["手动选择今天学习页码范围"]
+    if sections:
+        modes.extend(["选择一个目录块", "全部目录块"])
+    else:
+        modes.append("全部已识别页面")
+        st.warning("当前资料还没有 AI 目录分块；学习登记会按页码范围临时整理。")
+
+    mode = st.selectbox("登记范围", modes, key=f"asset_scope_mode_{deck['id']}")
+    if mode == "选择一个目录块" and sections:
+        selected_index = st.selectbox(
+            "选择要登记的目录块",
+            [int(section["section_index"]) for section in sections],
+            format_func=lambda index: _section_label(sections, index),
+            key=f"asset_section_index_{deck['id']}",
+        )
+        section = next(item for item in sections if int(item["section_index"]) == int(selected_index))
+        selected = _filter_slides_by_page_range(slides, int(section["start_slide"]), int(section["end_slide"]))
+        return selected, _section_label(sections, int(selected_index))
+
+    if mode in {"全部目录块", "全部已识别页面"}:
+        first_page = int(slides[0]["slide_number"])
+        last_page = int(slides[-1]["slide_number"])
+        label = "全部目录块" if sections else "全部已识别页面"
+        return slides, f"{label}（第 {first_page}-{last_page} 页）"
+
+    first_page = int(slides[0]["slide_number"])
+    last_page = int(slides[-1]["slide_number"])
+    if today_slides:
+        default_start = min(int(slide["slide_number"]) for slide in today_slides)
+        default_end = max(int(slide["slide_number"]) for slide in today_slides)
+        st.caption(f"已根据今天生成过讲解的页面预设范围：第 {default_start}-{default_end} 页，可手动调整。")
+    else:
+        default_start = first_page
+        default_end = last_page
+        st.caption("今天还没有检测到新生成讲解的页面；请手动选择今天实际学习的页码范围。")
+
+    start_page, end_page = st.slider(
+        "今天已学习页码范围",
+        min_value=first_page,
+        max_value=last_page,
+        value=(default_start, default_end),
+        step=1,
+        key=f"asset_manual_page_range_{deck['id']}",
+    )
+    selected = _filter_slides_by_page_range(slides, int(start_page), int(end_page))
+    if not selected:
+        st.warning("这个页码范围内没有已识别文字或已生成讲解的页面。")
+    return selected, f"今天手动页码范围：第 {start_page}-{end_page} 页"
+
+
+def _filter_slides_by_page_range(slides: list[dict], start_page: int, end_page: int) -> list[dict]:
+    start_page, end_page = sorted((int(start_page), int(end_page)))
+    return [
+        slide
+        for slide in slides
+        if start_page <= int(slide["slide_number"]) <= end_page
+    ]
 
 
 def _slides_with_latest_explanations(deck_id: int) -> list[dict]:
@@ -717,6 +1083,7 @@ def _is_today(value: str | None) -> bool:
 def _build_reading_content(
     slides: list[dict],
     *,
+    sections: list[dict] | None = None,
     max_chars: int,
     include_ai_explanation: bool,
 ) -> tuple[str, int, bool]:
@@ -724,34 +1091,120 @@ def _build_reading_content(
     used_pages = 0
     truncated = False
     current_chars = 0
+    section_by_index = {int(section["section_index"]): section for section in (sections or [])}
+    grouped_slides = _group_slides_for_study_assets(slides, section_by_index)
 
-    for slide in slides:
-        slide_text = (slide.get("slide_text") or "").strip()
-        explanation = (slide.get("latest_explanation") or "").strip() if include_ai_explanation else ""
-        if not slide_text and not explanation:
+    for section_key, group in grouped_slides:
+        if not group:
             continue
-
-        chunk = "\n".join(
-            part
-            for part in [
-                f"## 第 {slide['slide_number']} 页：{slide.get('title') or '未命名页面'}",
-                f"PPT/PDF 识别文字：\n{_clip_text(slide_text, 2200)}" if slide_text else "",
-                f"已生成 AI 讲解：\n{_clip_text(explanation, 2600)}" if explanation else "",
-            ]
-            if part
-        )
-        extra_chars = len(chunk) + (2 if chunks else 0)
-        if current_chars + extra_chars > max_chars:
-            truncated = True
-            if not chunks:
-                chunks.append(chunk[:max_chars] + "\n[内容已因长度限制截断]")
-                used_pages += 1
+        section_header = _study_asset_section_header(section_by_index.get(section_key), group)
+        section_started = False
+        for slide in group:
+            page_chunk = _study_asset_slide_chunk(slide, include_ai_explanation=include_ai_explanation)
+            if not page_chunk:
+                continue
+            chunk = "\n\n".join([section_header if not section_started else "", page_chunk]).strip()
+            extra_chars = len(chunk) + (2 if chunks else 0)
+            if current_chars + extra_chars > max_chars:
+                truncated = True
+                if not chunks:
+                    chunks.append(chunk[:max_chars].rstrip() + "\n[内容已因长度限制截断]")
+                    used_pages += 1
+                break
+            chunks.append(chunk)
+            current_chars += extra_chars
+            used_pages += 1
+            section_started = True
+        if truncated:
             break
-        chunks.append(chunk)
-        current_chars += extra_chars
-        used_pages += 1
 
     return "\n\n".join(chunks).strip(), used_pages, truncated
+
+
+def _group_slides_for_study_assets(
+    slides: list[dict],
+    section_by_index: dict[int, dict],
+) -> list[tuple[int, list[dict]]]:
+    grouped: list[tuple[int, list[dict]]] = []
+    group_by_key: dict[int, list[dict]] = {}
+    for slide in slides:
+        section_index = int(slide.get("section_index") or 0)
+        key = section_index if section_index in section_by_index else 0
+        if key not in group_by_key:
+            group_by_key[key] = []
+            grouped.append((key, group_by_key[key]))
+        group_by_key[key].append(slide)
+    return grouped
+
+
+def _study_asset_section_header(section: dict | None, slides: list[dict]) -> str:
+    start_page = int(slides[0]["slide_number"])
+    end_page = int(slides[-1]["slide_number"])
+    if not section:
+        return f"# 临时学习范围：第 {start_page}-{end_page} 页\n本范围尚未匹配到 AI 目录块。"
+
+    key_terms = section.get("key_terms") or []
+    prerequisite = section.get("prerequisite_concepts") or []
+    if isinstance(key_terms, str):
+        key_terms_text = key_terms
+    else:
+        key_terms_text = "、".join(str(item) for item in key_terms if str(item).strip())
+    if isinstance(prerequisite, str):
+        prerequisite_text = prerequisite
+    else:
+        prerequisite_text = "、".join(str(item) for item in prerequisite if str(item).strip())
+    return "\n".join(
+        part
+        for part in [
+            f"# 目录块 {section['section_index']}：{section.get('title') or '未命名目录块'}",
+            f"本块完整页码：第 {section.get('start_slide')}-{section.get('end_slide')} 页",
+            f"本次纳入页码：第 {start_page}-{end_page} 页",
+            f"本块核心问题：{section.get('core_question') or '暂无'}",
+            f"本块摘要：{section.get('summary') or '暂无'}",
+            f"关键符号：{key_terms_text or '暂无'}",
+            f"前置概念：{prerequisite_text or '暂无'}",
+        ]
+        if part
+    )
+
+
+def _study_asset_slide_chunk(slide: dict, *, include_ai_explanation: bool) -> str:
+    slide_text = (slide.get("slide_text") or "").strip()
+    explanation = (slide.get("latest_explanation") or "").strip() if include_ai_explanation else ""
+    if not slide_text and not explanation:
+        return ""
+
+    highlights = _extract_markdown_highlights(explanation, slide_text)
+    return "\n".join(
+        part
+        for part in [
+            f"## 第 {slide['slide_number']} 页：{slide.get('title') or '未命名页面'}",
+            f"页面类型：{slide.get('page_type') or '未标注'}",
+            f"一句话摘要：{slide.get('one_sentence_summary') or '暂无'}",
+            f"当前页作用：{slide.get('slide_role') or '暂无'}",
+            f"考点 / 学习抓手：{slide.get('key_points') or '暂无'}",
+            "本页高亮重点（知识卡片生成时优先覆盖）：\n"
+            + "\n".join(f"- {item}" for item in highlights)
+            if highlights
+            else "",
+            f"PPT/PDF 识别文字：\n{_clip_text(slide_text, 1800)}" if slide_text else "",
+            f"已生成 AI 讲解：\n{_clip_text(explanation, 2400)}" if explanation else "",
+        ]
+        if part
+    )
+
+
+def _extract_markdown_highlights(*texts: str) -> list[str]:
+    highlights: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        for match in re.finditer(r"(?<!\\)==(.+?)(?<!\\)==", str(text or ""), flags=re.S):
+            value = " ".join(match.group(1).split())
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            highlights.append(value)
+    return highlights
 
 
 def _clip_text(text: str, limit: int) -> str:
@@ -1015,6 +1468,8 @@ def _generate_whole_deck_explanations(
     force_image_input: bool,
     supports_image_input: bool,
     latest_by_slide_id: dict[int, dict],
+    all_slides: list[dict] | None = None,
+    sections: list[dict] | None = None,
     background: bool = False,
 ) -> None:
     targets = []
@@ -1034,6 +1489,7 @@ def _generate_whole_deck_explanations(
     max_tokens = int(st.session_state.get("active_api_max_tokens", 4096))
     active_model_label = _active_model_label()
     total = len(targets)
+    context_by_slide = build_slide_context_map(deck, all_slides or slides, sections or [])
 
     if background:
         task = {
@@ -1052,6 +1508,8 @@ def _generate_whole_deck_explanations(
             "active_model": active_model,
             "max_tokens": max_tokens,
             "active_model_label": active_model_label,
+            "reasoning_depth": st.session_state.get("active_api_reasoning_depth"),
+            "context_by_slide": context_by_slide,
             "completed": False,
             "stop_requested": False,
         }
@@ -1069,6 +1527,22 @@ def _generate_whole_deck_explanations(
     generated = 0
     skipped = 0
     for index, slide in enumerate(targets, start=1):
+        context = context_by_slide.get(int(slide["slide_number"]))
+        if should_use_lightweight_explanation(slide):
+            explanation = build_lightweight_explanation(deck, slide, context)
+            insert_and_get_id(
+                """
+                INSERT INTO slide_explanations (slide_id, model, explanation)
+                VALUES (?, ?, ?)
+                """,
+                (slide["id"], f"{active_model_label} / 分块摘要", explanation),
+            )
+            generated += 1
+            progress.progress(
+                index / len(targets),
+                text=f"第 {slide['slide_number']} 页为过渡/目录页，已写入目录块摘要。",
+            )
+            continue
         image_paths = _image_paths_for_generation(
             slide,
             send_image_when_no_text,
@@ -1088,6 +1562,7 @@ def _generate_whole_deck_explanations(
             slide,
             image_attached=bool(image_paths),
             ignore_extracted_text=force_image_input,
+            context=context,
         )
         try:
             progress.progress(
@@ -1123,7 +1598,7 @@ def _generate_whole_deck_explanations(
                     continue
                 try:
                     explanation = generate_text(
-                        _build_slide_prompt(deck, slide, image_attached=False),
+                        _build_slide_prompt(deck, slide, image_attached=False, context=context),
                         provider_key=provider_key,
                         api_key=api_key,
                         model_override=active_model,
@@ -1159,8 +1634,10 @@ def _generate_whole_deck_explanations(
 def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -> None:
     from services.ai_service import AIServiceError, generate_text
     skipped = 0
+    generated = 0
     total = len(targets)
-    reasoning_depth = st.session_state.get("active_api_reasoning_depth")
+    reasoning_depth = task.get("reasoning_depth")
+    context_by_slide = task.get("context_by_slide") or {}
 
     for index, slide in enumerate(targets, start=1):
         if task.get("stop_requested"):
@@ -1171,6 +1648,18 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
         task["status_text"] = f"正在分析第 {slide['slide_number']} 页 / 共 {total} 页待生成..."
 
         from pages.ppt_tutor import _is_text_empty, _image_paths_for_generation, _build_slide_prompt
+        context = context_by_slide.get(int(slide["slide_number"]))
+        if should_use_lightweight_explanation(slide):
+            explanation = build_lightweight_explanation(deck, slide, context)
+            insert_and_get_id(
+                """
+                INSERT INTO slide_explanations (slide_id, model, explanation)
+                VALUES (?, ?, ?)
+                """,
+                (slide["id"], f"{task['active_model_label']} / 分块摘要", explanation),
+            )
+            generated += 1
+            continue
         image_paths = _image_paths_for_generation(
             slide,
             task["send_image_when_no_text"],
@@ -1188,6 +1677,7 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
             slide,
             image_attached=bool(image_paths),
             ignore_extracted_text=task.get("force_image_input", False),
+            context=context,
         )
         try:
             explanation = generate_text(
@@ -1206,12 +1696,13 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
                 """,
                 (slide["id"], task["active_model_label"], explanation),
             )
+            generated += 1
         except AIServiceError:
             pass
 
     task["status"] = "completed"
     task["progress"] = 1.0
-    task["generated"] = len(targets) - skipped
+    task["generated"] = generated
     task["status_text"] = f"生成完成：{task['generated']} 页"
 
 
@@ -1240,10 +1731,29 @@ def _build_reader_payload(
                 "explanation": latest["explanation"] if latest else "本页还没有 AI 讲解。" + (f"\n\n参考文字：\n{slide_text[:200]}..." if slide_text else ""),
                 "model": latest["model"] if latest else "",
                 "createdAt": latest["created_at"] if latest else "",
+                "sectionIndex": int(slide.get("section_index") or 0),
+                "pageType": slide.get("page_type") or "",
+                "summary": slide.get("one_sentence_summary") or "",
+                "slideRole": slide.get("slide_role") or "",
+                "keyPoints": slide.get("key_points") or "",
                 "questions": question_by_slide_id.get(int(slide["id"]), []),
             }
         )
     return payload
+
+
+def _reader_sections_payload(sections: list[dict]) -> list[dict]:
+    return [
+        {
+            "sectionIndex": int(section["section_index"]),
+            "title": section.get("title") or f"目录块 {section['section_index']}",
+            "startSlide": int(section["start_slide"]),
+            "endSlide": int(section["end_slide"]),
+            "coreQuestion": section.get("core_question") or "",
+            "summary": section.get("summary") or "",
+        }
+        for section in sections
+    ]
 
 
 def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
@@ -1906,6 +2416,7 @@ def _build_slide_prompt(
     *,
     image_attached: bool = False,
     ignore_extracted_text: bool = False,
+    context: dict | None = None,
 ) -> str:
     slide_text = "" if ignore_extracted_text else (slide["slide_text"] or "")
     subject = deck.get("subject") or "未分类"
@@ -1925,6 +2436,7 @@ def _build_slide_prompt(
             "slide_number": str(slide["slide_number"]),
             "slide_title": slide["title"] or "未命名页面",
             "slide_text": slide_text or "这一页没有解析到文字。",
+            "context_package": format_slide_context_package(context),
             "related_knowledge": _related_knowledge_context(subject),
         },
     )
@@ -1957,7 +2469,14 @@ def _related_knowledge_context(subject: str, limit: int = 8) -> str:
     return "\n".join(lines)
 
 
-def _build_branch_prompt(deck: dict, slide: dict, latest: dict | None, question: str) -> str:
+def _build_branch_prompt(
+    deck: dict,
+    slide: dict,
+    latest: dict | None,
+    question: str,
+    *,
+    context: dict | None = None,
+) -> str:
     return render_template(
         "ppt_branch_question.md",
         {
@@ -1967,6 +2486,7 @@ def _build_branch_prompt(deck: dict, slide: dict, latest: dict | None, question:
             "slide_title": slide["title"] or "未命名页面",
             "slide_text": slide["slide_text"] or "这一页没有解析到文字。",
             "main_explanation": latest["explanation"] if latest else "尚未生成主线讲解。",
+            "context_package": format_slide_context_package(context),
             "question": question,
         },
     )

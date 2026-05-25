@@ -19,6 +19,12 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# Local-only reusable regression checks
+tests/test_ppt_context_service.py
+tests/test_ppt_reader_edit.py
+tests/test_ppt_reader_upload_selection.py
+tests/test_ppt_study_assets_scope.py
+
 # Local environments
 .venv/
 venv/

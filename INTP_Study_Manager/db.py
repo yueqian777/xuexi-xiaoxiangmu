@@ -153,6 +153,8 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT '使用中',
                 file_path TEXT NOT NULL,
                 slide_count INTEGER NOT NULL DEFAULT 0,
+                outline TEXT DEFAULT '',
+                outline_generated_at TEXT DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
 
@@ -164,9 +166,32 @@ def init_db() -> None:
                 slide_text TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
                 image_path TEXT DEFAULT '',
+                section_index INTEGER NOT NULL DEFAULT 0,
+                page_type TEXT DEFAULT '',
+                one_sentence_summary TEXT DEFAULT '',
+                slide_role TEXT DEFAULT '',
+                key_points TEXT DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 FOREIGN KEY (deck_id) REFERENCES ppt_decks(id) ON DELETE CASCADE,
                 UNIQUE(deck_id, slide_number)
+            );
+
+            CREATE TABLE IF NOT EXISTS ppt_sections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                deck_id INTEGER NOT NULL,
+                section_index INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                topic TEXT DEFAULT '',
+                core_question TEXT DEFAULT '',
+                summary TEXT DEFAULT '',
+                key_terms_json TEXT NOT NULL DEFAULT '[]',
+                prerequisite_concepts_json TEXT NOT NULL DEFAULT '[]',
+                start_slide INTEGER NOT NULL,
+                end_slide INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                FOREIGN KEY (deck_id) REFERENCES ppt_decks(id) ON DELETE CASCADE,
+                UNIQUE(deck_id, section_index)
             );
 
             CREATE TABLE IF NOT EXISTS slide_explanations (
@@ -292,7 +317,14 @@ def init_db() -> None:
         _ensure_column(conn, "ppt_decks", "category", "TEXT DEFAULT ''")
         _ensure_column(conn, "ppt_decks", "sort_order", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "ppt_decks", "status", "TEXT NOT NULL DEFAULT '使用中'")
+        _ensure_column(conn, "ppt_decks", "outline", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_decks", "outline_generated_at", "TEXT DEFAULT ''")
         _ensure_column(conn, "ppt_slides", "image_path", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_slides", "section_index", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "ppt_slides", "page_type", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_slides", "one_sentence_summary", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_slides", "slide_role", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_slides", "key_points", "TEXT DEFAULT ''")
         _ensure_column(conn, "slide_questions", "category", "TEXT DEFAULT ''")
         _ensure_column(conn, "slide_questions", "sort_order", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_questions", "status", "TEXT NOT NULL DEFAULT '未整理'")
@@ -305,6 +337,18 @@ def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_ppt_decks_manage
             ON ppt_decks(status, category, sort_order ASC, created_at DESC, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ppt_sections_deck_order
+            ON ppt_sections(deck_id, section_index ASC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ppt_slides_deck_section
+            ON ppt_slides(deck_id, section_index ASC, slide_number ASC)
             """
         )
         conn.execute(
