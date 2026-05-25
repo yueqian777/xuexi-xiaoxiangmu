@@ -9,30 +9,37 @@ from pathlib import Path
 from typing import BinaryIO
 
 from db import DATA_DIR, execute_many, managed_connection
+from services.auth_service import get_user_upload_usage, require_login
 
 UPLOAD_DIR = DATA_DIR / "uploads"
 PAGE_IMAGE_DIR = DATA_DIR / "page_images"
 
 
 def import_deck(uploaded_file: BinaryIO, *, subject: str, title: str) -> int:
+    user = require_login()
+    usage = get_user_upload_usage(user.id)
+    data = bytes(uploaded_file.getbuffer() if hasattr(uploaded_file, "getbuffer") else uploaded_file.read())
+    upload_size = len(data)
+    if usage["quota_bytes"] > 0 and usage["used_bytes"] + upload_size > usage["quota_bytes"]:
+        raise RuntimeError("上传失败：已超过当前账户的上传容量配额。请联系管理员扩容或先删除旧资料。")
     original_name = getattr(uploaded_file, "name", "")
     suffix = Path(original_name).suffix.lower()
     if suffix == ".pptx":
-        return import_pptx(uploaded_file, subject=subject, title=title)
+        return import_pptx(uploaded_file, subject=subject, title=title, file_bytes=data)
     if suffix == ".pdf":
-        return import_pdf(uploaded_file, subject=subject, title=title)
+        return import_pdf(uploaded_file, subject=subject, title=title, file_bytes=data)
     raise RuntimeError("仅支持 PPTX 或 PDF 文件。")
 
 
-def import_pptx(uploaded_file: BinaryIO, *, subject: str, title: str) -> int:
-    saved_path = save_uploaded_deck(uploaded_file)
+def import_pptx(uploaded_file: BinaryIO, *, subject: str, title: str, file_bytes: bytes | None = None) -> int:
+    saved_path = save_uploaded_deck(uploaded_file, file_bytes=file_bytes)
     slides = extract_pptx_slides(saved_path)
     image_paths = render_deck_page_images(saved_path)
     return _save_deck_records(saved_path, slides, image_paths, subject=subject, title=title)
 
 
-def import_pdf(uploaded_file: BinaryIO, *, subject: str, title: str) -> int:
-    saved_path = save_uploaded_deck(uploaded_file)
+def import_pdf(uploaded_file: BinaryIO, *, subject: str, title: str, file_bytes: bytes | None = None) -> int:
+    saved_path = save_uploaded_deck(uploaded_file, file_bytes=file_bytes)
     slides = extract_pdf_pages(saved_path)
     image_paths = render_deck_page_images(saved_path)
     return _save_deck_records(saved_path, slides, image_paths, subject=subject, title=title)
@@ -76,7 +83,7 @@ def _save_deck_records(
     return deck_id
 
 
-def save_uploaded_deck(uploaded_file: BinaryIO) -> Path:
+def save_uploaded_deck(uploaded_file: BinaryIO, *, file_bytes: bytes | None = None) -> Path:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     original_name = getattr(uploaded_file, "name", "uploaded")
     suffix = Path(original_name).suffix.lower() or ".pptx"
@@ -84,8 +91,8 @@ def save_uploaded_deck(uploaded_file: BinaryIO) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     target = UPLOAD_DIR / f"{timestamp}_{safe_stem}{suffix}"
 
-    data = uploaded_file.getbuffer() if hasattr(uploaded_file, "getbuffer") else uploaded_file.read()
-    target.write_bytes(bytes(data))
+    data = file_bytes if file_bytes is not None else bytes(uploaded_file.getbuffer() if hasattr(uploaded_file, "getbuffer") else uploaded_file.read())
+    target.write_bytes(data)
     return target
 
 

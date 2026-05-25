@@ -392,14 +392,6 @@ def _ensure_auth_tables(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_default_users(conn: sqlite3.Connection) -> None:
-    current_admin = conn.execute("SELECT id FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1").fetchone()
-    if not current_admin:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO users (username, display_name, password_hash, role, is_active)
-            VALUES ('admin', '管理员', '', 'admin', 1)
-            """
-        )
     defaults = conn.execute("SELECT id FROM users ORDER BY id ASC LIMIT 1").fetchone()
     if not defaults:
         return

@@ -24,7 +24,11 @@ from pages import (
 from services.ai_service import ensure_default_api_providers
 from services.auth_service import (
     bootstrap_admin,
+    format_bytes,
     get_current_user,
+    get_user_upload_usage,
+    has_initialized_admin,
+    initialize_first_admin,
     login,
     logout,
     register_by_invite,
@@ -144,7 +148,40 @@ def _seed_admin_from_env() -> None:
         bootstrap_admin(username=username, password=password, display_name=display_name)
 
 
+def _render_first_admin_setup() -> None:
+    st.title("INTP Study Manager")
+    st.caption("首次使用，请先创建管理员账户。")
+
+    with st.form("first_admin_setup"):
+        username = st.text_input("管理员用户名", value="admin")
+        display_name = st.text_input("显示名称", value="管理员")
+        password = st.text_input("管理员密码", type="password")
+        confirm_password = st.text_input("确认密码", type="password")
+        submitted = st.form_submit_button("创建管理员", type="primary")
+    if not submitted:
+        return
+    if not username.strip():
+        st.error("管理员用户名不能为空。")
+        return
+    if not password:
+        st.error("管理员密码不能为空。")
+        return
+    if password != confirm_password:
+        st.error("两次输入的密码不一致。")
+        return
+    try:
+        initialize_first_admin(username.strip(), password, display_name=display_name.strip() or username.strip())
+        st.success("管理员创建成功，请直接登录。")
+        st.rerun()
+    except Exception as exc:
+        st.error(str(exc))
+
+
 def _render_auth_gate() -> None:
+    if not has_initialized_admin():
+        _render_first_admin_setup()
+        return
+
     st.title("INTP Study Manager")
     st.caption("请先登录或使用邀请码加入。")
 
@@ -181,12 +218,14 @@ def _render_user_bar() -> None:
     user = get_current_user()
     if not user:
         return
+    usage = get_user_upload_usage(user.id)
     st.sidebar.markdown(
         f"""**当前用户**
 {user.display_name}
 `{user.username}`
 角色：{user.role}"""
     )
+    st.sidebar.caption(f"上传容量：{format_bytes(usage['used_bytes'])} / {format_bytes(usage['quota_bytes'])}")
     if st.sidebar.button("退出登录", key="logout_button"):
         logout()
         st.rerun()

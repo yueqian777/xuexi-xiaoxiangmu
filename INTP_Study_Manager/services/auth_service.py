@@ -5,6 +5,7 @@ import hmac
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
@@ -13,6 +14,25 @@ from db import execute, fetch_all, fetch_one, insert_and_get_id
 
 CURRENT_USER_SESSION_KEY = "current_user"
 PASSWORD_SALT_PREFIX = "pbkdf2_sha256"
+
+
+SENSITIVE_SESSION_PREFIXES = (
+    "api_key_provider_",
+    "api_model_provider_",
+    "dashboard_api_key_",
+    "balance_credential_",
+    "ppt_provider_",
+    "test_provider_",
+)
+
+SENSITIVE_SESSION_KEYS = {
+    CURRENT_USER_SESSION_KEY,
+    "secret_vault_unlocked",
+    "secret_vault_data",
+    "secret_vault_master_password",
+    "active_api_provider_key",
+    "active_api_model",
+}
 
 
 @dataclass(frozen=True)
@@ -33,6 +53,7 @@ def ensure_auth_tables() -> None:
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'user',
             is_active INTEGER NOT NULL DEFAULT 1,
+            upload_quota_bytes INTEGER NOT NULL DEFAULT 536870912,
             created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )
@@ -47,6 +68,7 @@ def ensure_auth_tables() -> None:
             max_uses INTEGER NOT NULL DEFAULT 1,
             used_count INTEGER NOT NULL DEFAULT 0,
             expires_at TEXT,
+            upload_quota_bytes INTEGER NOT NULL DEFAULT 536870912,
             is_active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
@@ -54,6 +76,28 @@ def ensure_auth_tables() -> None:
         )
         """
     )
+    _ensure_auth_column("users", "upload_quota_bytes", "INTEGER NOT NULL DEFAULT 536870912")
+    _ensure_auth_column("invites", "upload_quota_bytes", "INTEGER NOT NULL DEFAULT 536870912")
+
+
+def _ensure_auth_column(table: str, column: str, definition: str) -> None:
+    row = fetch_one(f"PRAGMA table_info({table})")
+    columns = {item['name'] for item in fetch_all(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def has_initialized_admin() -> bool:
+    ensure_auth_tables()
+    row = fetch_one(
+        """
+        SELECT id
+        FROM users
+        WHERE role = 'admin' AND is_active = 1 AND TRIM(COALESCE(password_hash, '')) != ''
+        ORDER BY id ASC LIMIT 1
+        """
+    )
+    return row is not None
 
 
 def bootstrap_admin(*, username: str, password: str, display_name: str | None = None) -> int:
@@ -66,7 +110,31 @@ def bootstrap_admin(*, username: str, password: str, display_name: str | None = 
     return create_user(username.strip(), password, display_name=display_name or username.strip(), role="admin")
 
 
-def create_user(username: str, password: str, *, display_name: str | None = None, role: str = "user") -> int:
+def initialize_first_admin(username: str, password: str, *, display_name: str | None = None) -> int:
+    ensure_auth_tables()
+    if has_initialized_admin():
+        raise ValueError("系统已经存在可用管理员，无需再次初始化。")
+    username = username.strip()
+    if not username:
+        raise ValueError("管理员用户名不能为空。")
+    if not password:
+        raise ValueError("管理员密码不能为空。")
+    row = fetch_one("SELECT id FROM users WHERE username = ?", (username,))
+    password_hash = hash_password(password)
+    if row:
+        execute(
+            """
+            UPDATE users
+            SET display_name = ?, password_hash = ?, role = 'admin', is_active = 1, updated_at = datetime('now', 'localtime')
+            WHERE id = ?
+            """,
+            (display_name or username, password_hash, int(row["id"])),
+        )
+        return int(row["id"])
+    return create_user(username, password, display_name=display_name or username, role="admin")
+
+
+def create_user(username: str, password: str, *, display_name: str | None = None, role: str = "user", upload_quota_bytes: int = 536870912) -> int:
     ensure_auth_tables()
     username = username.strip()
     if not username:
@@ -78,23 +146,23 @@ def create_user(username: str, password: str, *, display_name: str | None = None
     password_hash = hash_password(password)
     return insert_and_get_id(
         """
-        INSERT INTO users (username, display_name, password_hash, role)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO users (username, display_name, password_hash, role, upload_quota_bytes)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (username, display_name or username, password_hash, role),
+        (username, display_name or username, password_hash, role, int(upload_quota_bytes)),
     )
 
 
-def create_invite(*, role: str = "user", created_by: int | None = None, max_uses: int = 1, expires_in_days: int = 7) -> str:
+def create_invite(*, role: str = "user", created_by: int | None = None, max_uses: int = 1, expires_in_days: int = 7, upload_quota_bytes: int = 536870912) -> str:
     ensure_auth_tables()
     code = secrets.token_urlsafe(16)
     expires_at = (datetime.now() + timedelta(days=expires_in_days)).isoformat(timespec="seconds") if expires_in_days > 0 else None
     execute(
         """
-        INSERT INTO invites (code, role, created_by, max_uses, used_count, expires_at, is_active)
-        VALUES (?, ?, ?, ?, 0, ?, 1)
+        INSERT INTO invites (code, role, created_by, max_uses, used_count, expires_at, upload_quota_bytes, is_active)
+        VALUES (?, ?, ?, ?, 0, ?, ?, 1)
         """,
-        (code, role, created_by, max_uses, expires_at),
+        (code, role, created_by, max_uses, expires_at, int(upload_quota_bytes)),
     )
     return code
 
@@ -103,7 +171,7 @@ def list_users() -> list[dict[str, Any]]:
     ensure_auth_tables()
     return fetch_all(
         """
-        SELECT id, username, display_name, role, is_active, created_at, updated_at
+        SELECT id, username, display_name, role, is_active, upload_quota_bytes, created_at, updated_at
         FROM users
         ORDER BY role DESC, id ASC
         """
@@ -122,11 +190,89 @@ def set_user_active(user_id: int, is_active: bool) -> None:
     )
 
 
+def set_user_upload_quota(user_id: int, upload_quota_bytes: int) -> None:
+    ensure_auth_tables()
+    execute(
+        """
+        UPDATE users
+        SET upload_quota_bytes = ?, updated_at = datetime('now', 'localtime')
+        WHERE id = ?
+        """,
+        (int(upload_quota_bytes), int(user_id)),
+    )
+
+
+def delete_user_and_data(user_id: int) -> None:
+    ensure_auth_tables()
+    if fetch_one("SELECT role FROM users WHERE id = ?", (int(user_id),)).get("role") == "admin":
+        raise ValueError("不能删除管理员账户。")
+
+    deck_rows = fetch_all("SELECT file_path FROM ppt_decks WHERE user_id = ?", (int(user_id),))
+    image_rows = fetch_all("SELECT image_path FROM ppt_slides WHERE user_id = ?", (int(user_id),))
+
+    for table in (
+        "branch_questions",
+        "mainline_anchors",
+        "review_tasks",
+        "mistakes",
+        "knowledge_links",
+        "knowledge_cards",
+        "parking_lot",
+        "slide_questions",
+        "slide_explanations",
+        "ppt_slides",
+        "ppt_decks",
+        "study_sessions",
+        "daily_review_logs",
+        "daily_ai_review_plans",
+    ):
+        execute(f"DELETE FROM {table} WHERE user_id = ?", (int(user_id),))
+
+    execute("DELETE FROM invites WHERE created_by = ?", (int(user_id),))
+    execute("DELETE FROM users WHERE id = ?", (int(user_id),))
+
+    secret_path = Path(__import__('services.secret_store', fromlist=['_secret_store_path'])._secret_store_path(int(user_id)))
+    if secret_path.exists():
+        secret_path.unlink()
+
+    for row in deck_rows + image_rows:
+        path_text = str(row.get("file_path") or row.get("image_path") or "").strip()
+        if not path_text:
+            continue
+        path = Path(path_text)
+        if path.exists() and path.is_file():
+            path.unlink()
+
+
+def get_user_upload_usage(user_id: int) -> dict[str, int]:
+    ensure_auth_tables()
+    user_row = fetch_one("SELECT upload_quota_bytes FROM users WHERE id = ?", (int(user_id),))
+    quota = int((user_row or {}).get("upload_quota_bytes") or 0)
+    total = 0
+    for row in fetch_all("SELECT file_path FROM ppt_decks WHERE user_id = ?", (int(user_id),)):
+        path_text = str(row.get("file_path") or "").strip()
+        if not path_text:
+            continue
+        path = Path(path_text)
+        if path.exists() and path.is_file():
+            total += path.stat().st_size
+    return {"used_bytes": total, "quota_bytes": quota}
+
+
+def format_bytes(value: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(max(0, int(value)))
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
+        size /= 1024
+
+
 def list_invites() -> list[dict[str, Any]]:
     ensure_auth_tables()
     return fetch_all(
         """
-        SELECT i.code, i.role, i.max_uses, i.used_count, i.expires_at, i.is_active, i.created_at, i.updated_at, u.username AS created_by_name
+        SELECT i.code, i.role, i.max_uses, i.used_count, i.expires_at, i.upload_quota_bytes, i.is_active, i.created_at, i.updated_at, u.username AS created_by_name
         FROM invites i
         LEFT JOIN users u ON u.id = i.created_by
         ORDER BY i.created_at DESC
@@ -169,8 +315,18 @@ def use_invite(code: str) -> dict[str, Any]:
     return invite
 
 
+def _clear_sensitive_session_state() -> None:
+    for key in list(st.session_state.keys()):
+        if key in SENSITIVE_SESSION_KEYS:
+            st.session_state.pop(key, None)
+            continue
+        if key.startswith(SENSITIVE_SESSION_PREFIXES):
+            st.session_state.pop(key, None)
+
+
 def login(username: str, password: str) -> CurrentUser:
     ensure_auth_tables()
+    _clear_sensitive_session_state()
     row = fetch_one(
         """
         SELECT id, username, display_name, role, password_hash, is_active
@@ -199,8 +355,15 @@ def login(username: str, password: str) -> CurrentUser:
 
 
 def register_by_invite(username: str, password: str, invite_code: str, *, display_name: str | None = None) -> CurrentUser:
+    _clear_sensitive_session_state()
     invite = use_invite(invite_code)
-    user_id = create_user(username, password, display_name=display_name or username.strip(), role=str(invite["role"] or "user"))
+    user_id = create_user(
+        username,
+        password,
+        display_name=display_name or username.strip(),
+        role=str(invite["role"] or "user"),
+        upload_quota_bytes=int(invite.get("upload_quota_bytes") or 536870912),
+    )
     user = get_user(user_id)
     if not user:
         raise ValueError("用户创建失败。")
@@ -243,7 +406,7 @@ def require_admin() -> CurrentUser:
 
 
 def logout() -> None:
-    st.session_state.pop(CURRENT_USER_SESSION_KEY, None)
+    _clear_sensitive_session_state()
 
 
 def get_user(user_id: int) -> CurrentUser | None:
