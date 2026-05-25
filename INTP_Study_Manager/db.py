@@ -163,6 +163,8 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT '使用中',
                 file_path TEXT NOT NULL,
                 slide_count INTEGER NOT NULL DEFAULT 0,
+                outline TEXT DEFAULT '',
+                outline_generated_at TEXT DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
 
@@ -175,9 +177,32 @@ def init_db() -> None:
                 slide_text TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
                 image_path TEXT DEFAULT '',
+                section_index INTEGER NOT NULL DEFAULT 0,
+                page_type TEXT DEFAULT '',
+                one_sentence_summary TEXT DEFAULT '',
+                slide_role TEXT DEFAULT '',
+                key_points TEXT DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 FOREIGN KEY (deck_id) REFERENCES ppt_decks(id) ON DELETE CASCADE,
                 UNIQUE(deck_id, slide_number)
+            );
+
+            CREATE TABLE IF NOT EXISTS ppt_sections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                deck_id INTEGER NOT NULL,
+                section_index INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                topic TEXT DEFAULT '',
+                core_question TEXT DEFAULT '',
+                summary TEXT DEFAULT '',
+                key_terms_json TEXT NOT NULL DEFAULT '[]',
+                prerequisite_concepts_json TEXT NOT NULL DEFAULT '[]',
+                start_slide INTEGER NOT NULL,
+                end_slide INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                FOREIGN KEY (deck_id) REFERENCES ppt_decks(id) ON DELETE CASCADE,
+                UNIQUE(deck_id, section_index)
             );
 
             CREATE TABLE IF NOT EXISTS slide_explanations (
@@ -269,7 +294,14 @@ def init_db() -> None:
         _ensure_column(conn, "review_tasks", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "parking_lot", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "ppt_decks", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "ppt_decks", "outline", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_decks", "outline_generated_at", "TEXT DEFAULT ''")
         _ensure_column(conn, "ppt_slides", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "ppt_slides", "section_index", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "ppt_slides", "page_type", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_slides", "one_sentence_summary", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_slides", "slide_role", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_slides", "key_points", "TEXT DEFAULT ''")
         _ensure_column(conn, "slide_explanations", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_questions", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "api_providers", "user_id", "INTEGER NOT NULL DEFAULT 0")

@@ -6,6 +6,7 @@ from datetime import date
 from typing import Any
 
 from db import insert_and_get_id
+from services.auth_service import require_login
 from services.review_service import ensure_initial_review_tasks
 
 
@@ -37,6 +38,7 @@ def save_study_assets(
     fallback_subject: str,
     fallback_chapter: str,
 ) -> tuple[int, list[int]]:
+    user = require_login()
     session = assets["study_session"]
     session_date = _text(session.get("date")) or date.today().isoformat()
     subject = _text(session.get("subject")) or fallback_subject or "未分类"
@@ -46,12 +48,13 @@ def save_study_assets(
     session_id = insert_and_get_id(
         """
         INSERT INTO study_sessions (
-            date, subject, chapter, title, main_question, mastered_content,
+            user_id, date, subject, chapter, title, main_question, mastered_content,
             blockers, wrong_questions, summary, mastery, need_review, is_key
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            user.id,
             session_date,
             subject,
             chapter,
@@ -74,12 +77,13 @@ def save_study_assets(
         knowledge_id = insert_and_get_id(
             """
             INSERT INTO knowledge_cards (
-                subject, topic, core_question, one_sentence, logic_or_formula,
+                user_id, subject, topic, core_question, one_sentence, logic_or_formula,
                 application, mastery, need_review, source_session_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                user.id,
                 _text(card.get("subject")) or subject,
                 _text(card.get("topic")) or "未命名知识点",
                 _text(card.get("core_question")),
@@ -92,7 +96,7 @@ def save_study_assets(
             ),
         )
         if need_review:
-            ensure_initial_review_tasks(knowledge_id, session_date)
+            ensure_initial_review_tasks(knowledge_id, session_date, user_id=user.id)
         knowledge_ids.append(knowledge_id)
 
     return session_id, knowledge_ids
