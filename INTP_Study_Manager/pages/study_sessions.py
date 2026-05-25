@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from db import execute, fetch_all, fetch_one, insert_and_get_id
+from services.auth_service import require_login
 from services.review_service import create_initial_review_tasks
 
 
@@ -16,6 +17,7 @@ def _date_value(value: str | None) -> date:
 
 
 def render() -> None:
+    user = require_login()
     st.title("学习登记")
     st.caption("记录“学了什么”之前，先记录“这个知识点想解决什么问题”。")
 
@@ -45,12 +47,13 @@ def render() -> None:
             session_id = insert_and_get_id(
                 """
                 INSERT INTO study_sessions (
-                    date, subject, chapter, title, main_question, mastered_content,
+                    user_id, date, subject, chapter, title, main_question, mastered_content,
                     blockers, wrong_questions, summary, mastery, need_review, is_key
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    user.id,
                     session_date.isoformat(),
                     subject.strip(),
                     chapter.strip(),
@@ -69,12 +72,13 @@ def render() -> None:
                 knowledge_id = insert_and_get_id(
                     """
                     INSERT INTO knowledge_cards (
-                        subject, topic, core_question, one_sentence, logic_or_formula,
+                        user_id, subject, topic, core_question, one_sentence, logic_or_formula,
                         application, mastery, need_review, source_session_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        user.id,
                         subject.strip(),
                         title.strip(),
                         main_question.strip(),
@@ -87,12 +91,12 @@ def render() -> None:
                     ),
                 )
                 if need_review:
-                    create_initial_review_tasks(knowledge_id, session_date)
+                    create_initial_review_tasks(knowledge_id, session_date, user_id=user.id)
             st.success("学习记录已保存。")
 
     st.divider()
     st.subheader("历史学习记录")
-    records = fetch_all("SELECT * FROM study_sessions ORDER BY date DESC, id DESC")
+    records = fetch_all("SELECT * FROM study_sessions WHERE user_id = ? ORDER BY date DESC, id DESC", (user.id,))
     if not records:
         st.info("暂无学习记录。")
         return
@@ -111,7 +115,7 @@ def render() -> None:
         [r["id"] for r in filtered],
         format_func=lambda item_id: f"#{item_id} - {next(r['title'] for r in filtered if r['id'] == item_id)}",
     )
-    record = fetch_one("SELECT * FROM study_sessions WHERE id = ?", (selected_id,))
+    record = fetch_one("SELECT * FROM study_sessions WHERE id = ? AND user_id = ?", (selected_id, user.id))
     if not record:
         return
 
@@ -140,7 +144,7 @@ def render() -> None:
             SET date = ?, subject = ?, chapter = ?, title = ?, main_question = ?,
                 mastered_content = ?, blockers = ?, wrong_questions = ?, summary = ?,
                 mastery = ?, need_review = ?, is_key = ?
-            WHERE id = ?
+            WHERE id = ? AND user_id = ?
             """,
             (
                 edit_date.isoformat(),
@@ -156,8 +160,8 @@ def render() -> None:
                 int(edit_need_review),
                 int(edit_is_key),
                 selected_id,
+                user.id,
             ),
         )
         st.success("学习记录已更新。")
         st.rerun()
-

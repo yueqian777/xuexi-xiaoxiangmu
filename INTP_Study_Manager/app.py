@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -19,6 +21,15 @@ from pages import (
     study_sessions,
 )
 from services.ai_service import ensure_default_api_providers
+from services.auth_service import (
+    bootstrap_admin,
+    get_current_user,
+    login,
+    logout,
+    register_by_invite,
+    require_login,
+    ensure_auth_tables,
+)
 
 PAGES = {
     "首页 Dashboard": dashboard.render,
@@ -92,7 +103,6 @@ def _install_browser_dom_guard() -> None:
 
           const stopStreamlitCacheShortcut = (event) => {
             if (!isCopyShortcut(event)) return;
-            // Keep browser copy behavior, but stop Streamlit's global shortcut handler.
             event.stopPropagation();
             if (typeof event.stopImmediatePropagation === 'function') {
               event.stopImmediatePropagation();
@@ -111,6 +121,72 @@ def _install_browser_dom_guard() -> None:
     )
 
 
+def _config_value(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value is not None:
+        return value
+    try:
+        return str(st.secrets.get(name, default))
+    except Exception:
+        return default
+
+
+def _seed_admin_from_env() -> None:
+    username = _config_value("INTP_ADMIN_USERNAME")
+    password = _config_value("INTP_ADMIN_PASSWORD")
+    display_name = _config_value("INTP_ADMIN_DISPLAY_NAME", "管理员")
+    if username and password:
+        bootstrap_admin(username=username, password=password, display_name=display_name)
+
+
+def _render_auth_gate() -> None:
+    st.title("INTP Study Manager")
+    st.caption("请先登录或使用邀请码加入。")
+
+    tab_login, tab_join = st.tabs(["登录", "邀请码加入"])
+
+    with tab_login:
+        with st.form("login_form"):
+            username = st.text_input("用户名")
+            password = st.text_input("密码", type="password")
+            submitted = st.form_submit_button("登录")
+        if submitted:
+            try:
+                login(username, password)
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+    with tab_join:
+        with st.form("invite_join_form"):
+            username = st.text_input("用户名", key="invite_username")
+            display_name = st.text_input("显示名称", key="invite_display_name")
+            password = st.text_input("密码", type="password", key="invite_password")
+            invite_code = st.text_input("邀请码", key="invite_code")
+            submitted = st.form_submit_button("注册并登录")
+        if submitted:
+            try:
+                register_by_invite(username, password, invite_code, display_name=display_name or username)
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+
+def _render_user_bar() -> None:
+    user = get_current_user()
+    if not user:
+        return
+    st.sidebar.markdown(
+        f"""**当前用户**
+{user.display_name}
+`{user.username}`
+角色：{user.role}"""
+    )
+    if st.sidebar.button("退出登录", key="logout_button"):
+        logout()
+        st.rerun()
+
+
 def main() -> None:
     st.set_page_config(
         page_title="INTP Study Manager",
@@ -120,10 +196,18 @@ def main() -> None:
     )
     _install_browser_dom_guard()
     init_db()
+    ensure_auth_tables()
+    _seed_admin_from_env()
+
+    user = get_current_user()
+    if not user:
+        _render_auth_gate()
+        return
     ensure_default_api_providers()
 
     st.sidebar.title("INTP Study Manager")
     st.sidebar.caption("问题驱动 · 闭卷回忆 · 错因分析 · 间隔复习")
+    _render_user_bar()
     page_name = st.sidebar.radio("页面", list(PAGES.keys()))
     st.sidebar.divider()
     st.sidebar.markdown("**70% 原则**")

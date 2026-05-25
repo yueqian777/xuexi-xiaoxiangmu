@@ -14,6 +14,7 @@ from services.api_runtime import (
     save_default_api_config,
     set_active_provider,
 )
+from services.auth_service import require_login
 from services.daily_ai_review_service import (
     answers_payload,
     collect_review_candidates,
@@ -34,6 +35,7 @@ def _self_test_question(topic: str) -> str:
 
 
 def _render_default_api_and_daily_ai_review() -> None:
+    user = require_login()
     st.subheader("每日 AI 轻量复习")
     st.caption("先设置项目默认 API。首页会用少量问题检查今天最值得复习的知识点；提交答案后自动批改，并写回知识点掌握度。")
 
@@ -79,6 +81,7 @@ def _render_default_api_and_daily_ai_review() -> None:
             model=active_model,
             target_session_key=key_name,
             key_prefix=f"dashboard_default_provider_{selected_provider_key}",
+            widget_session_key=f"dashboard_api_key_{selected_provider_key}",
         )
         api_key = st.text_input(
             "默认 API Key",
@@ -95,7 +98,7 @@ def _render_default_api_and_daily_ai_review() -> None:
             st.success("项目默认 API 已保存。后续 API 任务未主动切换时会使用它。")
             st.rerun()
 
-        candidates = collect_review_candidates()
+        candidates = collect_review_candidates(user_id=user.id)
         cols[1].metric("今日自测候选", len(candidates))
         if candidates:
             cols[2].caption("候选来自：今日到期复习、低于 70% 的知识点、仍需复习的知识卡片。")
@@ -106,8 +109,8 @@ def _render_default_api_and_daily_ai_review() -> None:
         st.info("填写默认 API Key 后，首页会自动生成今天的轻量自测计划。")
         return
 
-    plan = get_today_ai_review_plan()
-    auto_key = f"daily_ai_review_auto_generated_{date.today().isoformat()}"
+    plan = get_today_ai_review_plan(user_id=user.id)
+    auto_key = f"daily_ai_review_auto_generated_{date.today().isoformat()}_{user.id}"
     if plan is None and candidates and not st.session_state.get(auto_key):
         st.session_state[auto_key] = True
         try:
@@ -117,6 +120,7 @@ def _render_default_api_and_daily_ai_review() -> None:
                     api_key=api_key,
                     model=active_model,
                     max_output_tokens=int(max_tokens),
+                    user_id=user.id,
                 )
             st.success("今日轻量自测计划已生成。")
         except (AIServiceError, ValueError, RuntimeError) as exc:
@@ -131,6 +135,7 @@ def _render_default_api_and_daily_ai_review() -> None:
                     api_key=api_key,
                     model=active_model,
                     max_output_tokens=int(max_tokens),
+                    user_id=user.id,
                 )
             st.success("今日自测计划已更新。")
             st.rerun()
@@ -138,7 +143,7 @@ def _render_default_api_and_daily_ai_review() -> None:
             st.error(f"生成失败：{exc}")
     controls[1].caption("建议每天 3-5 题，不把复习变成负担。")
 
-    plan = plan or get_today_ai_review_plan()
+    plan = plan or get_today_ai_review_plan(user_id=user.id)
     if not plan:
         return
 
@@ -227,16 +232,17 @@ def _render_daily_ai_review_evaluation(evaluation: dict) -> None:
 
 
 def render() -> None:
+    user = require_login()
     st.title("首页 Dashboard")
     st.caption("每天先看复习，再登记新学习，最后生成闭卷回忆 Prompt。")
 
-    today_tasks = get_today_review_tasks()
-    low_cards = low_mastery_cards()
-    blockers = recent_blockers()
-    parking = open_parking_questions()
-    links = recent_knowledge_links()
+    today_tasks = get_today_review_tasks(user_id=user.id)
+    low_cards = low_mastery_cards(user_id=user.id)
+    blockers = recent_blockers(user_id=user.id)
+    parking = open_parking_questions(user_id=user.id)
+    links = recent_knowledge_links(user_id=user.id)
     reminder_config = get_daily_reminder_config()
-    review_log = get_today_review_log()
+    review_log = get_today_review_log(user_id=user.id)
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("今日待复习", len(today_tasks))

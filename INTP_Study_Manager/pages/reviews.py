@@ -4,10 +4,12 @@ import pandas as pd
 import streamlit as st
 
 from models import REVIEW_RESULTS
+from services.auth_service import require_login
 from services.review_service import get_all_pending_review_tasks, get_today_review_tasks, mark_review_result
 
 
 def render() -> None:
+    require_login()
     st.title("复习计划")
     st.caption("复习结果会自动调整掌握度；仍然模糊和完全不会会追加复习任务。")
 
@@ -67,4 +69,3 @@ def render() -> None:
 def _task_label(tasks: list[dict], task_id: int) -> str:
     task = next(item for item in tasks if item["id"] == task_id)
     return f"#{task_id} · {task['review_date']} · {task['subject']} · {task['topic']} · {task['review_stage']}"
-

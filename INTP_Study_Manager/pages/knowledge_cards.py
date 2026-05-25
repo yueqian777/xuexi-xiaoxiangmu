@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from db import execute, fetch_all, fetch_one, insert_and_get_id
+from services.auth_service import require_login
 from services.review_service import ensure_initial_review_tasks
 
 RELATION_TYPES = [
@@ -22,10 +23,14 @@ RELATION_TYPES = [
 
 
 def render() -> None:
+    user = require_login()
     st.title("知识点卡片")
     st.caption("每张卡片都按“三层模型”组织：一句话解释、公式 / 逻辑推导、典型题 / 应用。")
 
-    sessions = fetch_all("SELECT id, date, subject, title FROM study_sessions ORDER BY date DESC, id DESC")
+    sessions = fetch_all(
+        "SELECT id, date, subject, title FROM study_sessions WHERE user_id = ? ORDER BY date DESC, id DESC",
+        (user.id,),
+    )
     session_options = [None] + [s["id"] for s in sessions]
 
     with st.form("add_knowledge_card"):
@@ -53,12 +58,13 @@ def render() -> None:
             knowledge_id = insert_and_get_id(
                 """
                 INSERT INTO knowledge_cards (
-                    subject, topic, core_question, one_sentence, logic_or_formula,
+                    user_id, subject, topic, core_question, one_sentence, logic_or_formula,
                     application, mastery, need_review, source_session_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    user.id,
                     subject.strip(),
                     topic.strip(),
                     core_question.strip(),
@@ -71,11 +77,11 @@ def render() -> None:
                 ),
             )
             if need_review:
-                ensure_initial_review_tasks(knowledge_id, date.today())
+                ensure_initial_review_tasks(knowledge_id, date.today(), user_id=user.id)
             st.success("知识点卡片已保存，复习任务已按 1-3-7-14 生成。")
 
     st.divider()
-    cards = fetch_all("SELECT * FROM knowledge_cards ORDER BY created_at DESC, id DESC")
+    cards = fetch_all("SELECT * FROM knowledge_cards WHERE user_id = ? ORDER BY created_at DESC, id DESC", (user.id,))
     st.subheader("知识点列表")
     if not cards:
         st.info("暂无知识点卡片。")
@@ -95,7 +101,7 @@ def render() -> None:
         [c["id"] for c in filtered],
         format_func=lambda item_id: f"#{item_id} - {next(c['topic'] for c in filtered if c['id'] == item_id)}",
     )
-    card = fetch_one("SELECT * FROM knowledge_cards WHERE id = ?", (selected_id,))
+    card = fetch_one("SELECT * FROM knowledge_cards WHERE id = ? AND user_id = ?", (selected_id, user.id))
     if not card:
         return
 
@@ -118,7 +124,7 @@ def render() -> None:
                 UPDATE knowledge_cards
                 SET subject = ?, topic = ?, core_question = ?, one_sentence = ?,
                     logic_or_formula = ?, application = ?, mastery = ?, need_review = ?
-                WHERE id = ?
+                WHERE id = ? AND user_id = ?
                 """,
                 (
                     edit_subject.strip(),
@@ -130,10 +136,11 @@ def render() -> None:
                     edit_mastery,
                     int(edit_need_review),
                     selected_id,
+                    user.id,
                 ),
             )
             if edit_need_review:
-                ensure_initial_review_tasks(selected_id, card["created_at"])
+                ensure_initial_review_tasks(selected_id, card["created_at"], user_id=user.id)
             st.success("知识点已更新。")
             st.rerun()
 
@@ -143,10 +150,10 @@ def render() -> None:
             """
             SELECT review_date, review_stage, status, result
             FROM review_tasks
-            WHERE knowledge_id = ?
+            WHERE knowledge_id = ? AND user_id = ?
             ORDER BY review_date ASC, id ASC
             """,
-            (selected_id,),
+            (selected_id, user.id),
         )
         if tasks:
             st.dataframe(pd.DataFrame(tasks), use_container_width=True, hide_index=True)
@@ -158,10 +165,10 @@ def render() -> None:
             """
             SELECT cause_category, original_question, summary, created_at
             FROM mistakes
-            WHERE knowledge_id = ? OR (subject = ? AND topic = ?)
+            WHERE user_id = ? AND (knowledge_id = ? OR (subject = ? AND topic = ?))
             ORDER BY created_at DESC
             """,
-            (selected_id, card["subject"], card["topic"]),
+            (user.id, selected_id, card["subject"], card["topic"]),
         )
         if mistakes:
             st.dataframe(pd.DataFrame(mistakes), use_container_width=True, hide_index=True)
@@ -174,17 +181,17 @@ def render() -> None:
             SELECT ma.anchor_code, bq.question, bq.answer_summary, bq.understood
             FROM branch_questions bq
             JOIN mainline_anchors ma ON ma.id = bq.anchor_id
-            WHERE bq.question LIKE ? OR bq.answer_summary LIKE ?
+            WHERE bq.user_id = ? AND (bq.question LIKE ? OR bq.answer_summary LIKE ?)
             ORDER BY bq.created_at DESC
             """,
-            (f"%{card['topic']}%", f"%{card['topic']}%"),
+            (user.id, f"%{card['topic']}%", f"%{card['topic']}%"),
         )
         if branches:
             st.dataframe(pd.DataFrame(branches), use_container_width=True, hide_index=True)
         else:
             st.caption("暂无关联插问。")
 
-    _render_knowledge_links(card, cards)
+    _render_knowledge_links(user.id, card, cards)
 
 
 def _session_label(sessions: list[dict], session_id: int) -> str:
@@ -192,7 +199,7 @@ def _session_label(sessions: list[dict], session_id: int) -> str:
     return f"{session['date']} · {session['subject']} · {session['title']}"
 
 
-def _render_knowledge_links(card: dict, cards: list[dict]) -> None:
+def _render_knowledge_links(user_id: int, card: dict, cards: list[dict]) -> None:
     selected_id = int(card["id"])
     candidates = [item for item in cards if int(item["id"]) != selected_id]
 
@@ -232,30 +239,31 @@ def _render_knowledge_links(card: dict, cards: list[dict]) -> None:
                 """
                 SELECT id
                 FROM knowledge_links
-                WHERE source_knowledge_id = ? AND target_knowledge_id = ? AND relation_type = ?
+                WHERE user_id = ? AND source_knowledge_id = ? AND target_knowledge_id = ? AND relation_type = ?
                 """,
-                (selected_id, target_id, relation_type),
+                (user_id, selected_id, target_id, relation_type),
             )
             if existing:
                 execute(
                     """
                     UPDATE knowledge_links
                     SET relation_note = ?, compare_points = ?, created_at = datetime('now', 'localtime')
-                    WHERE id = ?
+                    WHERE id = ? AND user_id = ?
                     """,
-                    (relation_note.strip(), compare_points.strip(), existing["id"]),
+                    (relation_note.strip(), compare_points.strip(), existing["id"], user_id),
                 )
                 st.success("已有同类型链接，已更新说明和对比要点。")
             else:
                 insert_and_get_id(
                     """
                     INSERT INTO knowledge_links (
-                        source_knowledge_id, target_knowledge_id, relation_type,
+                        user_id, source_knowledge_id, target_knowledge_id, relation_type,
                         relation_note, compare_points
                     )
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        user_id,
                         selected_id,
                         target_id,
                         relation_type,
@@ -268,19 +276,19 @@ def _render_knowledge_links(card: dict, cards: list[dict]) -> None:
     else:
         st.info("至少需要两张知识卡片，才能建立知识双链。")
 
-    outgoing = _knowledge_links_for_card(selected_id, direction="outgoing")
-    incoming = _knowledge_links_for_card(selected_id, direction="incoming")
+    outgoing = _knowledge_links_for_card(user_id, selected_id, direction="outgoing")
+    incoming = _knowledge_links_for_card(user_id, selected_id, direction="incoming")
 
     left, right = st.columns(2)
     with left:
         st.markdown("**出链：当前知识点连接到什么**")
-        _render_link_list(outgoing, direction="outgoing")
+        _render_link_list(user_id, outgoing, direction="outgoing")
     with right:
         st.markdown("**入链：哪些知识点连接到当前卡片**")
-        _render_link_list(incoming, direction="incoming")
+        _render_link_list(user_id, incoming, direction="incoming")
 
 
-def _knowledge_links_for_card(card_id: int, *, direction: str) -> list[dict]:
+def _knowledge_links_for_card(user_id: int, card_id: int, *, direction: str) -> list[dict]:
     if direction == "outgoing":
         return fetch_all(
             """
@@ -296,11 +304,11 @@ def _knowledge_links_for_card(card_id: int, *, direction: str) -> list[dict]:
                 kc.core_question AS linked_question,
                 kc.mastery AS linked_mastery
             FROM knowledge_links kl
-            JOIN knowledge_cards kc ON kc.id = kl.target_knowledge_id
-            WHERE kl.source_knowledge_id = ?
+            JOIN knowledge_cards kc ON kc.id = kl.target_knowledge_id AND kc.user_id = kl.user_id
+            WHERE kl.user_id = ? AND kl.source_knowledge_id = ?
             ORDER BY kl.created_at DESC, kl.id DESC
             """,
-            (card_id,),
+            (user_id, card_id),
         )
 
     return fetch_all(
@@ -317,15 +325,15 @@ def _knowledge_links_for_card(card_id: int, *, direction: str) -> list[dict]:
             kc.core_question AS linked_question,
             kc.mastery AS linked_mastery
         FROM knowledge_links kl
-        JOIN knowledge_cards kc ON kc.id = kl.source_knowledge_id
-        WHERE kl.target_knowledge_id = ?
+        JOIN knowledge_cards kc ON kc.id = kl.source_knowledge_id AND kc.user_id = kl.user_id
+        WHERE kl.user_id = ? AND kl.target_knowledge_id = ?
         ORDER BY kl.created_at DESC, kl.id DESC
         """,
-        (card_id,),
+        (user_id, card_id),
     )
 
 
-def _render_link_list(links: list[dict], *, direction: str) -> None:
+def _render_link_list(user_id: int, links: list[dict], *, direction: str) -> None:
     if not links:
         st.caption("暂无知识链接。")
         return
@@ -342,7 +350,7 @@ def _render_link_list(links: list[dict], *, direction: str) -> None:
             if link.get("compare_points"):
                 st.markdown(f"联系 / 对比：\n\n{link['compare_points']}")
             if st.button("删除这条链接", key=f"delete_knowledge_link_{direction}_{link['id']}"):
-                execute("DELETE FROM knowledge_links WHERE id = ?", (link["id"],))
+                execute("DELETE FROM knowledge_links WHERE id = ? AND user_id = ?", (link["id"], user_id))
                 st.success("知识链接已删除。")
                 st.rerun()
 

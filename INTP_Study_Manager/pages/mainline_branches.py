@@ -4,14 +4,16 @@ import pandas as pd
 import streamlit as st
 
 from db import fetch_all, insert_and_get_id
+from services.auth_service import require_login
 from services.prompt_service import render_template
 
 
 def render() -> None:
+    user = require_login()
     st.title("主线与插问")
     st.caption("插问必须绑定主线锚点，处理完后明确回到原主线。")
 
-    sessions = fetch_all("SELECT * FROM study_sessions ORDER BY date DESC, id DESC")
+    sessions = fetch_all("SELECT * FROM study_sessions WHERE user_id = ? ORDER BY date DESC, id DESC", (user.id,))
     if not sessions:
         st.info("请先在“学习登记”创建学习记录，再添加主线锚点。")
         return
@@ -26,8 +28,8 @@ def render() -> None:
     if not session:
         return
     anchors = fetch_all(
-        "SELECT * FROM mainline_anchors WHERE session_id = ? ORDER BY order_index ASC, id ASC",
-        (session_id,),
+        "SELECT * FROM mainline_anchors WHERE user_id = ? AND session_id = ? ORDER BY order_index ASC, id ASC",
+        (user.id, session_id),
     )
     anchor_by_id = {anchor["id"]: anchor for anchor in anchors}
 
@@ -49,10 +51,10 @@ def render() -> None:
             else:
                 insert_and_get_id(
                     """
-                    INSERT INTO mainline_anchors (session_id, anchor_code, title, content, order_index)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO mainline_anchors (user_id, session_id, anchor_code, title, content, order_index)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (session_id, anchor_code.strip(), title.strip(), content.strip(), int(order_index)),
+                    (user.id, session_id, anchor_code.strip(), title.strip(), content.strip(), int(order_index)),
                 )
                 st.success("主线锚点已保存。")
                 st.rerun()
@@ -90,11 +92,12 @@ def render() -> None:
                     insert_and_get_id(
                         """
                         INSERT INTO branch_questions (
-                            session_id, anchor_id, question, answer_summary, understood, need_review
+                            user_id, session_id, anchor_id, question, answer_summary, understood, need_review
                         )
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
+                            user.id,
                             session_id,
                             anchor_id,
                             question.strip(),
@@ -130,8 +133,8 @@ def render() -> None:
     with tab_context:
         st.subheader("完整脉络")
         branches = fetch_all(
-            "SELECT * FROM branch_questions WHERE session_id = ? ORDER BY anchor_id ASC, created_at ASC, id ASC",
-            (session_id,),
+            "SELECT * FROM branch_questions WHERE user_id = ? AND session_id = ? ORDER BY anchor_id ASC, created_at ASC, id ASC",
+            (user.id, session_id),
         )
         branches_by_anchor: dict[int, list[dict]] = {}
         for branch in branches:

@@ -21,6 +21,7 @@ def render_local_secret_unlock(
     model: str,
     target_session_key: str,
     key_prefix: str,
+    widget_session_key: str | None = None,
 ) -> bool:
     candidates = find_local_secret_candidates(provider, model=model)
     if not candidates:
@@ -32,11 +33,11 @@ def render_local_secret_unlock(
 
     vault_data = _unlocked_secret_data()
     if vault_data:
-        if _apply_best_secret(vault_data, candidates, provider, target_session_key):
+        if _apply_best_secret(vault_data, candidates, provider, target_session_key, widget_session_key=widget_session_key):
             st.caption("已自动使用本次已解锁的本地加密 API Key。")
             return True
         decrypted_candidates = _find_decrypted_candidates(vault_data, provider, model)
-        if decrypted_candidates and _apply_best_secret(vault_data, decrypted_candidates, provider, target_session_key):
+        if decrypted_candidates and _apply_best_secret(vault_data, decrypted_candidates, provider, target_session_key, widget_session_key=widget_session_key):
             st.caption("已自动使用本次已解锁的本地加密 API Key。")
             return True
         return False
@@ -52,7 +53,7 @@ def render_local_secret_unlock(
             key=f"{key_prefix}_local_secret_password",
         )
         if st.button("解锁并使用本地 API Key", key=f"{key_prefix}_unlock_local_secret", type="primary"):
-            _unlock_and_apply(master_password, selected_provider_key, target_session_key)
+            _unlock_and_apply(master_password, selected_provider_key, target_session_key, widget_session_key=widget_session_key)
         return True
 
 
@@ -71,7 +72,13 @@ def find_local_secret_candidates(provider: dict[str, Any], *, model: str) -> lis
     return candidates
 
 
-def _unlock_and_apply(master_password: str, provider_key: str, target_session_key: str) -> None:
+def _unlock_and_apply(
+    master_password: str,
+    provider_key: str,
+    target_session_key: str,
+    *,
+    widget_session_key: str | None = None,
+) -> None:
     if not master_password:
         st.error("请输入主密码。")
         return
@@ -84,7 +91,7 @@ def _unlock_and_apply(master_password: str, provider_key: str, target_session_ke
     st.session_state["secret_vault_unlocked"] = True
     st.session_state["secret_vault_data"] = data
     st.session_state["secret_vault_master_password"] = master_password
-    if _apply_secret(data, provider_key, target_session_key):
+    if _apply_secret(data, provider_key, target_session_key, widget_session_key=widget_session_key):
         st.success("已应用本地加密 API Key 到当前会话。")
         st.rerun()
 
@@ -94,6 +101,7 @@ def _apply_secret(
     provider_key: str,
     target_session_key: str,
     *,
+    widget_session_key: str | None = None,
     show_errors: bool = True,
 ) -> bool:
     secret = get_provider_secret(data, provider_key)
@@ -102,6 +110,8 @@ def _apply_secret(
             st.error("密钥库中没有找到这个 Provider 的 API Key。")
         return False
     st.session_state[target_session_key] = secret
+    if widget_session_key:
+        st.session_state[widget_session_key] = secret
     return True
 
 
@@ -110,13 +120,21 @@ def _apply_best_secret(
     candidates: list[dict[str, Any]],
     provider: dict[str, Any],
     target_session_key: str,
+    *,
+    widget_session_key: str | None = None,
 ) -> bool:
     if not candidates:
         return False
     ordered = [_best_candidate(candidates, provider)]
     ordered.extend(item for item in candidates if item is not ordered[0])
     for item in ordered:
-        if _apply_secret(data, str(item["provider_key"]), target_session_key, show_errors=False):
+        if _apply_secret(
+            data,
+            str(item["provider_key"]),
+            target_session_key,
+            widget_session_key=widget_session_key,
+            show_errors=False,
+        ):
             return True
     return False
 

@@ -8,6 +8,7 @@ from datetime import date, datetime, time
 from typing import Any
 
 from db import BASE_DIR, execute, fetch_one, insert_and_get_id
+from services.auth_service import require_login
 
 REMINDER_TASK_NAME = "INTP Study Manager Daily Review"
 REMINDER_SCRIPT = BASE_DIR / "scripts" / "daily_review_reminder.ps1"
@@ -17,8 +18,13 @@ DEFAULT_REMINDER_CONFIG = {
 }
 
 
+def _user_setting_key(key: str, user_id: int) -> str:
+    return f"user:{user_id}:{key}"
+
+
 def get_daily_reminder_config() -> dict[str, Any]:
-    row = fetch_one("SELECT value FROM app_settings WHERE key = ?", ("daily_review_reminder",))
+    user = require_login()
+    row = fetch_one("SELECT value FROM app_settings WHERE key = ?", (_user_setting_key("daily_review_reminder", user.id),))
     if not row:
         return dict(DEFAULT_REMINDER_CONFIG)
     try:
@@ -32,57 +38,62 @@ def get_daily_reminder_config() -> dict[str, Any]:
 
 
 def save_daily_reminder_config(enabled: bool, reminder_time: time | str) -> None:
+    user = require_login()
     config = {
         "enabled": bool(enabled),
         "time": _normalize_time(reminder_time),
     }
     execute(
         """
-        INSERT INTO app_settings (key, value, updated_at)
-        VALUES (?, ?, datetime('now', 'localtime'))
+        INSERT INTO app_settings (key, user_id, value, updated_at)
+        VALUES (?, ?, ?, datetime('now', 'localtime'))
         ON CONFLICT(key) DO UPDATE SET
+            user_id = excluded.user_id,
             value = excluded.value,
             updated_at = excluded.updated_at
         """,
-        ("daily_review_reminder", json.dumps(config, ensure_ascii=False)),
+        (_user_setting_key("daily_review_reminder", user.id), user.id, json.dumps(config, ensure_ascii=False)),
     )
 
 
-def get_today_review_log() -> dict[str, Any] | None:
+def get_today_review_log(*, user_id: int | None = None) -> dict[str, Any] | None:
+    user_id = user_id if user_id is not None else require_login().id
     return fetch_one(
-        "SELECT * FROM daily_review_logs WHERE review_date = ?",
-        (date.today().isoformat(),),
+        "SELECT * FROM daily_review_logs WHERE user_id = ? AND review_date = ?",
+        (user_id, date.today().isoformat()),
     )
 
 
 def mark_today_review_done(notes: str = "") -> int:
+    user = require_login()
     today = date.today().isoformat()
-    existing = fetch_one("SELECT id FROM daily_review_logs WHERE review_date = ?", (today,))
+    existing = fetch_one("SELECT id FROM daily_review_logs WHERE user_id = ? AND review_date = ?", (user.id, today))
     if existing:
         execute(
             """
             UPDATE daily_review_logs
             SET status = '已完成', notes = ?, created_at = datetime('now', 'localtime')
-            WHERE review_date = ?
+            WHERE user_id = ? AND review_date = ?
             """,
-            (notes, today),
+            (notes, user.id, today),
         )
         return int(existing["id"])
     return insert_and_get_id(
         """
-        INSERT INTO daily_review_logs (review_date, status, notes)
-        VALUES (?, '已完成', ?)
+        INSERT INTO daily_review_logs (user_id, review_date, status, notes)
+        VALUES (?, ?, '已完成', ?)
         """,
-        (today, notes),
+        (user.id, today, notes),
     )
 
 
-def is_daily_review_due_now(config: dict[str, Any] | None = None) -> bool:
+def is_daily_review_due_now(config: dict[str, Any] | None = None, *, user_id: int | None = None) -> bool:
+    user_id = user_id if user_id is not None else require_login().id
     config = config or get_daily_reminder_config()
     if not config.get("enabled", True):
         return False
     reminder_time = datetime.strptime(config["time"], "%H:%M").time()
-    return datetime.now().time() >= reminder_time and get_today_review_log() is None
+    return datetime.now().time() >= reminder_time and get_today_review_log(user_id=user_id) is None
 
 
 def install_windows_daily_review_task(reminder_time: time | str) -> tuple[bool, str]:
@@ -199,7 +210,7 @@ $result | ConvertTo-Json -Compress
 
 
 def _format_windows_task_status(output: str) -> str:
-    output = output.strip().lstrip("\ufeff")
+    output = output.strip().lstrip("﻿")
     try:
         data = json.loads(output)
     except json.JSONDecodeError:
@@ -217,64 +228,3 @@ def _format_windows_task_status(output: str) -> str:
             f"触发器开始时间：{data.get('TriggerStart', '')}",
         ]
     )
-
-
-def _run_command(command: list[str], timeout: int = 30) -> tuple[bool, str]:
-    try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "系统命令执行超时，请稍后在页面中重新查看计划任务状态。"
-    except OSError as exc:
-        return False, str(exc)
-
-    output = "\n".join(
-        part.strip()
-        for part in [
-            _decode_command_output(completed.stdout),
-            _decode_command_output(completed.stderr),
-        ]
-        if part and part.strip()
-    )
-    return completed.returncode == 0, output or "命令执行完成。"
-
-
-def _decode_command_output(data: bytes) -> str:
-    if not data:
-        return ""
-
-    preferred = locale.getpreferredencoding(False)
-    encodings = ["utf-8-sig", "utf-8", preferred, "mbcs", "gbk", "cp936"]
-    tried: set[str] = set()
-    for encoding in encodings:
-        if not encoding or encoding in tried:
-            continue
-        tried.add(encoding)
-        try:
-            return data.decode(encoding)
-        except (LookupError, UnicodeDecodeError):
-            continue
-    return data.decode(preferred or "utf-8", errors="replace")
-
-
-def _looks_like_missing_task(output: str) -> bool:
-    normalized = output.lower()
-    return any(
-        marker in normalized
-        for marker in [
-            "cannot find the file specified",
-            "找不到指定的文件",
-            "任务不存在",
-            "does not exist",
-            "no msft_scheduledtask objects found",
-            "no scheduled task was found",
-        ]
-    )
-
-
-def _is_windows() -> bool:
-    return platform.system().lower() == "windows"

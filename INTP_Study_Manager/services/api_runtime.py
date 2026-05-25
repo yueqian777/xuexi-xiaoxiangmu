@@ -7,8 +7,13 @@ import streamlit as st
 
 from db import execute, fetch_one
 from services.ai_service import DEFAULT_MODEL
+from services.auth_service import require_login
 
 DEFAULT_API_SETTING_KEY = "default_api_config"
+
+
+def _user_setting_key(key: str, user_id: int) -> str:
+    return f"user:{user_id}:{key}"
 
 
 def provider_model_state_key(provider_key: str) -> str:
@@ -31,7 +36,8 @@ def set_active_provider(provider_key: str, model: str) -> None:
 
 
 def get_default_api_config() -> dict[str, Any]:
-    row = fetch_one("SELECT value FROM app_settings WHERE key = ?", (DEFAULT_API_SETTING_KEY,))
+    user = require_login()
+    row = fetch_one("SELECT value FROM app_settings WHERE key = ?", (_user_setting_key(DEFAULT_API_SETTING_KEY, user.id),))
     if not row:
         return {}
     try:
@@ -42,19 +48,21 @@ def get_default_api_config() -> dict[str, Any]:
 
 
 def save_default_api_config(provider_key: str, model: str) -> None:
+    user = require_login()
     payload = json.dumps(
         {"provider_key": provider_key, "model": model.strip() or DEFAULT_MODEL},
         ensure_ascii=False,
     )
     execute(
         """
-        INSERT INTO app_settings (key, value, updated_at)
-        VALUES (?, ?, datetime('now', 'localtime'))
+        INSERT INTO app_settings (key, user_id, value, updated_at)
+        VALUES (?, ?, ?, datetime('now', 'localtime'))
         ON CONFLICT(key) DO UPDATE SET
+            user_id = excluded.user_id,
             value = excluded.value,
             updated_at = excluded.updated_at
         """,
-        (DEFAULT_API_SETTING_KEY, payload),
+        (_user_setting_key(DEFAULT_API_SETTING_KEY, user.id), user.id, payload),
     )
 
 

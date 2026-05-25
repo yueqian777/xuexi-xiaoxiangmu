@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from db import execute, execute_many, fetch_all
+from services.auth_service import require_login
 
 DECK_STATUSES = ["使用中", "归档", "暂停", "待整理"]
 QUESTION_STATUSES = ["未整理", "待追问", "已解决", "待复习", "归档"]
@@ -11,19 +12,20 @@ QUESTION_CATEGORIES = ["概念卡点", "公式推导", "应用题", "反例", "�
 
 
 def render() -> None:
+    user = require_login()
     st.title("PPT 与插问管理")
     st.caption("用于管理 PPT/PDF 资料和侧边插问：分类、排序、状态标记、删除。")
 
     tab_decks, tab_questions = st.tabs(["PPT / PDF 资料", "插问记录"])
     with tab_decks:
-        _render_deck_management()
+        _render_deck_management(user.id)
     with tab_questions:
-        _render_question_management()
+        _render_question_management(user.id)
 
 
-def _render_deck_management() -> None:
+def _render_deck_management(user_id: int) -> None:
     st.subheader("PPT / PDF 资料管理")
-    decks = _fetch_decks()
+    decks = _fetch_decks(user_id)
     if not decks:
         st.info("暂无 PPT/PDF 资料。")
         return
@@ -92,7 +94,7 @@ def _render_deck_management() -> None:
             """
             UPDATE ppt_decks
             SET sort_order = ?, status = ?, category = ?, subject = ?, title = ?
-            WHERE id = ?
+            WHERE id = ? AND user_id = ?
             """,
             [
                 (
@@ -102,6 +104,7 @@ def _render_deck_management() -> None:
                     str(row["subject"] or "").strip(),
                     str(row["title"] or "").strip(),
                     int(row["id"]),
+                    user_id,
                 )
                 for _, row in edited.iterrows()
             ],
@@ -110,12 +113,12 @@ def _render_deck_management() -> None:
         st.rerun()
 
     st.divider()
-    _render_delete_deck(visible)
+    _render_delete_deck(user_id, visible)
 
 
-def _render_question_management() -> None:
+def _render_question_management(user_id: int) -> None:
     st.subheader("插问记录管理")
-    decks = _fetch_decks()
+    decks = _fetch_decks(user_id)
     if not decks:
         st.info("暂无 PPT/PDF 资料。")
         return
@@ -127,8 +130,8 @@ def _render_question_management() -> None:
         format_func=lambda item_id: _deck_label(deck_options[item_id]),
         key="question_manage_deck",
     )
-    slides = _fetch_slides(deck_id)
-    questions = _fetch_questions(deck_id)
+    slides = _fetch_slides(user_id, deck_id)
+    questions = _fetch_questions(user_id, deck_id)
     if not questions:
         st.info("这份资料还没有插问记录。")
         return
@@ -205,7 +208,7 @@ def _render_question_management() -> None:
             """
             UPDATE slide_questions
             SET sort_order = ?, status = ?, category = ?
-            WHERE id = ?
+            WHERE id = ? AND user_id = ?
             """,
             [
                 (
@@ -213,6 +216,7 @@ def _render_question_management() -> None:
                     str(row["status"] or "未整理"),
                     str(row["category"] or "").strip(),
                     int(row["id"]),
+                    user_id,
                 )
                 for _, row in edited.iterrows()
             ],
@@ -221,10 +225,10 @@ def _render_question_management() -> None:
         st.rerun()
 
     st.divider()
-    _render_question_detail_and_delete(visible, slides)
+    _render_question_detail_and_delete(user_id, visible, slides)
 
 
-def _render_delete_deck(decks: list[dict]) -> None:
+def _render_delete_deck(user_id: int, decks: list[dict]) -> None:
     st.subheader("删除 PPT / PDF 资料")
     st.warning("删除资料会同时删除该资料下的页面、逐页讲解和插问记录。上传文件和页面图片默认保留在本地 data 目录。")
     deck_options = {deck["id"]: deck for deck in decks}
@@ -236,12 +240,12 @@ def _render_delete_deck(decks: list[dict]) -> None:
     )
     confirm = st.text_input("输入 DELETE 确认删除", key="delete_deck_confirm")
     if st.button("删除这份资料", disabled=confirm != "DELETE", key="delete_deck_button"):
-        execute("DELETE FROM ppt_decks WHERE id = ?", (int(deck_id),))
+        execute("DELETE FROM ppt_decks WHERE id = ? AND user_id = ?", (int(deck_id), user_id))
         st.success("资料已删除。")
         st.rerun()
 
 
-def _render_question_detail_and_delete(questions: list[dict], slides: list[dict]) -> None:
+def _render_question_detail_and_delete(user_id: int, questions: list[dict], slides: list[dict]) -> None:
     st.subheader("查看 / 删除单条插问")
     question_options = {item["id"]: item for item in questions}
     question_id = st.selectbox(
@@ -258,12 +262,12 @@ def _render_question_detail_and_delete(questions: list[dict], slides: list[dict]
         st.markdown(question["answer"])
     confirm = st.text_input("输入 DELETE 确认删除这条插问", key="delete_question_confirm")
     if st.button("删除这条插问", disabled=confirm != "DELETE", key="delete_question_button"):
-        execute("DELETE FROM slide_questions WHERE id = ?", (int(question_id),))
+        execute("DELETE FROM slide_questions WHERE id = ? AND user_id = ?", (int(question_id), user_id))
         st.success("插问已删除。")
         st.rerun()
 
 
-def _fetch_decks() -> list[dict]:
+def _fetch_decks(user_id: int) -> list[dict]:
     return fetch_all(
         """
         SELECT
@@ -273,9 +277,11 @@ def _fetch_decks() -> list[dict]:
         LEFT JOIN (
             SELECT ps.deck_id, COUNT(sq.id) AS question_count
             FROM ppt_slides ps
-            LEFT JOIN slide_questions sq ON sq.slide_id = ps.id
+            LEFT JOIN slide_questions sq ON sq.slide_id = ps.id AND sq.user_id = ps.user_id
+            WHERE ps.user_id = ?
             GROUP BY ps.deck_id
         ) q ON q.deck_id = d.id
+        WHERE d.user_id = ?
         ORDER BY
             CASE d.status
                 WHEN '使用中' THEN 0
@@ -288,23 +294,24 @@ def _fetch_decks() -> list[dict]:
             d.sort_order ASC,
             d.created_at DESC,
             d.id DESC
-        """
+        """,
+        (user_id, user_id),
     )
 
 
-def _fetch_slides(deck_id: int) -> list[dict]:
+def _fetch_slides(user_id: int, deck_id: int) -> list[dict]:
     return fetch_all(
         """
         SELECT id, slide_number, title
         FROM ppt_slides
-        WHERE deck_id = ?
+        WHERE user_id = ? AND deck_id = ?
         ORDER BY slide_number ASC
         """,
-        (deck_id,),
+        (user_id, deck_id),
     )
 
 
-def _fetch_questions(deck_id: int) -> list[dict]:
+def _fetch_questions(user_id: int, deck_id: int) -> list[dict]:
     rows = fetch_all(
         """
         SELECT
@@ -312,11 +319,11 @@ def _fetch_questions(deck_id: int) -> list[dict]:
             ps.slide_number,
             ps.title AS slide_title
         FROM slide_questions sq
-        JOIN ppt_slides ps ON ps.id = sq.slide_id
-        WHERE ps.deck_id = ?
+        JOIN ppt_slides ps ON ps.id = sq.slide_id AND ps.user_id = sq.user_id
+        WHERE sq.user_id = ? AND ps.deck_id = ?
         ORDER BY sq.status ASC, sq.category ASC, sq.sort_order ASC, ps.slide_number ASC, sq.created_at ASC, sq.id ASC
         """,
-        (deck_id,),
+        (user_id, deck_id),
     )
     for row in rows:
         row["question_preview"] = _preview(row["question"], 80)

@@ -5,15 +5,17 @@ import streamlit as st
 
 from db import fetch_all, insert_and_get_id
 from models import ERROR_CAUSE_CATEGORIES
+from services.auth_service import require_login
 from services.review_service import ensure_initial_review_tasks
 from services.stats_service import mistake_cause_counts
 
 
 def render() -> None:
+    user = require_login()
     st.title("错因本")
     st.caption("记录错题不是为了存档，而是为了识别下次要警惕的信号。")
 
-    cards = fetch_all("SELECT id, subject, topic FROM knowledge_cards ORDER BY created_at DESC, id DESC")
+    cards = fetch_all("SELECT id, subject, topic FROM knowledge_cards WHERE user_id = ? ORDER BY created_at DESC, id DESC", (user.id,))
     card_options = [None] + [c["id"] for c in cards]
 
     with st.form("add_mistake"):
@@ -46,12 +48,13 @@ def render() -> None:
             insert_and_get_id(
                 """
                 INSERT INTO mistakes (
-                    subject, topic, knowledge_id, original_question, my_wrong_answer,
+                    user_id, subject, topic, knowledge_id, original_question, my_wrong_answer,
                     correct_idea, cause_category, warning_signal, summary, add_to_review
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    user.id,
                     subject.strip(),
                     topic.strip(),
                     knowledge_id,
@@ -65,11 +68,11 @@ def render() -> None:
                 ),
             )
             if add_to_review and knowledge_id is not None:
-                ensure_initial_review_tasks(knowledge_id)
+                ensure_initial_review_tasks(knowledge_id, user_id=user.id)
             st.success("错因已保存。")
 
     st.divider()
-    mistakes = fetch_all("SELECT * FROM mistakes ORDER BY created_at DESC, id DESC")
+    mistakes = fetch_all("SELECT * FROM mistakes WHERE user_id = ? ORDER BY created_at DESC, id DESC", (user.id,))
     st.subheader("错因记录")
     if not mistakes:
         st.info("暂无错因记录。")
@@ -87,7 +90,7 @@ def render() -> None:
     )
 
     st.subheader("高频错因统计")
-    counts = mistake_cause_counts(None if selected_subject == "全部" else selected_subject)
+    counts = mistake_cause_counts(None if selected_subject == "全部" else selected_subject, user_id=user.id)
     if counts:
         chart_df = pd.DataFrame(counts).set_index("cause_category")
         st.bar_chart(chart_df)
@@ -98,4 +101,3 @@ def render() -> None:
 def _card_label(cards: list[dict], card_id: int) -> str:
     card = next(item for item in cards if item["id"] == card_id)
     return f"{card['subject']} · {card['topic']}"
-

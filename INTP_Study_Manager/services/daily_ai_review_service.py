@@ -8,6 +8,7 @@ from typing import Any
 from db import execute, fetch_all, fetch_one, insert_and_get_id
 from models import ERROR_CAUSE_CATEGORIES, REVIEW_RESULTS
 from services.ai_service import generate_text
+from services.auth_service import require_login
 from services.mastery_service import apply_review_result, clamp_mastery
 from services.prompt_service import render_template
 from services.review_service import mark_review_result
@@ -16,14 +17,16 @@ MAX_DAILY_REVIEW_QUESTIONS = 6
 DEFAULT_DAILY_REVIEW_QUESTIONS = 5
 
 
-def get_today_ai_review_plan() -> dict[str, Any] | None:
+def get_today_ai_review_plan(*, user_id: int | None = None) -> dict[str, Any] | None:
+    user_id = user_id if user_id is not None else require_login().id
     return fetch_one(
-        "SELECT * FROM daily_ai_review_plans WHERE review_date = ?",
-        (date.today().isoformat(),),
+        "SELECT * FROM daily_ai_review_plans WHERE user_id = ? AND review_date = ?",
+        (user_id, date.today().isoformat()),
     )
 
 
-def collect_review_candidates(limit: int = MAX_DAILY_REVIEW_QUESTIONS) -> list[dict[str, Any]]:
+def collect_review_candidates(limit: int = MAX_DAILY_REVIEW_QUESTIONS, *, user_id: int | None = None) -> list[dict[str, Any]]:
+    user_id = user_id if user_id is not None else require_login().id
     today = date.today().isoformat()
     rows = fetch_all(
         """
@@ -61,11 +64,12 @@ def collect_review_candidates(limit: int = MAX_DAILY_REVIEW_QUESTIONS) -> list[d
                 (
                     SELECT m.cause_category
                     FROM mistakes m
-                    WHERE m.knowledge_id = kc.id OR (m.subject = kc.subject AND m.topic = kc.topic)
+                    WHERE m.user_id = kc.user_id AND (m.knowledge_id = kc.id OR (m.subject = kc.subject AND m.topic = kc.topic))
                     ORDER BY m.created_at DESC, m.id DESC
                     LIMIT 1
                 ) AS last_cause
             FROM knowledge_cards kc
+            WHERE kc.user_id = ?
         )
         WHERE task_id IS NOT NULL OR mastery < 70 OR need_review = 1
         ORDER BY
@@ -75,7 +79,7 @@ def collect_review_candidates(limit: int = MAX_DAILY_REVIEW_QUESTIONS) -> list[d
             knowledge_id DESC
         LIMIT ?
         """,
-        (today, today, limit),
+        (today, today, user_id, limit),
     )
     return [_candidate_for_prompt(row) for row in rows]
 
@@ -86,8 +90,10 @@ def generate_today_ai_review_plan(
     api_key: str,
     model: str,
     max_output_tokens: int = 1800,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
-    candidates = collect_review_candidates()
+    user_id = user_id if user_id is not None else require_login().id
+    candidates = collect_review_candidates(user_id=user_id)
     if not candidates:
         raise ValueError("今天没有可生成自测题的知识点。请先创建知识卡片，或等待复习任务到期。")
 
@@ -114,8 +120,9 @@ def generate_today_ai_review_plan(
         plan=plan,
         candidates=candidates,
         status="待回答",
+        user_id=user_id,
     )
-    stored = get_today_ai_review_plan()
+    stored = get_today_ai_review_plan(user_id=user_id)
     if not stored:
         raise RuntimeError("自测计划已生成，但读取失败。")
     return stored
@@ -127,13 +134,16 @@ def regenerate_today_ai_review_plan(
     api_key: str,
     model: str,
     max_output_tokens: int = 1800,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
-    execute("DELETE FROM daily_ai_review_plans WHERE review_date = ?", (date.today().isoformat(),))
+    user_id = user_id if user_id is not None else require_login().id
+    execute("DELETE FROM daily_ai_review_plans WHERE user_id = ? AND review_date = ?", (user_id, date.today().isoformat()))
     return generate_today_ai_review_plan(
         provider_key=provider_key,
         api_key=api_key,
         model=model,
         max_output_tokens=max_output_tokens,
+        user_id=user_id,
     )
 
 
@@ -177,12 +187,13 @@ def evaluate_today_ai_review(
             evaluation_json = ?,
             status = '已批改',
             evaluated_at = datetime('now', 'localtime')
-        WHERE id = ?
+        WHERE id = ? AND user_id = ?
         """,
         (
             json.dumps(normalized_answers, ensure_ascii=False),
             json.dumps(evaluation, ensure_ascii=False),
             plan_row["id"],
+            plan_row.get("user_id", require_login().id),
         ),
     )
     return evaluation
@@ -207,6 +218,7 @@ def answers_payload(plan_row: dict[str, Any]) -> dict[str, str]:
 
 def _save_today_plan(
     *,
+    user_id: int,
     provider_key: str,
     model: str,
     plan: dict[str, Any],
@@ -216,10 +228,10 @@ def _save_today_plan(
     execute(
         """
         INSERT INTO daily_ai_review_plans (
-            review_date, provider_key, model, plan_json, source_snapshot_json, status
+            user_id, review_date, provider_key, model, plan_json, source_snapshot_json, status
         )
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(review_date) DO UPDATE SET
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, review_date) DO UPDATE SET
             provider_key = excluded.provider_key,
             model = excluded.model,
             plan_json = excluded.plan_json,
@@ -231,6 +243,7 @@ def _save_today_plan(
             evaluated_at = ''
         """,
         (
+            user_id,
             date.today().isoformat(),
             provider_key,
             model,
@@ -369,9 +382,12 @@ def _normalize_evaluation_payload(
 
 
 def _apply_evaluation_results(plan: dict[str, Any], evaluation: dict[str, Any]) -> list[dict[str, Any]]:
+    from services.auth_service import require_login
+
+    user = require_login()
     plan_row = fetch_one(
-        "SELECT source_snapshot_json FROM daily_ai_review_plans WHERE review_date = ?",
-        (date.today().isoformat(),),
+        "SELECT source_snapshot_json FROM daily_ai_review_plans WHERE user_id = ? AND review_date = ?",
+        (user.id, date.today().isoformat()),
     )
     source_items = json.loads((plan_row or {}).get("source_snapshot_json") or "[]")
     source_by_knowledge_id = {int(item["knowledge_id"]): item for item in source_items}
@@ -384,21 +400,24 @@ def _apply_evaluation_results(plan: dict[str, Any], evaluation: dict[str, Any]) 
         avg_score = round(sum(int(item["score"]) for item in items) / len(items))
         result = _normalize_result(None, avg_score)
         source = source_by_knowledge_id.get(knowledge_id, {})
-        before = int(fetch_one("SELECT mastery FROM knowledge_cards WHERE id = ?", (knowledge_id,))["mastery"])
+        before_row = fetch_one("SELECT mastery FROM knowledge_cards WHERE id = ? AND user_id = ?", (knowledge_id, user.id))
+        if not before_row:
+            continue
+        before = int(before_row["mastery"])
         task_id = source.get("task_id")
         if task_id:
             mark_review_result(int(task_id), result)
         else:
             after = apply_review_result(before, result)
             execute(
-                "UPDATE knowledge_cards SET mastery = ?, need_review = ? WHERE id = ?",
-                (after, int(after < 70 or result in {"仍然模糊", "完全不会"}), knowledge_id),
+                "UPDATE knowledge_cards SET mastery = ?, need_review = ? WHERE id = ? AND user_id = ?",
+                (after, int(after < 70 or result in {"仍然模糊", "完全不会"}), knowledge_id, user.id),
             )
             if result == "仍然模糊":
-                _create_extra_review(knowledge_id, 2, "AI 追加复习：2 天后")
+                _create_extra_review(knowledge_id, 2, "AI 追加复习：2 天后", user_id=user.id)
             elif result == "完全不会":
-                _create_extra_review(knowledge_id, 1, "AI 重点突破：1 天后")
-        after_row = fetch_one("SELECT mastery FROM knowledge_cards WHERE id = ?", (knowledge_id,))
+                _create_extra_review(knowledge_id, 1, "AI 重点突破：1 天后", user_id=user.id)
+        after_row = fetch_one("SELECT mastery FROM knowledge_cards WHERE id = ? AND user_id = ?", (knowledge_id, user.id))
         after = int(after_row["mastery"]) if after_row else before
         updates.append(
             {
@@ -413,13 +432,13 @@ def _apply_evaluation_results(plan: dict[str, Any], evaluation: dict[str, Any]) 
     return updates
 
 
-def _create_extra_review(knowledge_id: int, days: int, stage: str) -> None:
+def _create_extra_review(knowledge_id: int, days: int, stage: str, *, user_id: int) -> None:
     insert_and_get_id(
         """
-        INSERT INTO review_tasks (knowledge_id, review_date, review_stage)
-        VALUES (?, ?, ?)
+        INSERT INTO review_tasks (user_id, knowledge_id, review_date, review_stage)
+        VALUES (?, ?, ?, ?)
         """,
-        (knowledge_id, (date.today() + timedelta(days=days)).isoformat(), stage),
+        (user_id, knowledge_id, (date.today() + timedelta(days=days)).isoformat(), stage),
     )
 
 

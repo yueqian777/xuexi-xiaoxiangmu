@@ -22,6 +22,7 @@ except ModuleNotFoundError:
     CRYPTOGRAPHY_AVAILABLE = False
 
 from db import DATA_DIR
+from services.auth_service import require_login
 
 SECRET_STORE_PATH = DATA_DIR / "api_keys.enc.json"
 KDF_ITERATIONS = 390_000
@@ -71,10 +72,12 @@ def save_secret_store(master_password: str, data: dict[str, Any]) -> None:
         raise SecretStoreError("请输入主密码。")
     _require_crypto()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    user = require_login()
     salt = os.urandom(16)
     nonce = os.urandom(12)
     key = _derive_key(master_password, salt, KDF_ITERATIONS)
     normalized = {
+        "user_id": user.id,
         "providers": data.get("providers", {}),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -85,6 +88,7 @@ def save_secret_store(master_password: str, data: dict[str, Any]) -> None:
         "algorithm": "AES-256-GCM",
         "kdf": "PBKDF2-HMAC-SHA256",
         "iterations": KDF_ITERATIONS,
+        "user_id": user.id,
         "salt": _b64encode(salt),
         "nonce": _b64encode(nonce),
         "ciphertext": _b64encode(ciphertext),
@@ -100,6 +104,9 @@ def load_secret_public_index() -> list[dict[str, Any]]:
     try:
         payload = json.loads(SECRET_STORE_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return []
+    user = require_login()
+    if int(payload.get("user_id") or 0) not in {0, user.id}:
         return []
     index = payload.get("public_index", {})
     providers = index.get("providers", [])

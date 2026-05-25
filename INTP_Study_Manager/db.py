@@ -37,10 +37,12 @@ def managed_connection() -> Iterator[sqlite3.Connection]:
 def init_db() -> None:
     with managed_connection() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
+        _ensure_auth_tables(conn)
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS study_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 date TEXT NOT NULL,
                 subject TEXT NOT NULL,
                 chapter TEXT DEFAULT '',
@@ -58,6 +60,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS mainline_anchors (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 session_id INTEGER NOT NULL,
                 anchor_code TEXT NOT NULL,
                 title TEXT NOT NULL,
@@ -68,6 +71,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS branch_questions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 session_id INTEGER NOT NULL,
                 anchor_id INTEGER NOT NULL,
                 question TEXT NOT NULL,
@@ -81,6 +85,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS knowledge_cards (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 subject TEXT NOT NULL,
                 topic TEXT NOT NULL,
                 core_question TEXT DEFAULT '',
@@ -96,6 +101,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS knowledge_links (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 source_knowledge_id INTEGER NOT NULL,
                 target_knowledge_id INTEGER NOT NULL,
                 relation_type TEXT NOT NULL DEFAULT '关联',
@@ -109,6 +115,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS mistakes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 subject TEXT NOT NULL,
                 topic TEXT NOT NULL,
                 knowledge_id INTEGER,
@@ -125,6 +132,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS review_tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 knowledge_id INTEGER NOT NULL,
                 review_date TEXT NOT NULL,
                 review_stage TEXT NOT NULL,
@@ -136,6 +144,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS parking_lot (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 subject TEXT DEFAULT '',
                 question TEXT NOT NULL,
                 source TEXT DEFAULT '',
@@ -145,6 +154,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS ppt_decks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 filename TEXT NOT NULL,
                 title TEXT NOT NULL,
                 subject TEXT DEFAULT '',
@@ -158,6 +168,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS ppt_slides (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 deck_id INTEGER NOT NULL,
                 slide_number INTEGER NOT NULL,
                 title TEXT DEFAULT '',
@@ -171,6 +182,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS slide_explanations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 slide_id INTEGER NOT NULL,
                 model TEXT NOT NULL,
                 explanation TEXT NOT NULL,
@@ -180,6 +192,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS slide_questions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 slide_id INTEGER NOT NULL,
                 question TEXT NOT NULL,
                 answer TEXT NOT NULL,
@@ -193,6 +206,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS api_providers (
                 provider_key TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 name TEXT NOT NULL UNIQUE,
                 provider_type TEXT NOT NULL,
                 base_url TEXT DEFAULT '',
@@ -213,21 +227,25 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 value TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
 
             CREATE TABLE IF NOT EXISTS daily_review_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                review_date TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                review_date TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT '已完成',
                 notes TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                UNIQUE(user_id, review_date)
             );
 
             CREATE TABLE IF NOT EXISTS daily_ai_review_plans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                review_date TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                review_date TEXT NOT NULL,
                 provider_key TEXT,
                 model TEXT DEFAULT '',
                 plan_json TEXT NOT NULL DEFAULT '{}',
@@ -237,80 +255,83 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT '待回答',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 evaluated_at TEXT DEFAULT '',
+                UNIQUE(user_id, review_date),
                 FOREIGN KEY (provider_key) REFERENCES api_providers(provider_key) ON DELETE SET NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_study_sessions_date_id
-                ON study_sessions(date DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_study_sessions_subject_date_id
-                ON study_sessions(subject, date DESC, id DESC);
-
-            CREATE INDEX IF NOT EXISTS idx_mainline_anchors_session_order
-                ON mainline_anchors(session_id, order_index ASC, id ASC);
-            CREATE INDEX IF NOT EXISTS idx_branch_questions_anchor_created
-                ON branch_questions(anchor_id, created_at ASC, id ASC);
-            CREATE INDEX IF NOT EXISTS idx_branch_questions_session_anchor
-                ON branch_questions(session_id, anchor_id);
-
-            CREATE INDEX IF NOT EXISTS idx_knowledge_cards_mastery_created
-                ON knowledge_cards(mastery ASC, created_at DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_knowledge_cards_subject_created
-                ON knowledge_cards(subject, created_at DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_knowledge_cards_source_session
-                ON knowledge_cards(source_session_id);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_links_unique_relation
-                ON knowledge_links(source_knowledge_id, target_knowledge_id, relation_type);
-            CREATE INDEX IF NOT EXISTS idx_knowledge_links_source_created
-                ON knowledge_links(source_knowledge_id, created_at DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_knowledge_links_target_created
-                ON knowledge_links(target_knowledge_id, created_at DESC, id DESC);
-
-            CREATE INDEX IF NOT EXISTS idx_mistakes_knowledge_created
-                ON mistakes(knowledge_id, created_at DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_mistakes_subject_topic_created
-                ON mistakes(subject, topic, created_at DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_mistakes_subject_cause
-                ON mistakes(subject, cause_category);
-
-            CREATE INDEX IF NOT EXISTS idx_review_tasks_status_date_id
-                ON review_tasks(status, review_date ASC, id ASC);
-            CREATE INDEX IF NOT EXISTS idx_review_tasks_knowledge_date
-                ON review_tasks(knowledge_id, review_date ASC, id ASC);
-
-            CREATE INDEX IF NOT EXISTS idx_parking_lot_status_created
-                ON parking_lot(status, created_at DESC, id DESC);
-
-            CREATE INDEX IF NOT EXISTS idx_ppt_decks_created
-                ON ppt_decks(created_at DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_slide_explanations_slide_created
-                ON slide_explanations(slide_id, created_at DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_slide_questions_slide_created
-                ON slide_questions(slide_id, created_at DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_daily_ai_review_plans_date
-                ON daily_ai_review_plans(review_date DESC, id DESC);
             """
         )
-        _ensure_column(conn, "ppt_decks", "category", "TEXT DEFAULT ''")
-        _ensure_column(conn, "ppt_decks", "sort_order", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "ppt_decks", "status", "TEXT NOT NULL DEFAULT '使用中'")
-        _ensure_column(conn, "ppt_slides", "image_path", "TEXT DEFAULT ''")
-        _ensure_column(conn, "slide_questions", "category", "TEXT DEFAULT ''")
-        _ensure_column(conn, "slide_questions", "sort_order", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "slide_questions", "status", "TEXT NOT NULL DEFAULT '未整理'")
-        _ensure_column(conn, "api_providers", "sort_order", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "api_providers", "balance_query_enabled", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "api_providers", "balance_query_type", "TEXT NOT NULL DEFAULT 'auto_wallet'")
-        _ensure_column(conn, "api_providers", "balance_query_config_json", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_column(conn, "study_sessions", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "mainline_anchors", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "branch_questions", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "knowledge_cards", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "knowledge_links", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "mistakes", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "review_tasks", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "parking_lot", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "ppt_decks", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "ppt_slides", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "slide_explanations", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "slide_questions", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "api_providers", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "app_settings", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "daily_review_logs", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "daily_ai_review_plans", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_study_sessions_user_date_id
+                ON study_sessions(user_id, date DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_study_sessions_user_subject_date_id
+                ON study_sessions(user_id, subject, date DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_mainline_anchors_user_session_order
+                ON mainline_anchors(user_id, session_id, order_index ASC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_branch_questions_user_anchor_created
+                ON branch_questions(user_id, anchor_id, created_at ASC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_branch_questions_user_session_anchor
+                ON branch_questions(user_id, session_id, anchor_id);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_cards_user_mastery_created
+                ON knowledge_cards(user_id, mastery ASC, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_cards_user_subject_created
+                ON knowledge_cards(user_id, subject, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_cards_user_source_session
+                ON knowledge_cards(user_id, source_session_id);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_links_user_source_created
+                ON knowledge_links(user_id, source_knowledge_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_links_user_target_created
+                ON knowledge_links(user_id, target_knowledge_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_mistakes_user_knowledge_created
+                ON mistakes(user_id, knowledge_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_mistakes_user_subject_topic_created
+                ON mistakes(user_id, subject, topic, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_mistakes_user_subject_cause
+                ON mistakes(user_id, subject, cause_category);
+            CREATE INDEX IF NOT EXISTS idx_review_tasks_user_status_date_id
+                ON review_tasks(user_id, status, review_date ASC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_review_tasks_user_knowledge_date
+                ON review_tasks(user_id, knowledge_id, review_date ASC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_parking_lot_user_status_created
+                ON parking_lot(user_id, status, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_ppt_decks_user_created
+                ON ppt_decks(user_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_slide_explanations_user_slide_created
+                ON slide_explanations(user_id, slide_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_slide_questions_user_slide_created
+                ON slide_questions(user_id, slide_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_daily_ai_review_plans_user_date
+                ON daily_ai_review_plans(user_id, review_date DESC, id DESC);
+            """
+        )
         _migrate_api_provider_identity(conn)
+        _migrate_daily_ai_review_plan_user_scope(conn)
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_ppt_decks_manage
-            ON ppt_decks(status, category, sort_order ASC, created_at DESC, id DESC)
+            ON ppt_decks(user_id, status, category, sort_order ASC, created_at DESC, id DESC)
             """
         )
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_slide_questions_manage
-            ON slide_questions(status, category, sort_order ASC, created_at DESC, id DESC)
+            ON slide_questions(user_id, status, category, sort_order ASC, created_at DESC, id DESC)
             """
         )
         conn.execute("DROP INDEX IF EXISTS idx_api_providers_enabled_id")
@@ -319,21 +340,89 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_api_providers_enabled_order
-            ON api_providers(enabled, sort_order ASC, provider_key ASC)
+            ON api_providers(user_id, enabled, sort_order ASC, provider_key ASC)
             """
         )
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_api_providers_order
-            ON api_providers(sort_order ASC, provider_key ASC)
+            ON api_providers(user_id, sort_order ASC, provider_key ASC)
             """
         )
+        _migrate_default_users(conn)
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _ensure_auth_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS invites (
+            code TEXT PRIMARY KEY,
+            role TEXT NOT NULL DEFAULT 'user',
+            created_by INTEGER,
+            max_uses INTEGER NOT NULL DEFAULT 1,
+            used_count INTEGER NOT NULL DEFAULT 0,
+            expires_at TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+        )
+        """
+    )
+
+
+def _migrate_default_users(conn: sqlite3.Connection) -> None:
+    current_admin = conn.execute("SELECT id FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1").fetchone()
+    if not current_admin:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO users (username, display_name, password_hash, role, is_active)
+            VALUES ('admin', '管理员', '', 'admin', 1)
+            """
+        )
+    defaults = conn.execute("SELECT id FROM users ORDER BY id ASC LIMIT 1").fetchone()
+    if not defaults:
+        return
+    default_user_id = int(defaults["id"])
+    for table in (
+        "study_sessions",
+        "mainline_anchors",
+        "branch_questions",
+        "knowledge_cards",
+        "knowledge_links",
+        "mistakes",
+        "review_tasks",
+        "parking_lot",
+        "ppt_decks",
+        "ppt_slides",
+        "slide_explanations",
+        "slide_questions",
+        "api_providers",
+        "app_settings",
+        "daily_review_logs",
+        "daily_ai_review_plans",
+    ):
+        conn.execute(f"UPDATE {table} SET user_id = COALESCE(NULLIF(user_id, 0), ?)", (default_user_id,))
 
 
 def _migrate_api_provider_identity(conn: sqlite3.Connection) -> None:
@@ -411,6 +500,53 @@ def _migrate_api_provider_identity(conn: sqlite3.Connection) -> None:
     _migrate_default_api_config(conn, old_id_to_key)
     if was_foreign_keys_enabled:
         conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _migrate_daily_ai_review_plan_user_scope(conn: sqlite3.Connection) -> None:
+    indexes = conn.execute("PRAGMA index_list(daily_ai_review_plans)").fetchall()
+    has_composite_unique = False
+    for index in indexes:
+        if not int(index["unique"]):
+            continue
+        cols = [row["name"] for row in conn.execute(f"PRAGMA index_info({index['name']})").fetchall()]
+        if cols == ["user_id", "review_date"]:
+            has_composite_unique = True
+            break
+    if has_composite_unique:
+        return
+
+    rows = conn.execute("SELECT * FROM daily_ai_review_plans ORDER BY id ASC").fetchall()
+    conn.execute("DROP INDEX IF EXISTS idx_daily_ai_review_plans_date")
+    conn.execute("DROP INDEX IF EXISTS idx_daily_ai_review_plans_user_date")
+    conn.execute("ALTER TABLE daily_ai_review_plans RENAME TO daily_ai_review_plans_old_user_scope")
+    conn.execute(_daily_ai_review_plans_schema_sql())
+    conn.executemany(
+        """
+        INSERT INTO daily_ai_review_plans (
+            id, user_id, review_date, provider_key, model, plan_json, source_snapshot_json,
+            answers_json, evaluation_json, status, created_at, evaluated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                row["id"],
+                int(row["user_id"] or 0),
+                row["review_date"],
+                row["provider_key"],
+                row["model"] or "",
+                row["plan_json"] or "{}",
+                row["source_snapshot_json"] or "{}",
+                row["answers_json"] or "{}",
+                row["evaluation_json"] or "",
+                row["status"] or "待回答",
+                row["created_at"] or "",
+                row["evaluated_at"] or "",
+            )
+            for row in rows
+        ),
+    )
+    conn.execute("DROP TABLE daily_ai_review_plans_old_user_scope")
 
 
 def _migrate_daily_ai_provider_identity(conn: sqlite3.Connection, old_id_to_key: dict[int, str]) -> None:
@@ -511,7 +647,8 @@ def _daily_ai_review_plans_schema_sql() -> str:
     return """
     CREATE TABLE daily_ai_review_plans (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        review_date TEXT NOT NULL UNIQUE,
+        user_id INTEGER NOT NULL DEFAULT 0,
+        review_date TEXT NOT NULL,
         provider_key TEXT,
         model TEXT DEFAULT '',
         plan_json TEXT NOT NULL DEFAULT '{}',
@@ -521,6 +658,7 @@ def _daily_ai_review_plans_schema_sql() -> str:
         status TEXT NOT NULL DEFAULT '待回答',
         created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
         evaluated_at TEXT DEFAULT '',
+        UNIQUE(user_id, review_date),
         FOREIGN KEY (provider_key) REFERENCES api_providers(provider_key) ON DELETE SET NULL
     )
     """
