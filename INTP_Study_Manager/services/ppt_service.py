@@ -53,23 +53,25 @@ def _save_deck_records(
     subject: str,
     title: str,
 ) -> int:
+    user = require_login()
     deck_title = title.strip() or saved_path.stem
     with managed_connection() as conn:
         cursor = conn.execute(
             """
-            INSERT INTO ppt_decks (filename, title, subject, file_path, slide_count)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO ppt_decks (user_id, filename, title, subject, file_path, slide_count)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (saved_path.name, deck_title, subject.strip(), str(saved_path), len(slides)),
+            (user.id, saved_path.name, deck_title, subject.strip(), str(saved_path), len(slides)),
         )
         deck_id = int(cursor.lastrowid)
         conn.executemany(
             """
-            INSERT INTO ppt_slides (deck_id, slide_number, title, slide_text, notes, image_path)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO ppt_slides (user_id, deck_id, slide_number, title, slide_text, notes, image_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 (
+                    user.id,
                     deck_id,
                     slide["slide_number"],
                     slide["title"],
@@ -368,9 +370,9 @@ def render_missing_page_images(deck: dict, slides: list[dict]) -> dict[int, Path
     path = Path(deck["file_path"])
     image_paths = render_deck_page_images(path)
     execute_many(
-        "UPDATE ppt_slides SET image_path = ? WHERE id = ?",
+        "UPDATE ppt_slides SET image_path = ? WHERE id = ? AND user_id = ?",
         (
-            (str(image_path), slide["id"])
+            (str(image_path), slide["id"], slide["user_id"])
             for slide in slides
             if (image_path := image_paths.get(int(slide["slide_number"])))
         ),
@@ -398,9 +400,9 @@ def refresh_pdf_slide_text(deck: dict, slides: list[dict]) -> int:
         """
         UPDATE ppt_slides
         SET title = ?, slide_text = ?, notes = ?
-        WHERE id = ?
+        WHERE id = ? AND user_id = ?
         """,
-        rows,
+        ((title, slide_text, notes, slide_id, require_login().id) for title, slide_text, notes, slide_id in rows),
     )
     return updated
 
