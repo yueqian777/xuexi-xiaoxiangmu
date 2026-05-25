@@ -7,6 +7,7 @@ import streamlit.components.v1 as components
 
 from db import init_db
 from pages import (
+    admin_panel,
     api_settings,
     dashboard,
     knowledge_cards,
@@ -44,6 +45,10 @@ PAGES = {
     "探索停车场": parking_lot.render,
     "主线与插问": mainline_branches.render,
     "错因本": mistakes.render,
+}
+
+ADMIN_PAGES = {
+    "管理员后台": admin_panel.render,
 }
 
 
@@ -208,12 +213,15 @@ def main() -> None:
     st.sidebar.title("INTP Study Manager")
     st.sidebar.caption("问题驱动 · 闭卷回忆 · 错因分析 · 间隔复习")
     _render_user_bar()
-    page_name = st.sidebar.radio("页面", list(PAGES.keys()))
+    available_pages = dict(PAGES)
+    if user.role == "admin":
+        available_pages.update(ADMIN_PAGES)
+    page_name = st.sidebar.radio("页面", list(available_pages.keys()))
     st.sidebar.divider()
     st.sidebar.markdown("**70% 原则**")
     st.sidebar.caption("掌握度达到 70% 可前进，低于 70% 自动进入重点关注。")
 
-    PAGES[page_name]()
+    available_pages[page_name]()
 
 
 if __name__ == "__main__":

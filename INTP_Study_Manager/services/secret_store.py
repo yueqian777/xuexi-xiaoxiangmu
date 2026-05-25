@@ -28,23 +28,33 @@ SECRET_STORE_PATH = DATA_DIR / "api_keys.enc.json"
 KDF_ITERATIONS = 390_000
 
 
+def _secret_store_path(user_id: int | None = None) -> Any:
+    if user_id is None:
+        try:
+            user_id = require_login().id
+        except Exception:
+            return SECRET_STORE_PATH
+    return DATA_DIR / f"api_keys_user_{int(user_id)}.enc.json"
+
+
 class SecretStoreError(RuntimeError):
     pass
 
 
 def secret_store_exists() -> bool:
-    return SECRET_STORE_PATH.exists()
+    return _secret_store_path().exists()
 
 
 def load_secret_store(master_password: str) -> dict[str, Any]:
-    if not SECRET_STORE_PATH.exists():
+    store_path = _secret_store_path()
+    if not store_path.exists():
         return {"providers": {}}
     if not master_password:
         raise SecretStoreError("请输入主密码。")
     _require_crypto()
 
     try:
-        payload = json.loads(SECRET_STORE_PATH.read_text(encoding="utf-8"))
+        payload = json.loads(store_path.read_text(encoding="utf-8"))
         salt = _b64decode(payload["salt"])
         nonce = _b64decode(payload["nonce"])
         ciphertext = _b64decode(payload["ciphertext"])
@@ -95,14 +105,15 @@ def save_secret_store(master_password: str, data: dict[str, Any]) -> None:
         "public_index": _build_public_index(normalized),
         "updated_at": normalized["updated_at"],
     }
-    SECRET_STORE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _secret_store_path(user.id).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_secret_public_index() -> list[dict[str, Any]]:
-    if not SECRET_STORE_PATH.exists():
+    store_path = _secret_store_path()
+    if not store_path.exists():
         return []
     try:
-        payload = json.loads(SECRET_STORE_PATH.read_text(encoding="utf-8"))
+        payload = json.loads(store_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
     user = require_login()

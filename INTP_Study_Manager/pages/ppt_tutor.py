@@ -24,6 +24,7 @@ from services.ai_service import (
 )
 from services.api_key_ui import render_local_secret_unlock
 from services.api_runtime import ensure_active_provider, ensure_provider_model, provider_model_state_key, set_active_provider
+from services.auth_service import require_login
 from services.ppt_service import import_deck, refresh_pdf_slide_text, render_missing_page_images
 from services.prompt_service import render_template
 from services.study_asset_service import parse_study_assets, save_study_assets
@@ -47,8 +48,11 @@ def _get_synced_reader_component():
     return SYNCED_READER_COMPONENT
 
 
-def _read_last_reader_position() -> dict[str, int]:
-    row = fetch_one("SELECT value FROM app_settings WHERE key = ?", (LAST_READER_POSITION_SETTING_KEY,))
+def _read_last_reader_position(user_id: int) -> dict[str, int]:
+    row = fetch_one(
+        "SELECT value FROM app_settings WHERE key = ?",
+        (f"user:{user_id}:{LAST_READER_POSITION_SETTING_KEY}",),
+    )
     if not row:
         return {}
     try:
@@ -69,7 +73,7 @@ def _read_last_reader_position() -> dict[str, int]:
     return position
 
 
-def _save_last_reader_position(deck_id: int, slide_number: int | None = None) -> None:
+def _save_last_reader_position(user_id: int, deck_id: int, slide_number: int | None = None) -> None:
     try:
         deck_id = int(deck_id)
     except (TypeError, ValueError):
@@ -77,7 +81,7 @@ def _save_last_reader_position(deck_id: int, slide_number: int | None = None) ->
     if deck_id <= 0:
         return
 
-    existing = _read_last_reader_position()
+    existing = _read_last_reader_position(user_id)
     if slide_number is None and existing.get("deck_id") == deck_id:
         slide_number = existing.get("slide_number")
 
@@ -94,13 +98,14 @@ def _save_last_reader_position(deck_id: int, slide_number: int | None = None) ->
 
     execute(
         """
-        INSERT INTO app_settings (key, value, updated_at)
-        VALUES (?, ?, datetime('now', 'localtime'))
+        INSERT INTO app_settings (key, user_id, value, updated_at)
+        VALUES (?, ?, ?, datetime('now', 'localtime'))
         ON CONFLICT(key) DO UPDATE SET
+            user_id = excluded.user_id,
             value = excluded.value,
             updated_at = excluded.updated_at
         """,
-        (LAST_READER_POSITION_SETTING_KEY, json.dumps(payload, ensure_ascii=False)),
+        (f"user:{user_id}:{LAST_READER_POSITION_SETTING_KEY}", user_id, json.dumps(payload, ensure_ascii=False)),
     )
 
 
@@ -123,11 +128,11 @@ def _default_reader_deck_id(deck_ids: list[int], last_position: dict[str, int]) 
     return deck_ids[0]
 
 
-def _remember_reader_deck_selection(deck_id: int, last_position: dict[str, int]) -> None:
+def _remember_reader_deck_selection(user_id: int, deck_id: int, last_position: dict[str, int]) -> None:
     slide_number = None
     if last_position.get("deck_id") == deck_id:
         slide_number = last_position.get("slide_number")
-    _save_last_reader_position(deck_id, slide_number)
+    _save_last_reader_position(user_id, deck_id, slide_number)
 
 
 def _initial_reader_slide_number(deck_id: int, slides: list[dict], last_position: dict[str, int]) -> int:
@@ -141,6 +146,7 @@ def _initial_reader_slide_number(deck_id: int, slides: list[dict], last_position
 
 
 def render() -> None:
+    user = require_login()
     st.title("PPT 逐页讲解")
     st.caption("边看 PPT 边让 GPT 按页讲解；插问单独进入浮窗，不覆盖当前页主线讲解。")
 
@@ -150,6 +156,7 @@ def render() -> None:
         """
         SELECT *
         FROM ppt_decks
+        WHERE user_id = ?
         ORDER BY
             CASE status
                 WHEN '使用中' THEN 0
@@ -162,7 +169,8 @@ def render() -> None:
             sort_order ASC,
             created_at DESC,
             id DESC
-        """
+        """,
+        (user.id,),
     )
     _render_upload_form(expanded=not bool(decks))
 
@@ -172,7 +180,7 @@ def render() -> None:
 
     deck_by_id = {int(deck["id"]): deck for deck in decks}
     deck_ids = list(deck_by_id)
-    last_position = _read_last_reader_position()
+    last_position = _read_last_reader_position(user.id)
     default_deck_id = _default_reader_deck_id(deck_ids, last_position)
     if st.session_state.get(LAST_READER_DECK_STATE_KEY) not in deck_by_id:
         st.session_state[LAST_READER_DECK_STATE_KEY] = default_deck_id
@@ -183,11 +191,11 @@ def render() -> None:
         key=LAST_READER_DECK_STATE_KEY,
     )
     deck_id = int(deck_id)
-    _remember_reader_deck_selection(deck_id, last_position)
+    _remember_reader_deck_selection(user.id, deck_id, last_position)
     deck = deck_by_id.get(deck_id)
     slides = fetch_all(
-        "SELECT * FROM ppt_slides WHERE deck_id = ? ORDER BY slide_number ASC",
-        (deck_id,),
+        "SELECT * FROM ppt_slides WHERE user_id = ? AND deck_id = ? ORDER BY slide_number ASC",
+        (user.id, deck_id),
     )
     if not deck or not slides:
         st.warning("这个 PPT 暂无可用页面，请重新上传。")
@@ -444,10 +452,10 @@ def _handle_synced_reader_action(
             )
         insert_and_get_id(
             """
-            INSERT INTO slide_questions (slide_id, question, answer, model)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO slide_questions (user_id, slide_id, question, answer, model)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (slide["id"], full_question, answer, _active_model_label()),
+            (require_login().id, slide["id"], full_question, answer, _active_model_label()),
         )
     except AIServiceError as exc:
         st.error(str(exc))
@@ -683,6 +691,7 @@ def _render_study_asset_generator_inner(deck: dict) -> None:
 
 
 def _slides_with_latest_explanations(deck_id: int) -> list[dict]:
+    user_id = require_login().id
     return fetch_all(
         """
         SELECT
@@ -695,14 +704,14 @@ def _slides_with_latest_explanations(deck_id: int) -> list[dict]:
             ON se.id = (
                 SELECT id
                 FROM slide_explanations
-                WHERE slide_id = ps.id
+                WHERE user_id = ps.user_id AND slide_id = ps.id
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
             )
-        WHERE ps.deck_id = ?
+        WHERE ps.user_id = ? AND ps.deck_id = ?
         ORDER BY ps.slide_number ASC
         """,
-        (deck_id,),
+        (user_id, deck_id),
     )
 
 
@@ -814,10 +823,10 @@ def _render_main_explanation(deck: dict, slide: dict) -> None:
                 )
             insert_and_get_id(
                 """
-                INSERT INTO slide_explanations (slide_id, model, explanation)
-                VALUES (?, ?, ?)
+                INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
+                VALUES (?, ?, ?, ?)
                 """,
-                (slide["id"], _active_model_label(), explanation),
+                (require_login().id, slide["id"], _active_model_label(), explanation),
             )
             st.success("本页主线讲解已保存。")
             st.rerun()
@@ -905,10 +914,10 @@ def _render_branch_question_form(
             )
         insert_and_get_id(
             """
-            INSERT INTO slide_questions (slide_id, question, answer, model)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO slide_questions (user_id, slide_id, question, answer, model)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (slide["id"], full_question, answer, _active_model_label()),
+            (require_login().id, slide["id"], full_question, answer, _active_model_label()),
         )
         if quote:
             st.session_state.pop(_branch_quote_state_key(quote["deck_id"]), None)
@@ -1105,10 +1114,10 @@ def _generate_whole_deck_explanations(
             )
             insert_and_get_id(
                 """
-                INSERT INTO slide_explanations (slide_id, model, explanation)
-                VALUES (?, ?, ?)
+                INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
+                VALUES (?, ?, ?, ?)
                 """,
-                (slide["id"], active_model_label, explanation),
+                (require_login().id, slide["id"], active_model_label, explanation),
             )
             generated += 1
         except AIServiceError as exc:
@@ -1201,10 +1210,10 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
             )
             insert_and_get_id(
                 """
-                INSERT INTO slide_explanations (slide_id, model, explanation)
-                VALUES (?, ?, ?)
+                INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
+                VALUES (?, ?, ?, ?)
                 """,
-                (slide["id"], task["active_model_label"], explanation),
+                (require_login().id, slide["id"], task["active_model_label"], explanation),
             )
         except AIServiceError:
             pass
@@ -1827,21 +1836,23 @@ def _image_paths_for_generation(
 
 
 def _latest_explanation(slide_id: int) -> dict | None:
+    user_id = require_login().id
     return fetch_one(
         """
         SELECT *
         FROM slide_explanations
-        WHERE slide_id = ?
+        WHERE user_id = ? AND slide_id = ?
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
-        (slide_id,),
+        (user_id, slide_id),
     )
 
 
 def _latest_explanations_by_slide_ids(slide_ids: list[int]) -> dict[int, dict]:
     if not slide_ids:
         return {}
+    user_id = require_login().id
     latest: dict[int, dict] = {}
     chunk_size = 900
     for start in range(0, len(slide_ids), chunk_size):
@@ -1858,11 +1869,11 @@ def _latest_explanations_by_slide_ids(slide_ids: list[int]) -> dict[int, dict]:
                         ORDER BY se.created_at DESC, se.id DESC
                     ) AS rn
                 FROM slide_explanations se
-                WHERE se.slide_id IN ({placeholders})
+                WHERE se.user_id = ? AND se.slide_id IN ({placeholders})
             )
             WHERE rn = 1
             """,
-            tuple(chunk),
+            (user_id, *tuple(chunk)),
         )
         latest.update({int(row["slide_id"]): row for row in rows})
     return latest
@@ -1871,6 +1882,7 @@ def _latest_explanations_by_slide_ids(slide_ids: list[int]) -> dict[int, dict]:
 def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
     if not slide_ids:
         return {}
+    user_id = require_login().id
     grouped: dict[int, list[dict]] = {int(slide_id): [] for slide_id in slide_ids}
     chunk_size = 900
     for start in range(0, len(slide_ids), chunk_size):
@@ -1880,10 +1892,10 @@ def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
             f"""
             SELECT slide_id, question, answer, model, category, status, sort_order, created_at
             FROM slide_questions
-            WHERE slide_id IN ({placeholders})
+            WHERE user_id = ? AND slide_id IN ({placeholders})
             ORDER BY sort_order ASC, created_at ASC, id ASC
             """,
-            tuple(chunk),
+            (user_id, *tuple(chunk)),
         )
         for row in rows:
             grouped.setdefault(int(row["slide_id"]), []).append(

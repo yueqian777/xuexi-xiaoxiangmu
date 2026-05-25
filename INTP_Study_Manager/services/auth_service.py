@@ -110,6 +110,18 @@ def list_users() -> list[dict[str, Any]]:
     )
 
 
+def set_user_active(user_id: int, is_active: bool) -> None:
+    ensure_auth_tables()
+    execute(
+        """
+        UPDATE users
+        SET is_active = ?, updated_at = datetime('now', 'localtime')
+        WHERE id = ?
+        """,
+        (int(bool(is_active)), int(user_id)),
+    )
+
+
 def list_invites() -> list[dict[str, Any]]:
     ensure_auth_tables()
     return fetch_all(
@@ -119,6 +131,18 @@ def list_invites() -> list[dict[str, Any]]:
         LEFT JOIN users u ON u.id = i.created_by
         ORDER BY i.created_at DESC
         """
+    )
+
+
+def set_invite_active(code: str, is_active: bool) -> None:
+    ensure_auth_tables()
+    execute(
+        """
+        UPDATE invites
+        SET is_active = ?, updated_at = datetime('now', 'localtime')
+        WHERE code = ?
+        """,
+        (int(bool(is_active)), code.strip()),
     )
 
 

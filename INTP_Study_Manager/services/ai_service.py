@@ -267,9 +267,8 @@ class AIProvider:
 
 
 def ensure_default_api_providers() -> None:
-    user = require_login()
-    seeded = fetch_one("SELECT value FROM app_settings WHERE key = ?", (_user_setting_key(DEFAULT_PROVIDERS_SEEDED_KEY, user.id),))
-    existing = fetch_one("SELECT COUNT(*) AS count FROM api_providers WHERE user_id = ?", (user.id,))
+    seeded = fetch_one("SELECT value FROM app_settings WHERE key = ?", (DEFAULT_PROVIDERS_SEEDED_KEY,))
+    existing = fetch_one("SELECT COUNT(*) AS count FROM api_providers")
     if seeded and seeded["value"] == "1":
         normalize_api_provider_sort_orders()
         return
@@ -285,7 +284,6 @@ def ensure_default_api_providers() -> None:
         default_rows.append(
             (
                 _dedupe_provider_key(_slugify_provider_key(provider["name"]), used_keys),
-                user.id,
                 provider["name"],
                 provider["provider_type"],
                 provider["base_url"],
@@ -301,10 +299,10 @@ def ensure_default_api_providers() -> None:
     execute_many(
         """
         INSERT OR IGNORE INTO api_providers (
-            provider_key, user_id, name, provider_type, base_url, model, api_key_env, auth_type,
+            provider_key, name, provider_type, base_url, model, api_key_env, auth_type,
             extra_headers_json, request_template_json, response_path, enabled
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         """,
         default_rows,
     )
@@ -313,12 +311,8 @@ def ensure_default_api_providers() -> None:
 
 
 def list_api_providers(enabled_only: bool = False) -> list[dict[str, Any]]:
-    user = require_login()
     normalize_api_provider_sort_orders()
-    where = "WHERE user_id = ?"
-    params: list[Any] = [user.id]
-    if enabled_only:
-        where += " AND enabled = 1"
+    where = "WHERE enabled = 1" if enabled_only else ""
     return fetch_all(
         f"""
         SELECT *
@@ -326,19 +320,16 @@ def list_api_providers(enabled_only: bool = False) -> list[dict[str, Any]]:
         {where}
         ORDER BY sort_order ASC, provider_key ASC
         """
-        , tuple(params)
     )
 
 
 def get_api_provider(provider_key: str | None) -> AIProvider:
-    user = require_login()
     row = None
     if provider_key:
-        row = fetch_one("SELECT * FROM api_providers WHERE provider_key = ? AND user_id = ?", (str(provider_key), user.id))
+        row = fetch_one("SELECT * FROM api_providers WHERE provider_key = ?", (str(provider_key),))
     if row is None:
         row = fetch_one(
-            "SELECT * FROM api_providers WHERE user_id = ? AND enabled = 1 ORDER BY sort_order ASC, provider_key ASC LIMIT 1",
-            (user.id,),
+            "SELECT * FROM api_providers WHERE enabled = 1 ORDER BY sort_order ASC, provider_key ASC LIMIT 1"
         )
     if row is None:
         raise AIServiceError("没有可用 API Provider，请先到\"API 接入设置\"创建。")
@@ -358,7 +349,6 @@ def get_api_provider(provider_key: str | None) -> AIProvider:
 
 
 def save_api_provider(data: dict[str, Any], provider_key: str | None = None) -> str:
-    user = require_login()
     target_order = _positive_int(data.get("sort_order"), default=0)
     values = (
         data["name"].strip(),
@@ -379,9 +369,9 @@ def save_api_provider(data: dict[str, Any], provider_key: str | None = None) -> 
             SET name = ?, provider_type = ?, base_url = ?, model = ?, api_key_env = ?,
                 auth_type = ?, extra_headers_json = ?, request_template_json = ?,
                 response_path = ?, enabled = ?, updated_at = datetime('now', 'localtime')
-            WHERE provider_key = ? AND user_id = ?
+            WHERE provider_key = ?
             """,
-            values + (provider_key, user.id),
+            values + (provider_key,),
         )
         saved_key = provider_key
     else:
@@ -389,12 +379,12 @@ def save_api_provider(data: dict[str, Any], provider_key: str | None = None) -> 
         execute(
             """
             INSERT INTO api_providers (
-                provider_key, user_id, name, provider_type, base_url, model, api_key_env, auth_type,
+                provider_key, name, provider_type, base_url, model, api_key_env, auth_type,
                 extra_headers_json, request_template_json, response_path, enabled
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (saved_key, user.id) + values,
+            (saved_key,) + values,
         )
 
     _place_api_provider(saved_key, target_order or None)
@@ -418,7 +408,7 @@ def save_api_provider_order(updates: Iterable[dict[str, Any]]) -> None:
         """
         UPDATE api_providers
         SET sort_order = ?, enabled = ?, updated_at = datetime('now', 'localtime')
-        WHERE provider_key = ? AND user_id = ?
+        WHERE provider_key = ?
         """,
         (
             (
@@ -452,8 +442,7 @@ def delete_api_providers(provider_keys: Iterable[str]) -> int:
     keys = sorted({str(provider_key) for provider_key in provider_keys if str(provider_key).strip()})
     if not keys:
         return 0
-    user = require_login()
-    execute_many("DELETE FROM api_providers WHERE provider_key = ? AND user_id = ?", ((provider_key, user.id) for provider_key in keys))
+    execute_many("DELETE FROM api_providers WHERE provider_key = ?", ((provider_key,) for provider_key in keys))
     normalize_api_provider_sort_orders()
     return len(keys)
 
@@ -463,18 +452,15 @@ def delete_api_provider(provider_key: str) -> bool:
 
 
 def normalize_api_provider_sort_orders() -> None:
-    user = require_login()
     rows = fetch_all(
         """
         SELECT provider_key, sort_order
         FROM api_providers
-        WHERE user_id = ?
         ORDER BY
             CASE WHEN sort_order <= 0 THEN 1 ELSE 0 END,
             sort_order ASC,
             provider_key ASC
-        """,
-        (user.id,),
+        """
     )
     provider_keys = [str(row["provider_key"]) for row in rows]
     desired = {provider_key: index for index, provider_key in enumerate(provider_keys, start=1)}
@@ -488,13 +474,13 @@ def _place_api_provider(provider_key: str, target_order: int | None) -> None:
         """
         SELECT provider_key
         FROM api_providers
-        WHERE user_id = ? AND provider_key <> ?
+        WHERE provider_key <> ?
         ORDER BY
             CASE WHEN sort_order <= 0 THEN 1 ELSE 0 END,
             sort_order ASC,
             provider_key ASC
         """,
-        (user.id, provider_key),
+        (provider_key,),
     )
     provider_keys = [str(row["provider_key"]) for row in rows]
     if target_order is None:
@@ -510,15 +496,14 @@ def _write_api_provider_order(provider_keys: list[str]) -> None:
         """
         UPDATE api_providers
         SET sort_order = ?, updated_at = datetime('now', 'localtime')
-        WHERE provider_key = ? AND user_id = ?
+        WHERE provider_key = ?
         """,
-        ((index, provider_key, require_login().id) for index, provider_key in enumerate(provider_keys, start=1)),
+        ((index, provider_key) for index, provider_key in enumerate(provider_keys, start=1)),
     )
 
 
 def _new_provider_key(name: str) -> str:
-    user = require_login()
-    existing = {str(row["provider_key"]) for row in fetch_all("SELECT provider_key FROM api_providers WHERE user_id = ?", (user.id,))}
+    existing = {str(row["provider_key"]) for row in fetch_all("SELECT provider_key FROM api_providers")}
     return _dedupe_provider_key(_slugify_provider_key(name), existing)
 
 
@@ -552,17 +537,15 @@ def _positive_int(value: Any, default: int) -> int:
 
 
 def _mark_default_api_providers_seeded() -> None:
-    user = require_login()
     execute(
         """
-        INSERT INTO app_settings (key, user_id, value, updated_at)
-        VALUES (?, ?, '1', datetime('now', 'localtime'))
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, '1', datetime('now', 'localtime'))
         ON CONFLICT(key) DO UPDATE SET
-            user_id = excluded.user_id,
             value = excluded.value,
             updated_at = excluded.updated_at
         """,
-        (_user_setting_key(DEFAULT_PROVIDERS_SEEDED_KEY, user.id), user.id),
+        (DEFAULT_PROVIDERS_SEEDED_KEY,),
     )
 
 
