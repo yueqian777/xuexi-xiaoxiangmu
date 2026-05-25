@@ -246,8 +246,9 @@ def delete_user_and_data(user_id: int) -> None:
 
 def get_user_upload_usage(user_id: int) -> dict[str, int]:
     ensure_auth_tables()
-    user_row = fetch_one("SELECT upload_quota_bytes FROM users WHERE id = ?", (int(user_id),))
-    quota = int((user_row or {}).get("upload_quota_bytes") or 0)
+    user_row = fetch_one("SELECT role, upload_quota_bytes FROM users WHERE id = ?", (int(user_id),))
+    role = str((user_row or {}).get("role") or "user")
+    quota = 0 if role == "admin" else int((user_row or {}).get("upload_quota_bytes") or 0)
     total = 0
     for row in fetch_all("SELECT file_path FROM ppt_decks WHERE user_id = ?", (int(user_id),)):
         path_text = str(row.get("file_path") or "").strip()
@@ -260,6 +261,8 @@ def get_user_upload_usage(user_id: int) -> dict[str, int]:
 
 
 def format_bytes(value: int) -> str:
+    if int(value) == 0:
+        return "无限制"
     units = ["B", "KB", "MB", "GB", "TB"]
     size = float(max(0, int(value)))
     for unit in units:
