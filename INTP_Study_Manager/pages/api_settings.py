@@ -837,19 +837,7 @@ def _render_unlocked_secret_vault(providers: list[dict]) -> None:
     saved = data.get("providers", {})
     st.success(f"密钥库已解锁。当前保存 {len(saved)} 个 Provider Key。")
 
-    rows = []
-    for provider in providers:
-        provider_key = str(provider["provider_key"])
-        secret = get_provider_secret(data, provider_key)
-        rows.append(
-            {
-                "编号": _positive_int(provider.get("sort_order"), 1),
-                "Provider": provider["name"],
-                "模型": provider.get("model") or "",
-                "Key": masked_secret(secret),
-                "更新时间": saved.get(provider_key, {}).get("updated_at", ""),
-            }
-        )
+    rows = _secret_vault_rows(providers, data)
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     provider_key = st.selectbox(
@@ -859,7 +847,8 @@ def _render_unlocked_secret_vault(providers: list[dict]) -> None:
         key="secret_provider_key",
     )
     provider = next(p for p in providers if p["provider_key"] == provider_key)
-    current_secret = get_provider_secret(data, provider_key)
+    current_secret_key, current_secret_item = _saved_secret_for_provider(provider, data)
+    current_secret = str((current_secret_item or {}).get("api_key") or "")
     with st.form("save_provider_secret"):
         api_key = st.text_input(
             "API Key",
@@ -893,7 +882,7 @@ def _render_unlocked_secret_vault(providers: list[dict]) -> None:
         _apply_vault_to_session(providers, data)
         st.success("已应用到当前会话。")
     if cols[1].button("删除当前 Provider 的已保存 Key", disabled=not bool(current_secret)):
-        updated = delete_provider_secret(data, provider_key)
+        updated = delete_provider_secret(data, current_secret_key or provider_key)
         try:
             save_secret_store(st.session_state["secret_vault_master_password"], updated)
         except SecretStoreError as exc:
@@ -912,9 +901,84 @@ def _render_unlocked_secret_vault(providers: list[dict]) -> None:
 def _apply_vault_to_session(providers: list[dict], data: dict) -> None:
     for provider in providers:
         provider_key = str(provider["provider_key"])
-        secret = get_provider_secret(data, provider_key)
+        _, item = _saved_secret_for_provider(provider, data)
+        secret = str((item or {}).get("api_key") or "")
         if secret:
             st.session_state[f"api_key_provider_{provider_key}"] = secret
+
+
+def _secret_vault_rows(providers: list[dict], data: dict) -> list[dict]:
+    rows = []
+    for raw_key, item in (data.get("providers", {}) or {}).items():
+        if not isinstance(item, dict):
+            continue
+        provider = _provider_for_saved_secret(providers, str(raw_key), item)
+        matched = provider is not None
+        rows.append(
+            {
+                "编号": _positive_int(provider.get("sort_order"), len(rows) + 1) if matched else "",
+                "Provider": (provider.get("name") if matched else item.get("provider_name")) or str(raw_key),
+                "模型": (provider.get("model") if matched else item.get("model")) or "",
+                "Key": masked_secret(str(item.get("api_key") or "")),
+                "更新时间": str(item.get("updated_at") or ""),
+                "匹配状态": "已匹配当前 Provider" if matched else "未匹配当前 Provider",
+                "保存标识": str(item.get("provider_key") or raw_key),
+            }
+        )
+    return rows
+
+
+def _provider_for_saved_secret(providers: list[dict], saved_key: str, item: dict) -> dict | None:
+    for provider in providers:
+        provider_key = str(provider.get("provider_key") or "")
+        item_key = str(item.get("provider_key") or saved_key)
+        if saved_key == provider_key or item_key == provider_key:
+            return provider
+    for provider in providers:
+        if _saved_secret_matches_provider(saved_key, item, provider):
+            return provider
+    return None
+
+
+def _saved_secret_for_provider(provider: dict, data: dict) -> tuple[str | None, dict | None]:
+    saved = data.get("providers", {}) or {}
+    provider_key = str(provider.get("provider_key") or "")
+    for raw_key, item in saved.items():
+        if not isinstance(item, dict):
+            continue
+        item_key = str(item.get("provider_key") or raw_key)
+        if str(raw_key) == provider_key or item_key == provider_key:
+            return str(raw_key), item
+    for raw_key, item in saved.items():
+        if isinstance(item, dict) and _saved_secret_matches_provider(str(raw_key), item, provider):
+            return str(raw_key), item
+    return None, None
+
+
+def _saved_secret_matches_provider(saved_key: str, item: dict, provider: dict) -> bool:
+    provider_name = _normalize_match_value(provider.get("name"))
+    item_name = _normalize_match_value(item.get("provider_name"))
+    if item_name and item_name == provider_name:
+        return True
+
+    item_model = _normalize_match_value(item.get("model"))
+    provider_model = _normalize_match_value(provider.get("model"))
+    item_type = _normalize_match_value(item.get("provider_type"))
+    provider_type = _normalize_match_value(provider.get("provider_type"))
+    item_base = _normalize_match_url(item.get("base_url"))
+    provider_base = _normalize_match_url(provider.get("base_url"))
+
+    if item_model and item_model == provider_model and item_type == provider_type and item_base and item_base == provider_base:
+        return True
+    return False
+
+
+def _normalize_match_value(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_match_url(value: object) -> str:
+    return _normalize_match_value(value).rstrip("/")
 
 
 def _lock_secret_vault(providers: list[dict]) -> None:

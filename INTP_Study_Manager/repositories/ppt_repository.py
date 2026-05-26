@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from db import fetch_all, fetch_one, insert_and_get_id
+from db import execute, fetch_all, fetch_one, insert_and_get_id
 
 
 def add_slide_explanation(user_id: int, slide_id: int, model: str, explanation: str) -> int:
@@ -10,6 +10,27 @@ def add_slide_explanation(user_id: int, slide_id: int, model: str, explanation: 
         VALUES (?, ?, ?, ?)
         """,
         (int(user_id), int(slide_id), model, explanation),
+    )
+
+
+def update_slide_learning_metadata(user_id: int, slide_id: int, *, title: str = "", page_type: str = "") -> None:
+    assignments = []
+    params = []
+    if str(title or "").strip():
+        assignments.append("title = ?")
+        params.append(str(title).strip()[:80])
+    if str(page_type or "").strip():
+        assignments.append("page_type = ?")
+        params.append(str(page_type).strip())
+    if not assignments:
+        return
+    execute(
+        f"""
+        UPDATE ppt_slides
+        SET {", ".join(assignments)}
+        WHERE id = ? AND user_id = ?
+        """,
+        (*params, int(slide_id), int(user_id)),
     )
 
 

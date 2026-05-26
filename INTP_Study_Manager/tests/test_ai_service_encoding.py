@@ -1,11 +1,12 @@
 import json
+import importlib.util
 import sys
 import types
 import unittest
 
 from requests import Response
 
-if "streamlit" not in sys.modules:
+if "streamlit" not in sys.modules and importlib.util.find_spec("streamlit") is None:
     streamlit_stub = types.ModuleType("streamlit")
     streamlit_stub.session_state = {}
     sys.modules["streamlit"] = streamlit_stub

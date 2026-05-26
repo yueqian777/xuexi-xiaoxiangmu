@@ -6,9 +6,9 @@ from typing import Any
 
 from db import fetch_all, managed_connection
 
-PAGE_TYPES = ("正文页", "公式页", "例题页", "过渡页", "目录页", "总结页")
+PAGE_TYPES = ("讲解页", "正文页", "公式页", "例题页", "过渡页", "目录页", "总结页")
 LIGHTWEIGHT_PAGE_TYPES = {"过渡页", "目录页", "章节标题页", "标题页"}
-CONTENT_PAGE_TYPES = {"正文页", "公式页", "例题页", "总结页"}
+CONTENT_PAGE_TYPES = {"讲解页", "正文页", "公式页", "例题页", "总结页"}
 
 
 def format_pages_for_structure_prompt(slides: list[dict], *, per_page_limit: int = 420) -> str:
@@ -27,13 +27,14 @@ def format_pages_for_structure_prompt(slides: list[dict], *, per_page_limit: int
     return "\n\n".join(chunks)
 
 
-def parse_document_structure_response(text: str, slide_numbers: list[int]) -> dict[str, Any]:
+def parse_document_structure_response(text: str, slides: list[int] | list[dict]) -> dict[str, Any]:
     payload = _parse_json_payload(text)
-    return normalize_document_structure(payload, slide_numbers)
+    return normalize_document_structure(payload, slides)
 
 
-def normalize_document_structure(payload: dict[str, Any], slide_numbers: list[int]) -> dict[str, Any]:
-    slide_numbers = sorted({int(number) for number in slide_numbers if int(number) > 0})
+def normalize_document_structure(payload: dict[str, Any], slides: list[int] | list[dict]) -> dict[str, Any]:
+    slide_meta = _slide_metadata_map(slides)
+    slide_numbers = sorted(slide_meta)
     if not slide_numbers:
         return {"outline": "", "sections": [], "pages": []}
 
@@ -62,7 +63,11 @@ def normalize_document_structure(payload: dict[str, Any], slide_numbers: list[in
         if isinstance(raw, dict)
     }
 
-    raw_pages = payload.get("pages") if isinstance(payload.get("pages"), list) else []
+    raw_pages = []
+    for key in ("pages", "transition_pages"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            raw_pages.extend(value)
     page_by_number: dict[int, dict[str, Any]] = {}
     for raw in raw_pages:
         if not isinstance(raw, dict):
@@ -85,13 +90,14 @@ def normalize_document_structure(payload: dict[str, Any], slide_numbers: list[in
     for slide_number in slide_numbers:
         page = page_by_number.get(slide_number)
         if page is None:
+            inferred = _infer_page_metadata(slide_meta.get(slide_number, {}), sections)
             page = {
                 "slide_number": slide_number,
                 "section_index": _section_index_for_slide(slide_number, sections),
-                "page_type": "",
-                "one_sentence_summary": "",
-                "slide_role": "",
-                "key_points": "",
+                "page_type": inferred.get("page_type", ""),
+                "one_sentence_summary": inferred.get("one_sentence_summary", ""),
+                "slide_role": inferred.get("slide_role", ""),
+                "key_points": inferred.get("key_points", ""),
             }
         pages.append(page)
 
@@ -200,7 +206,7 @@ def build_slide_context_map(
         slides_by_section.setdefault(resolved_section_by_slide[slide_number], []).append(slide_by_number[slide_number])
     summary_lines_by_section: dict[int, list[tuple[int, str]]] = {}
     formula_lines_by_section: dict[int, list[tuple[int, str]]] = {}
-    formula_page_types = {PAGE_TYPES[1], PAGE_TYPES[2]}
+    formula_page_types = {"公式页", "例题页"}
     for section_index, section_slides in slides_by_section.items():
         summary_lines: list[tuple[int, str]] = []
         formula_lines: list[tuple[int, str]] = []
@@ -260,6 +266,8 @@ def format_slide_context_package(context: dict[str, Any] | None) -> str:
         f"前置概念：{_join_list(section.get('prerequisite_concepts'))}",
         "",
         f"当前页：第 {slide.get('slide_number')} 页，{slide.get('title') or '未命名页面'}",
+        f"当前页标签：{slide.get('page_type') or '未标注'}",
+        f"当前页作用：{slide.get('slide_role') or '暂无'}",
         "",
         "邻近页线索：",
         f"- 上一页：{_page_summary_line(prev_slide) if prev_slide else '无'}",
@@ -316,7 +324,126 @@ def build_lightweight_explanation(deck: dict, slide: dict, context: dict[str, An
         lines.extend(["", "### 后续核心页", *[f"- {item}" for item in next_core_pages]])
     lines.append("")
     lines.append("本页属于目录、章节入口或过渡页，不生成完整逐页讲解；请把注意力放到后续核心页。")
-    return "\n".join(lines)
+    display_title = section.get("title") or title
+    metadata = {
+        "title": _clip_text(str(display_title or title), 80),
+        "page_type": _normalize_page_type(page_type),
+    }
+    return "\n".join(
+        [
+            f"<!-- INTP_SLIDE_META {json.dumps(metadata, ensure_ascii=False)} -->",
+            f"## [[第 {slide_number} 页]] [[标签:{metadata['page_type']}]]：{metadata['title']}",
+            "",
+            *lines[2:],
+        ]
+    )
+
+
+def extract_generated_slide_metadata(explanation: str, *, slide_number: int, fallback_title: str = "") -> dict[str, str]:
+    source = str(explanation or "")
+    metadata = _metadata_from_json_comment(source)
+    title = _text(metadata.get("title")) if metadata else ""
+    page_type = _normalize_optional_page_type(metadata.get("page_type")) if metadata else ""
+
+    if not title:
+        heading = re.search(r"^\s*#{1,3}\s*(.+?)\s*$", source, flags=re.M)
+        if heading:
+            title = _clean_generated_title(heading.group(1), slide_number)
+    if not title:
+        title = _text(fallback_title) or f"第 {slide_number} 页"
+    if not page_type:
+        page_type = _infer_generated_page_type(source)
+
+    return {
+        "title": _clip_text(title, 80),
+        "page_type": page_type or "讲解页",
+    }
+
+
+def _metadata_from_json_comment(source: str) -> dict[str, Any]:
+    match = re.search(r"<!--\s*INTP_SLIDE_META\s*(\{.*?\})\s*-->", source, flags=re.S)
+    if not match:
+        return {}
+    try:
+        value = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _clean_generated_title(value: str, slide_number: int) -> str:
+    text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", str(value or ""))
+    text = re.sub(r"第\s*\d+\s*页", "", text)
+    text = re.sub(r"(讲解页|正文页|公式页|例题页|总结页|过渡页|目录页)", "", text)
+    text = re.sub(r"^[：:·\-\s]+", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" ：:·-")
+    return text or f"第 {slide_number} 页"
+
+
+def _infer_generated_page_type(source: str) -> str:
+    text = str(source or "")
+    if "例题" in text or "题解" in text or "解法" in text:
+        return "例题页"
+    if "$" in text or "\\(" in text or "\\[" in text or "公式" in text or "推导" in text:
+        return "公式页"
+    if "总结" in text or "小结" in text or "复盘" in text:
+        return "总结页"
+    return "讲解页"
+
+
+def _slide_metadata_map(slides: list[int] | list[dict]) -> dict[int, dict[str, Any]]:
+    result: dict[int, dict[str, Any]] = {}
+    for item in slides:
+        if isinstance(item, dict):
+            number = _positive_int(item.get("slide_number"), 0)
+            if number > 0:
+                result[number] = item
+        else:
+            number = _positive_int(item, 0)
+            if number > 0:
+                result[number] = {"slide_number": number}
+    return result
+
+
+def _infer_page_metadata(slide: dict[str, Any], sections: list[dict[str, Any]]) -> dict[str, str]:
+    slide_number = _positive_int(slide.get("slide_number"), 0)
+    text = _text(slide.get("slide_text"))
+    title = _text(slide.get("title"))
+    combined = f"{title}\n{text}".strip()
+    normalized = re.sub(r"\s+", "", combined).lower()
+    line_count = len([line for line in re.split(r"[\r\n]+", combined) if line.strip()])
+    char_count = len(normalized)
+    section_start = any(int(section["start_slide"]) == slide_number for section in sections)
+
+    if char_count <= 140 and ("目录" in normalized or "contents" in normalized):
+        return {
+            "page_type": "目录页",
+            "one_sentence_summary": "本页是目录或章节导航页。",
+            "slide_role": "提示后续内容结构，不展开逐页知识讲解。",
+            "key_points": "关注后续目录块的核心页。",
+        }
+    if char_count <= 120 and line_count <= 4 and section_start and _looks_like_transition_title(combined):
+        return {
+            "page_type": "过渡页",
+            "one_sentence_summary": "本页是目录块入口或章节标题页。",
+            "slide_role": "引出当前目录块主题，不承载独立知识点。",
+            "key_points": "把注意力转到本块后续核心页。",
+        }
+    return {}
+
+
+def _looks_like_transition_title(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(text or "")).lower()
+    patterns = (
+        r"^第[一二三四五六七八九十\d]+[章节篇部分]",
+        r"chapter\d*",
+        r"section\d*",
+        r"^模块\d*",
+        r"^专题",
+        r"^绪论$",
+        r"^引言$",
+    )
+    return any(re.search(pattern, normalized) for pattern in patterns)
 
 
 def _normalize_sections(raw_sections: list[Any], first_slide: int, last_slide: int) -> list[dict[str, Any]]:
@@ -411,6 +538,8 @@ def _normalize_page_type(value: Any) -> str:
         return text
     if text in LIGHTWEIGHT_PAGE_TYPES:
         return "目录页" if text == "目录页" else "过渡页"
+    if "讲解" in text or "正文" in text or "概念" in text:
+        return "讲解页"
     if "公式" in text:
         return "公式页"
     if "例" in text or "题" in text:

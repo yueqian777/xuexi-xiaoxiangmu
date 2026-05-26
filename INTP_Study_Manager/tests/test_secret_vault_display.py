@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from pages import api_settings
 
@@ -78,6 +79,26 @@ class SecretVaultDisplayTest(unittest.TestCase):
         provider = api_settings._provider_for_saved_secret(self.providers, "9", item)
 
         self.assertEqual(provider["provider_key"], "deepseek")
+
+    def test_apply_vault_to_session_uses_matched_legacy_secret(self):
+        data = {
+            "providers": {
+                "2": {
+                    "provider_key": "2",
+                    "provider_name": "Legacy OpenAI",
+                    "model": "gpt-5.5",
+                    "provider_type": "openai_chat",
+                    "base_url": "https://api.openai.com/v1/",
+                    "api_key": "sk-legacy-openai",
+                }
+            }
+        }
+        state = {}
+
+        with patch.object(api_settings.st, "session_state", state):
+            api_settings._apply_vault_to_session(self.providers, data)
+
+        self.assertEqual(state["api_key_provider_openai-chat"], "sk-legacy-openai")
 
 
 if __name__ == "__main__":

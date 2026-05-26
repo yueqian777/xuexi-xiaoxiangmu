@@ -23,6 +23,7 @@ from repositories.ppt_repository import (
     latest_explanation,
     latest_explanations_by_slide_ids,
     questions_by_slide_ids,
+    update_slide_learning_metadata,
 )
 from services.ai_service import (
     AIServiceError,
@@ -39,6 +40,7 @@ from services.auth_service import require_login
 from services.ppt_context_service import (
     build_lightweight_explanation,
     build_slide_context_map,
+    extract_generated_slide_metadata,
     fetch_deck_sections,
     format_pages_for_structure_prompt,
     format_slide_context_package,
@@ -136,6 +138,13 @@ def _remember_reader_deck_selection(user_id: int, deck_id: int, last_position: d
     if last_position.get("deck_id") == deck_id:
         slide_number = last_position.get("slide_number")
     _save_last_reader_position(user_id, deck_id, slide_number, existing=last_position)
+
+
+def _activate_newly_uploaded_deck(deck_id: int, slides: list[dict]) -> None:
+    slide_number = int(slides[0]["slide_number"]) if slides else 1
+    st.session_state[LAST_READER_DECK_STATE_KEY] = int(deck_id)
+    st.session_state[_reader_active_slide_state_key(int(deck_id))] = slide_number
+    _save_last_reader_position(require_login().id, int(deck_id), slide_number)
 
 
 def _initial_reader_slide_number(deck_id: int, slides: list[dict], last_position: dict[str, int]) -> int:
@@ -336,6 +345,7 @@ def _render_upload_form(*, expanded: bool = False) -> None:
             (user.id, deck_id),
         )
         if deck and slides:
+            _activate_newly_uploaded_deck(deck_id, slides)
             _start_document_structure_generation(deck, slides, source="upload")
         st.rerun()
 
@@ -370,81 +380,85 @@ def _render_deck_actions(
 
     _render_document_structure_controls(deck, slides, sections)
 
-    only_missing = cols[1].checkbox("只生成缺失讲解", value=True)
-    input_mode = st.radio(
-        "页面内容发送方式",
-        ("文字优先，缺文字时发原图", "只用识别文字，不发原图", "直接发原图，不使用识别文字"),
-        horizontal=True,
-        help="公式、符号或扫描页识别不准时，可选择直接把原页面图片发给支持视觉输入的 API。",
-        key=f"ppt_generation_input_mode_{deck['id']}",
-    )
-    send_image_when_no_text = input_mode != "只用识别文字，不发原图"
-    force_image_input = input_mode == "直接发原图，不使用识别文字"
-    selected_slides, range_label, force_regenerate = _select_generation_range(slides, sections)
-    enabled_providers = list_api_providers(enabled_only=True)
-    active_provider_key = str(st.session_state.get("active_api_provider_key") or "")
-    provider_by_key = {str(provider["provider_key"]): provider for provider in enabled_providers}
-    default_provider_keys = [active_provider_key] if active_provider_key in provider_by_key else list(provider_by_key)[:1]
-    selected_provider_keys = st.multiselect(
-        "本次生成使用的 API 组",
-        list(provider_by_key),
-        default=default_provider_keys,
-        format_func=lambda item_key: provider_label(provider_by_key[item_key]),
-        help="可同时选择多个已启用 Provider；后台生成会按各 Provider 的并行上限分配页面。",
-        key=f"ppt_generation_provider_group_{deck['id']}",
-    )
-    provider_pool = _build_generation_provider_pool(
-        enabled_providers,
-        selected_provider_keys=selected_provider_keys,
-        active_provider_key=active_provider_key,
-    )
-    adaptive_parallelism = cols[2].checkbox(
-        "自适应最快速度",
-        value=True,
-        help="自动使用当前 API 组的并行上限；如果触发限流，可关闭后手动调低。",
-        key=f"ppt_generation_adaptive_parallelism_{deck['id']}",
-    )
-    parallel_cap = _adaptive_generation_parallelism(provider_pool, max(1, len(selected_slides)))
-    if adaptive_parallelism:
-        parallelism = parallel_cap
-        cols[2].caption(f"自适应并行上限：{parallel_cap} 路。")
-    else:
-        parallelism = cols[2].slider(
-            "并行生成路数",
-            min_value=1,
-            max_value=max(1, parallel_cap),
-            value=min(2, max(1, parallel_cap)),
-            help="后台生成时同时发起的逐页讲解请求数；遇到限流或上游不稳定时调低。",
-            key=f"ppt_generation_parallelism_{deck['id']}",
+    with st.expander("逐页讲解生成配置", expanded=False):
+        only_missing = st.checkbox("只生成缺失讲解", value=True)
+        input_mode = st.radio(
+            "页面内容发送方式",
+            ("文字优先，缺文字时发原图", "只用识别文字，不发原图", "直接发原图，不使用识别文字"),
+            horizontal=True,
+            help="公式、符号或扫描页识别不准时，可选择直接把原页面图片发给支持视觉输入的 API。",
+            key=f"ppt_generation_input_mode_{deck['id']}",
         )
-    cols[2].caption("生成出错的页面会自动重新加入队列，直到本次范围内可生成页面全部成功。")
-    group_supports_image_input = any(provider.get("supports_image_input") for provider in provider_pool)
-    if force_image_input and not group_supports_image_input:
-        st.warning("当前 API 组看起来没有支持图片输入的 Provider。直接发原图模式无法生成；请加入视觉模型后再试。")
-    elif send_image_when_no_text and not group_supports_image_input:
-        st.warning("当前 API 组看起来没有支持图片输入的 Provider。空白扫描页会被跳过；请加入视觉模型，或重新导入可提取文字的 PDF。")
-    cols[2].caption("左侧滚动到某页时，右侧讲解会自动同步滚动到对应页。")
-    st.caption(f"当前生成范围：{range_label}；将逐页调用 API 并保存到右侧讲解区。")
-    run_in_background = st.checkbox("后台运行（切换页面时继续生成）", value=True)
-    if st.button("生成所选范围逐页讲解", type="primary"):
-        if not provider_pool:
-            st.error("请至少选择一个已启用 Provider 作为本次生成的 API 组。")
-            return
-        _generate_whole_deck_explanations(
-            deck,
-            selected_slides,
-            only_missing=only_missing and not force_regenerate,
-            send_image_when_no_text=send_image_when_no_text,
-            force_image_input=force_image_input,
-            supports_image_input=group_supports_image_input,
-            latest_by_slide_id=latest_by_slide_id,
-            all_slides=slides,
-            sections=sections,
-            background=run_in_background,
-            parallelism=parallelism,
-            provider_pool=provider_pool,
-            adaptive_parallelism=adaptive_parallelism,
+        send_image_when_no_text = input_mode != "只用识别文字，不发原图"
+        force_image_input = input_mode == "直接发原图，不使用识别文字"
+        selected_slides, range_label, force_regenerate = _select_generation_range(slides, sections)
+        enabled_providers = list_api_providers(enabled_only=True)
+        active_provider_key = str(st.session_state.get("active_api_provider_key") or "")
+        provider_by_key = {str(provider["provider_key"]): provider for provider in enabled_providers}
+        default_provider_keys = [active_provider_key] if active_provider_key in provider_by_key else list(provider_by_key)[:1]
+        selected_provider_keys = st.multiselect(
+            "本次生成使用的 API 组",
+            list(provider_by_key),
+            default=default_provider_keys,
+            format_func=lambda item_key: provider_label(provider_by_key[item_key]),
+            help="可同时选择多个已启用 Provider；后台生成会按各 Provider 的并行上限分配页面。",
+            key=f"ppt_generation_provider_group_{deck['id']}",
         )
+        provider_pool = _build_generation_provider_pool(
+            enabled_providers,
+            selected_provider_keys=selected_provider_keys,
+            active_provider_key=active_provider_key,
+        )
+        generation_cols = st.columns([1.3, 1.3, 2])
+        adaptive_parallelism = generation_cols[2].checkbox(
+            "自适应最快速度",
+            value=True,
+            help=(
+                "自动使用当前 API 组的并行上限；如果触发限流，可关闭后手动调低。\n\n"
+                "生成出错的页面会自动重新加入队列，直到本次范围内可生成页面全部成功。\n"
+                "左侧滚动到某页时，右侧讲解会自动同步滚动到对应页。"
+            ),
+            key=f"ppt_generation_adaptive_parallelism_{deck['id']}",
+        )
+        parallel_cap = _adaptive_generation_parallelism(provider_pool, max(1, len(selected_slides)))
+        if adaptive_parallelism:
+            parallelism = parallel_cap
+            generation_cols[2].caption(f"自适应并行上限：{parallel_cap} 路。")
+        else:
+            parallelism = generation_cols[2].slider(
+                "并行生成路数",
+                min_value=1,
+                max_value=max(1, parallel_cap),
+                value=min(2, max(1, parallel_cap)),
+                help="后台生成时同时发起的逐页讲解请求数；遇到限流或上游不稳定时调低。",
+                key=f"ppt_generation_parallelism_{deck['id']}",
+            )
+        group_supports_image_input = any(provider.get("supports_image_input") for provider in provider_pool)
+        if force_image_input and not group_supports_image_input:
+            st.warning("当前 API 组看起来没有支持图片输入的 Provider。直接发原图模式无法生成；请加入视觉模型后再试。")
+        elif send_image_when_no_text and not group_supports_image_input:
+            st.warning("当前 API 组看起来没有支持图片输入的 Provider。空白扫描页会被跳过；请加入视觉模型，或重新导入可提取文字的 PDF。")
+        st.caption(f"当前生成范围：{range_label}；将逐页调用 API 并保存到右侧讲解区。")
+        run_in_background = st.checkbox("后台运行（切换页面时继续生成）", value=True)
+        if st.button("生成所选范围逐页讲解", type="primary"):
+            if not provider_pool:
+                st.error("请至少选择一个已启用 Provider 作为本次生成的 API 组。")
+                return
+            _generate_whole_deck_explanations(
+                deck,
+                selected_slides,
+                only_missing=only_missing and not force_regenerate,
+                send_image_when_no_text=send_image_when_no_text,
+                force_image_input=force_image_input,
+                supports_image_input=group_supports_image_input,
+                latest_by_slide_id=latest_by_slide_id,
+                all_slides=slides,
+                sections=sections,
+                background=run_in_background,
+                parallelism=parallelism,
+                provider_pool=provider_pool,
+                adaptive_parallelism=adaptive_parallelism,
+            )
 
 
 def _render_document_structure_controls(deck: dict, slides: list[dict], sections: list[dict]) -> None:
@@ -618,7 +632,7 @@ def _generate_document_structure(
         max_output_tokens=min(max(2048, int(max_tokens or st.session_state.get("active_api_max_tokens", 4096))), 4096),
         reasoning_depth=reasoning_depth if reasoning_depth is not None else st.session_state.get("active_api_reasoning_depth"),
     )
-    structure = parse_document_structure_response(response, [int(slide["slide_number"]) for slide in slides])
+    structure = parse_document_structure_response(response, slides)
     save_deck_structure(int(deck["id"]), structure)
     return structure
 
@@ -1483,7 +1497,7 @@ def _render_main_explanation(deck: dict, slide: dict) -> None:
                     max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
                     reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
                 )
-            add_slide_explanation(require_login().id, slide["id"], _active_model_label(), explanation)
+            _save_generated_explanation(require_login().id, slide, _active_model_label(), explanation)
             st.success("本页主线讲解已保存。")
             st.rerun()
         except AIServiceError as exc:
@@ -1782,8 +1796,7 @@ def _generate_whole_deck_explanations(
     for index, slide in enumerate(targets, start=1):
         context = context_by_slide.get(int(slide["slide_number"]))
         if should_use_lightweight_explanation(slide):
-            explanation = build_lightweight_explanation(deck, slide, context)
-            add_slide_explanation(user_id, slide["id"], f"{active_model_label} / 分块摘要", explanation)
+            _save_lightweight_explanation(user_id, deck, slide, context, f"{active_model_label} / 分块摘要")
             generated += 1
             progress.progress(
                 index / len(targets),
@@ -1827,7 +1840,7 @@ def _generate_whole_deck_explanations(
                 max_output_tokens=max_tokens,
                 reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
             )
-            add_slide_explanation(user_id, slide["id"], active_model_label, explanation)
+            _save_generated_explanation(user_id, slide, active_model_label, explanation)
             generated += 1
         except AIServiceError as exc:
             if image_paths and _is_image_input_error(exc):
@@ -1855,7 +1868,7 @@ def _generate_whole_deck_explanations(
                         max_output_tokens=max_tokens,
                         reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
                     )
-                    add_slide_explanation(user_id, slide["id"], active_model_label, explanation)
+                    _save_generated_explanation(user_id, slide, active_model_label, explanation)
                     generated += 1
                     continue
                 except AIServiceError as retry_exc:
@@ -1985,8 +1998,44 @@ def _slide_generation_result(
     }
 
 
-def _save_generated_explanation(user_id: int, slide_id: int, model: str, explanation: str) -> int:
-    return add_slide_explanation(user_id, int(slide_id), model, explanation)
+def _save_generated_explanation(
+    user_id: int,
+    slide: dict,
+    model: str,
+    explanation: str,
+    *,
+    page_type: str = "",
+    title: str = "",
+) -> int:
+    slide_number = int(slide.get("slide_number") or 0)
+    metadata = extract_generated_slide_metadata(
+        explanation,
+        slide_number=slide_number,
+        fallback_title=title or str(slide.get("title") or ""),
+    )
+    update_slide_learning_metadata(
+        user_id,
+        int(slide["id"]),
+        title=metadata.get("title") or title,
+        page_type=page_type or metadata.get("page_type") or "",
+    )
+    return add_slide_explanation(user_id, int(slide["id"]), model, explanation)
+
+
+def _save_lightweight_explanation(user_id: int, deck: dict, slide: dict, context: dict | None, model: str) -> int:
+    explanation = build_lightweight_explanation(deck, slide, context)
+    section = (context or {}).get("section") or {}
+    page_type = str(slide.get("page_type") or "过渡页")
+    section_title = str(section.get("title") or "").strip()
+    title = section_title if page_type in {"过渡页", "目录页"} and section_title else str(slide.get("title") or "")
+    return _save_generated_explanation(
+        user_id,
+        slide,
+        model,
+        explanation,
+        page_type=page_type,
+        title=title,
+    )
 
 
 def _generation_error_message(slide: dict, exc: Exception) -> str:
@@ -2033,13 +2082,7 @@ def _generate_slide_explanation_from_task(
     related_knowledge = str(task.get("related_knowledge") or "")
 
     if should_use_lightweight_explanation(slide):
-        explanation = build_lightweight_explanation(deck, slide, context)
-        _save_generated_explanation(
-            user_id,
-            int(slide["id"]),
-            f"{active_model_label} / 分块摘要",
-            explanation,
-        )
+        _save_lightweight_explanation(user_id, deck, slide, context, f"{active_model_label} / 分块摘要")
         return _slide_generation_result(slide, "generated", f"第 {slide_number} 页已写入目录块摘要。")
 
     image_paths = _image_paths_for_generation(
@@ -2080,7 +2123,7 @@ def _generate_slide_explanation_from_task(
             max_output_tokens=int(task.get("max_tokens") or 4096),
             reasoning_depth=reasoning_depth,
         )
-        _save_generated_explanation(user_id, int(slide["id"]), active_model_label, explanation)
+        _save_generated_explanation(user_id, slide, active_model_label, explanation)
         return _slide_generation_result(slide, "generated", f"第 {slide_number} 页讲解已生成。")
     except AIServiceError as exc:
         if image_paths and _is_image_input_error(exc):
@@ -2113,7 +2156,7 @@ def _generate_slide_explanation_from_task(
                     max_output_tokens=int(task.get("max_tokens") or 4096),
                     reasoning_depth=reasoning_depth,
                 )
-                _save_generated_explanation(user_id, int(slide["id"]), active_model_label, explanation)
+                _save_generated_explanation(user_id, slide, active_model_label, explanation)
                 return _slide_generation_result(slide, "generated", f"第 {slide_number} 页已回退文本模式生成。")
             except AIServiceError as retry_exc:
                 return _slide_generation_result(

@@ -411,6 +411,36 @@
       justify-content: flex-end;
       gap: 7px;
     }
+    .note-links {
+      display: inline-flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 6px;
+    }
+    .note-bilink {
+      display: inline-flex;
+      align-items: center;
+      min-height: 25px;
+      padding: 4px 8px;
+      border: 1px solid #b9dde6;
+      border-radius: 999px;
+      background: #eef8ff;
+      color: #1f6b86;
+      font-size: 12px;
+      font-weight: 900;
+      line-height: 1.2;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .note-bilink.tag {
+      background: #f3fffb;
+      color: #087b70;
+    }
+    .note-bilink:hover {
+      border-color: var(--accent);
+      background: var(--soft-green);
+    }
     .note-action-button,
     .note-refresh {
       flex: 0 0 auto;
@@ -1905,6 +1935,20 @@
       return `${String(page.model || '未生成')} ${page.createdAt ? '· ' + String(page.createdAt) : ''}`;
     }
 
+    function noteTitleText(page) {
+      const title = String(page.title || '').trim();
+      return title ? `第 ${page.slideNumber} 页：${title}` : `第 ${page.slideNumber} 页讲解`;
+    }
+
+    function renderNoteBiLinks(page) {
+      const pageLabel = `第 ${Number(page.slideNumber)} 页`;
+      const tag = String(page.pageType || '未标注').trim() || '未标注';
+      return `
+        <a class="note-bilink page" href="#page-${Number(page.slideNumber)}" data-page-link="${Number(page.slideNumber)}">[[${escapeHtml(pageLabel)}]]</a>
+        <a class="note-bilink tag" href="#tag-${encodeURIComponent(tag)}" data-tag-link="${escapeHtml(tag)}">[[标签:${escapeHtml(tag)}]]</a>
+      `;
+    }
+
     function applyPendingExplanationOverrides(nextPages) {
       const now = Date.now();
       return nextPages.map(page => {
@@ -2003,6 +2047,15 @@
         }
 
         if (!note) return;
+
+        const title = note.querySelector('.note-header h3');
+        if (title && title.textContent !== noteTitleText(page)) {
+          title.textContent = noteTitleText(page);
+        }
+        const links = note.querySelector('.note-links');
+        if (links) {
+          links.innerHTML = renderNoteBiLinks(page);
+        }
 
         const meta = note.querySelector('.note-meta');
         if (meta && meta.textContent !== noteMetaText(page)) {
@@ -2493,8 +2546,9 @@
       noteRoot.innerHTML = pages.map(page => `
         <article class="note" id="note-${page.slideNumber}" data-page="${page.slideNumber}">
           <div class="note-header">
-            <h3>第 ${page.slideNumber} 页讲解</h3>
+            <h3>${escapeHtml(noteTitleText(page))}</h3>
             <div class="note-actions">
+              <span class="note-links">${renderNoteBiLinks(page)}</span>
               <button type="button" class="note-action-button" data-edit-page="${page.slideNumber}" title="手动修改本页讲解">编辑讲解</button>
               <button type="button" class="note-refresh" data-refresh-page="${page.slideNumber}" title="重新渲染本页 Markdown 和公式">刷新显示</button>
             </div>
