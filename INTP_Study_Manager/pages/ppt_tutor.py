@@ -6,6 +6,7 @@ import json
 import os
 import re
 import threading
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
@@ -47,6 +48,8 @@ LAST_READER_POSITION_SETTING_KEY = "ppt_reader_last_position"
 LAST_READER_DECK_STATE_KEY = "ppt_reader_deck_id"
 READER_ACTIVE_SLIDE_STATE_PREFIX = "ppt_reader_active_slide_"
 READER_IMAGE_WINDOW_RADIUS = 2
+PPT_GENERATION_MAX_PARALLELISM = 4
+PPT_GENERATION_REFRESH_SECONDS = 1.5
 
 
 def _get_synced_reader_component():
@@ -199,7 +202,7 @@ def render() -> None:
     st.caption("边看 PPT 边让 GPT 按页讲解；插问单独进入浮窗，不覆盖当前页主线讲解。")
 
     _resume_interrupted_structure_generation()
-    _resume_interrupted_generation()
+    generation_task = _resume_interrupted_generation()
     _render_api_settings()
     decks = fetch_all(
         """
@@ -256,6 +259,7 @@ def render() -> None:
     st.divider()
     _render_deck_actions(deck, slides, latest_by_slide_id, sections)
     _render_synced_reader(deck, slides, latest_by_slide_id, last_position, sections)
+    _auto_refresh_running_generation(generation_task)
 
     st.divider()
     _render_study_asset_generator(deck, sections, slides, latest_by_slide_id)
@@ -409,7 +413,6 @@ def _render_deck_actions(
     _render_document_structure_controls(deck, slides, sections)
 
     only_missing = cols[1].checkbox("只生成缺失讲解", value=True)
-    cols[2].caption("左侧滚动到某页时，右侧讲解会自动同步滚动到对应页。")
     input_mode = st.radio(
         "页面内容发送方式",
         ("文字优先，缺文字时发原图", "只用识别文字，不发原图", "直接发原图，不使用识别文字"),
@@ -425,6 +428,15 @@ def _render_deck_actions(
     elif send_image_when_no_text and not supports_image_input:
         st.warning("当前 Provider / 模型看起来不支持图片输入。空白扫描页会被跳过；请切换视觉模型，或重新导入可提取文字的 PDF。")
     selected_slides, range_label, force_regenerate = _select_generation_range(slides, sections)
+    parallelism = cols[2].slider(
+        "并行生成路数",
+        min_value=1,
+        max_value=PPT_GENERATION_MAX_PARALLELISM,
+        value=2,
+        help="后台生成时同时发起的逐页讲解请求数；遇到限流或上游不稳定时调低。",
+        key=f"ppt_generation_parallelism_{deck['id']}",
+    )
+    cols[2].caption("左侧滚动到某页时，右侧讲解会自动同步滚动到对应页。")
     st.caption(f"当前生成范围：{range_label}；将逐页调用 API 并保存到右侧讲解区。")
     run_in_background = st.checkbox("后台运行（切换页面时继续生成）", value=True)
     if st.button("生成所选范围逐页讲解", type="primary"):
@@ -439,6 +451,7 @@ def _render_deck_actions(
             all_slides=slides,
             sections=sections,
             background=run_in_background,
+            parallelism=parallelism,
         )
 
 
@@ -1463,10 +1476,10 @@ def _render_question_history(slide_id: int) -> None:
         st.dataframe(pd.DataFrame(questions), use_container_width=True, hide_index=True)
 
 
-def _resume_interrupted_generation() -> None:
+def _resume_interrupted_generation() -> dict | None:
     task = st.session_state.get("ppt_generation_task")
     if not task:
-        return
+        return None
 
     status = task.get("status")
     stop_requested = task.get("stop_requested")
@@ -1478,27 +1491,44 @@ def _resume_interrupted_generation() -> None:
         status = "stopped"
 
     if status == "completed":
-        st.success(f"✅ 生成完成：{task['generated']} 页")
-        return
+        st.success(f"✅ 生成完成：{int(task.get('generated') or 0)} 页")
+        skipped = int(task.get("skipped") or 0)
+        failed = int(task.get("failed") or 0)
+        if skipped or failed:
+            st.caption(f"跳过 {skipped} 页，失败 {failed} 页。")
+        return task
     if status == "stopped":
         st.warning(f"⚠️ 已停止：{task.get('status_text', '生成已中断')}")
-        return
+        return task
     if status != "running":
-        return
+        return task
 
     col1, col2 = st.columns([1, 0.15])
     with col1:
-        st.info("⏳ 后台生成进行中...")
-        st.progress(task["progress"], text=task.get("status_text", "生成中..."))
+        st.info("⏳ 后台生成进行中，已生成页面会自动出现在阅读器。")
+        st.progress(float(task.get("progress") or 0.0), text=task.get("status_text", "生成中..."))
+        st.caption(
+            f"并行路数：{int(task.get('parallelism') or 1)}；"
+            f"已生成 {int(task.get('generated') or 0)} 页，"
+            f"跳过 {int(task.get('skipped') or 0)} 页，"
+            f"失败 {int(task.get('failed') or 0)} 页。"
+        )
     with col2:
         if st.button("停止", key="stop_generation"):
             task["stop_requested"] = True
             st.rerun()
-            return
+            return task
 
-    # 后台任务进行中时，周期性触发重新渲染以更新进度
+    return task
+
+
+def _auto_refresh_running_generation(task: dict | None) -> None:
+    if not task or task.get("status") != "running":
+        return
     import time
-    time.sleep(1.5)
+
+    # 放在阅读器渲染之后刷新，避免生成期间只显示进度条而不显示新入库讲解。
+    time.sleep(PPT_GENERATION_REFRESH_SECONDS)
     st.rerun()
 
 
@@ -1514,6 +1544,7 @@ def _generate_whole_deck_explanations(
     all_slides: list[dict] | None = None,
     sections: list[dict] | None = None,
     background: bool = False,
+    parallelism: int = 1,
 ) -> None:
     targets = []
     for slide in slides:
@@ -1532,6 +1563,7 @@ def _generate_whole_deck_explanations(
     max_tokens = int(st.session_state.get("active_api_max_tokens", 4096))
     active_model_label = _active_model_label()
     total = len(targets)
+    parallelism = _normalize_generation_parallelism(parallelism, total)
     user_id = require_login().id
     context_by_slide = build_slide_context_map(deck, all_slides or slides, sections or [])
     related_knowledge = _related_knowledge_context(deck.get("subject") or "未分类", user_id=user_id)
@@ -1552,11 +1584,19 @@ def _generate_whole_deck_explanations(
             "api_key": api_key,
             "active_model": active_model,
             "max_tokens": max_tokens,
+            "parallelism": parallelism,
             "active_model_label": active_model_label,
             "reasoning_depth": st.session_state.get("active_api_reasoning_depth"),
             "context_by_slide": context_by_slide,
             "related_knowledge": related_knowledge,
             "user_id": user_id,
+            "processed": 0,
+            "skipped": 0,
+            "failed": 0,
+            "completed_slide_numbers": [],
+            "skipped_slide_numbers": [],
+            "failed_slide_numbers": [],
+            "inflight_slide_numbers": [],
             "completed": False,
             "stop_requested": False,
         }
@@ -1687,83 +1727,300 @@ def _generate_whole_deck_explanations(
         st.info("没有生成新讲解。被跳过的页面需要可提取文字、OCR，或支持图片输入的视觉模型。")
 
 
+def _normalize_generation_parallelism(value: object, total: int) -> int:
+    try:
+        requested = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        requested = 1
+    try:
+        target_count = int(total)
+    except (TypeError, ValueError):
+        target_count = 0
+    if requested < 1:
+        requested = 1
+    if target_count <= 0:
+        return 1
+    return min(requested, target_count, PPT_GENERATION_MAX_PARALLELISM)
+
+
+def _slide_generation_result(
+    slide: dict,
+    status: str,
+    message: str = "",
+    *,
+    stop: bool = False,
+) -> dict:
+    return {
+        "slide_id": int(slide.get("id") or 0),
+        "slide_number": int(slide.get("slide_number") or 0),
+        "status": status,
+        "message": message,
+        "stop": stop,
+    }
+
+
+def _save_generated_explanation(user_id: int, slide_id: int, model: str, explanation: str) -> int:
+    return insert_and_get_id(
+        """
+        INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
+        VALUES (?, ?, ?, ?)
+        """,
+        (user_id, int(slide_id), model, explanation),
+    )
+
+
+def _should_stop_generation_after_error(exc: Exception) -> bool:
+    if is_quota_error(exc):
+        return True
+    return isinstance(exc, AIServiceError) and exc.category in {"rate_limit", "model_not_found"}
+
+
+def _generation_error_message(slide: dict, exc: Exception) -> str:
+    slide_number = int(slide.get("slide_number") or 0)
+    if is_quota_error(exc):
+        return f"第 {slide_number} 页生成失败：检测到 API 额度或上游余额不足，已停止后续页面生成。"
+    if isinstance(exc, AIServiceError) and exc.category == "rate_limit":
+        return f"第 {slide_number} 页生成失败：触发频率限制，已停止后续调度；请把并行生成路数调低后重试。"
+    if isinstance(exc, AIServiceError) and exc.category == "model_not_found":
+        return f"第 {slide_number} 页生成失败：当前模型在这个 Provider 下不可用，已停止后续页面生成。"
+    return f"第 {slide_number} 页生成失败：{exc}"
+
+
+def _generate_slide_explanation_from_task(task: dict, deck: dict, slide: dict) -> dict:
+    context_by_slide = task.get("context_by_slide") or {}
+    slide_number = int(slide.get("slide_number") or 0)
+    context = context_by_slide.get(slide_number) or context_by_slide.get(str(slide_number))
+    user_id = int(task.get("user_id") or 0)
+    active_model_label = str(task.get("active_model_label") or "")
+    reasoning_depth = task.get("reasoning_depth")
+    related_knowledge = str(task.get("related_knowledge") or "")
+
+    if should_use_lightweight_explanation(slide):
+        explanation = build_lightweight_explanation(deck, slide, context)
+        _save_generated_explanation(
+            user_id,
+            int(slide["id"]),
+            f"{active_model_label} / 分块摘要",
+            explanation,
+        )
+        return _slide_generation_result(slide, "generated", f"第 {slide_number} 页已写入目录块摘要。")
+
+    image_paths = _image_paths_for_generation(
+        slide,
+        bool(task.get("send_image_when_no_text")),
+        supports_image_input=bool(task.get("supports_image_input")),
+        force_image_input=bool(task.get("force_image_input")),
+    )
+    if task.get("force_image_input") and not image_paths:
+        return _slide_generation_result(
+            slide,
+            "skipped",
+            f"第 {slide_number} 页直接发原图模式没有可用图片，已跳过。",
+        )
+    if _is_text_empty(slide) and not image_paths:
+        return _slide_generation_result(
+            slide,
+            "skipped",
+            f"第 {slide_number} 页没有提取到文字，且当前模型不能读图片，已跳过。",
+        )
+
+    prompt = _build_slide_prompt(
+        deck,
+        slide,
+        image_attached=bool(image_paths),
+        ignore_extracted_text=bool(task.get("force_image_input")),
+        context=context,
+        user_id=user_id,
+        related_knowledge=related_knowledge,
+    )
+    try:
+        explanation = generate_text(
+            prompt,
+            provider_key=task.get("provider_key"),
+            api_key=task.get("api_key"),
+            model_override=task.get("active_model"),
+            image_paths=image_paths,
+            max_output_tokens=int(task.get("max_tokens") or 4096),
+            reasoning_depth=reasoning_depth,
+        )
+        _save_generated_explanation(user_id, int(slide["id"]), active_model_label, explanation)
+        return _slide_generation_result(slide, "generated", f"第 {slide_number} 页讲解已生成。")
+    except AIServiceError as exc:
+        if image_paths and _is_image_input_error(exc):
+            if task.get("force_image_input"):
+                return _slide_generation_result(
+                    slide,
+                    "failed",
+                    f"第 {slide_number} 页：当前模型拒绝图片输入，已停止后续页面生成。",
+                    stop=True,
+                )
+            if _is_text_empty(slide):
+                return _slide_generation_result(
+                    slide,
+                    "skipped",
+                    f"第 {slide_number} 页没有可用文字，文本模式无法生成有效讲解，已跳过。",
+                )
+            try:
+                fallback_prompt = _build_slide_prompt(
+                    deck,
+                    slide,
+                    image_attached=False,
+                    context=context,
+                    user_id=user_id,
+                    related_knowledge=related_knowledge,
+                )
+                explanation = generate_text(
+                    fallback_prompt,
+                    provider_key=task.get("provider_key"),
+                    api_key=task.get("api_key"),
+                    model_override=task.get("active_model"),
+                    max_output_tokens=int(task.get("max_tokens") or 4096),
+                    reasoning_depth=reasoning_depth,
+                )
+                _save_generated_explanation(user_id, int(slide["id"]), active_model_label, explanation)
+                return _slide_generation_result(slide, "generated", f"第 {slide_number} 页已回退文本模式生成。")
+            except AIServiceError as retry_exc:
+                return _slide_generation_result(
+                    slide,
+                    "failed",
+                    _generation_error_message(slide, retry_exc),
+                    stop=_should_stop_generation_after_error(retry_exc),
+                )
+        return _slide_generation_result(
+            slide,
+            "failed",
+            _generation_error_message(slide, exc),
+            stop=_should_stop_generation_after_error(exc),
+        )
+
+
+def _update_generation_task_progress(
+    task: dict,
+    *,
+    processed: int,
+    total: int,
+    generated: int,
+    skipped: int,
+    failed: int,
+    inflight: list[int],
+    message: str = "",
+) -> None:
+    task["processed"] = processed
+    task["generated"] = generated
+    task["skipped"] = skipped
+    task["failed"] = failed
+    task["inflight_slide_numbers"] = inflight
+    task["progress"] = (processed / total) if total else 1.0
+    if message:
+        task["status_text"] = message
+    elif inflight:
+        pages = "、".join(str(number) for number in inflight[:4])
+        suffix = "..." if len(inflight) > 4 else ""
+        task["status_text"] = f"正在并行分析第 {pages}{suffix} 页；已完成 {processed} / {total} 页。"
+    else:
+        task["status_text"] = f"已完成 {processed} / {total} 页。"
+
+
 def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -> None:
-    from services.ai_service import AIServiceError, generate_text
     generated = 0
     skipped = 0
+    failed = 0
+    processed = 0
     total = len(targets)
-    reasoning_depth = task.get("reasoning_depth")
-    context_by_slide = task.get("context_by_slide") or {}
-    related_knowledge = str(task.get("related_knowledge") or "")
-    user_id = int(task.get("user_id") or 0)
+    if total <= 0:
+        task["status"] = "completed"
+        task["progress"] = 1.0
+        task["generated"] = 0
+        task["skipped"] = 0
+        task["failed"] = 0
+        task["status_text"] = "没有需要生成的页面。"
+        return
 
-    for index, slide in enumerate(targets, start=1):
-        if task.get("stop_requested"):
-            task["status"] = "stopped"
-            task["status_text"] = f"已停止：{index - 1} 页"
-            return
-        task["progress"] = (index - 1) / total
-        task["status_text"] = f"正在分析第 {slide['slide_number']} 页 / 共 {total} 页待生成..."
+    parallelism = _normalize_generation_parallelism(task.get("parallelism"), total)
+    task["parallelism"] = parallelism
+    pending = list(targets)
+    future_to_slide = {}
 
-        from pages.ppt_tutor import _is_text_empty, _image_paths_for_generation, _build_slide_prompt
-        context = context_by_slide.get(int(slide["slide_number"]))
-        if should_use_lightweight_explanation(slide):
-            explanation = build_lightweight_explanation(deck, slide, context)
-            insert_and_get_id(
-                """
-                INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
-                VALUES (?, ?, ?, ?)
-                """,
-                (user_id, slide["id"], f"{task['active_model_label']} / 分块摘要", explanation),
+    with ThreadPoolExecutor(max_workers=parallelism) as executor:
+        while pending or future_to_slide:
+            if task.get("stop_requested"):
+                pending.clear()
+
+            while pending and len(future_to_slide) < parallelism and not task.get("stop_requested"):
+                slide = pending.pop(0)
+                future = executor.submit(_generate_slide_explanation_from_task, task, deck, slide)
+                future_to_slide[future] = slide
+
+            inflight = [int(slide.get("slide_number") or 0) for slide in future_to_slide.values()]
+            _update_generation_task_progress(
+                task,
+                processed=processed,
+                total=total,
+                generated=generated,
+                skipped=skipped,
+                failed=failed,
+                inflight=inflight,
             )
-            generated += 1
-            continue
-        image_paths = _image_paths_for_generation(
-            slide,
-            task["send_image_when_no_text"],
-            supports_image_input=task["supports_image_input"],
-            force_image_input=task.get("force_image_input", False),
-        )
-        if task.get("force_image_input") and not image_paths:
-            skipped += 1
-            continue
-        if _is_text_empty(slide) and not image_paths:
-            skipped += 1
-            continue
-        prompt = _build_slide_prompt(
-            deck,
-            slide,
-            image_attached=bool(image_paths),
-            ignore_extracted_text=task.get("force_image_input", False),
-            context=context,
-            user_id=user_id,
-            related_knowledge=related_knowledge,
-        )
-        try:
-            explanation = generate_text(
-                prompt,
-                provider_key=task["provider_key"],
-                api_key=task["api_key"],
-                model_override=task["active_model"],
-                image_paths=image_paths,
-                max_output_tokens=task["max_tokens"],
-                reasoning_depth=reasoning_depth,
-            )
-            insert_and_get_id(
-                """
-                INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
-                VALUES (?, ?, ?, ?)
-                """,
-                (user_id, slide["id"], task["active_model_label"], explanation),
-            )
-            generated += 1
-        except AIServiceError:
-            pass
+            if not future_to_slide:
+                break
+
+            done, _ = wait(future_to_slide, timeout=0.25, return_when=FIRST_COMPLETED)
+            if not done:
+                continue
+
+            for future in done:
+                slide = future_to_slide.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = _slide_generation_result(
+                        slide,
+                        "failed",
+                        f"第 {int(slide.get('slide_number') or 0)} 页生成失败：{exc}",
+                    )
+
+                processed += 1
+                status = result.get("status")
+                slide_number = int(result.get("slide_number") or 0)
+                if status == "generated":
+                    generated += 1
+                    task.setdefault("completed_slide_numbers", []).append(slide_number)
+                elif status == "skipped":
+                    skipped += 1
+                    task.setdefault("skipped_slide_numbers", []).append(slide_number)
+                else:
+                    failed += 1
+                    task.setdefault("failed_slide_numbers", []).append(slide_number)
+
+                if result.get("stop"):
+                    task["stop_requested"] = True
+                    pending.clear()
+
+                _update_generation_task_progress(
+                    task,
+                    processed=processed,
+                    total=total,
+                    generated=generated,
+                    skipped=skipped,
+                    failed=failed,
+                    inflight=[int(s.get("slide_number") or 0) for s in future_to_slide.values()],
+                    message=str(result.get("message") or ""),
+                )
+
+    task["inflight_slide_numbers"] = []
+    task["generated"] = generated
+    task["skipped"] = skipped
+    task["failed"] = failed
+    task["processed"] = processed
+    if task.get("stop_requested"):
+        task["status"] = "stopped"
+        task["progress"] = (processed / total) if total else 1.0
+        task["status_text"] = f"已停止：完成 {processed} / {total} 页，生成 {generated} 页，跳过 {skipped} 页，失败 {failed} 页。"
+        return
 
     task["status"] = "completed"
     task["progress"] = 1.0
-    task["generated"] = generated
-    task["status_text"] = f"生成完成：{task['generated']} 页"
+    task["status_text"] = f"生成完成：{generated} 页，跳过 {skipped} 页，失败 {failed} 页。"
 
 
 def _build_reader_payload(
