@@ -1,6 +1,9 @@
 package com.intp.study.parking.controller;
 
 import com.intp.study.common.error.ResourceNotFoundException;
+import com.intp.study.knowledge.dto.KnowledgeCardDto;
+import com.intp.study.parking.dto.ConvertParkingLotToBranchQuestionRequest;
+import com.intp.study.parking.dto.ConvertParkingLotToKnowledgeRequest;
 import com.intp.study.parking.dto.ParkingLotItemDto;
 import com.intp.study.parking.dto.SaveParkingLotItemRequest;
 import com.intp.study.parking.service.ParkingLotCommandService;
@@ -59,5 +62,28 @@ public class ParkingLotController {
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(@PathVariable long id) {
         parkingLotCommandService.delete(id);
+    }
+
+    @PostMapping("/{id}/resolve")
+    public ParkingLotItemDto resolve(@PathVariable long id) {
+        return parkingLotCommandService.resolve(id);
+    }
+
+    @PostMapping("/{id}/convert-to-knowledge-card")
+    @ResponseStatus(HttpStatus.CREATED)
+    public KnowledgeCardDto convertToKnowledgeCard(
+            @PathVariable long id,
+            @Valid @RequestBody ConvertParkingLotToKnowledgeRequest request
+    ) {
+        return parkingLotCommandService.convertToKnowledgeCard(id, request);
+    }
+
+    @PostMapping("/{id}/convert-to-branch-question")
+    @ResponseStatus(HttpStatus.CREATED)
+    public ParkingLotItemDto convertToBranchQuestion(
+            @PathVariable long id,
+            @RequestBody ConvertParkingLotToBranchQuestionRequest request
+    ) {
+        return parkingLotCommandService.convertToBranchQuestion(id, request);
     }
 }

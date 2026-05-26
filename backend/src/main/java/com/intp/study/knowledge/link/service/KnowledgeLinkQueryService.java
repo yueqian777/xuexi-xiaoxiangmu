@@ -6,6 +6,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Optional;
 
 @Service
 public class KnowledgeLinkQueryService {
@@ -34,6 +35,24 @@ public class KnowledgeLinkQueryService {
                 WHERE kl.user_id = ?
                 ORDER BY kl.created_at DESC, kl.id DESC
                 """, userId);
+    }
+
+    public Optional<KnowledgeLinkDto> findForCurrentUser(long id) {
+        long userId = currentUserProvider.requireUserId();
+        return query("""
+                SELECT kl.id, kl.source_knowledge_id, kl.target_knowledge_id,
+                       kl.relation_type, kl.relation_note, kl.compare_points, kl.created_at,
+                       source.topic AS source_topic,
+                       source.one_sentence AS source_one_sentence,
+                       target.topic AS target_topic,
+                       target.one_sentence AS target_one_sentence
+                FROM knowledge_links kl
+                JOIN knowledge_cards source
+                  ON source.id = kl.source_knowledge_id AND source.user_id = kl.user_id
+                JOIN knowledge_cards target
+                  ON target.id = kl.target_knowledge_id AND target.user_id = kl.user_id
+                WHERE kl.user_id = ? AND kl.id = ?
+                """, userId, id).stream().findFirst();
     }
 
     public List<KnowledgeLinkDto> listForCard(long cardId) {

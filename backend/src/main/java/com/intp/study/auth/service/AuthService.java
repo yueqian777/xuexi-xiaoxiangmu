@@ -69,11 +69,13 @@ public class AuthService {
         if (userRepository.isExpired(invite)) {
             throw new IllegalArgumentException("邀请码已过期。");
         }
+        if (!userRepository.claimInviteUse(invite.code())) {
+            throw new IllegalArgumentException("邀请码无效、已过期或使用次数已达上限。");
+        }
         String displayName = normalizeDisplayName(request.displayName(), username);
         String role = invite.role() == null || invite.role().isBlank() ? "user" : invite.role();
         long quota = invite.uploadQuotaBytes() > 0 ? invite.uploadQuotaBytes() : DEFAULT_UPLOAD_QUOTA_BYTES;
         long id = userRepository.createUser(username, displayName, passwordHasher.hash(request.password()), role, quota);
-        userRepository.incrementInviteUse(invite.code());
         return userRepository.toCurrentUser(userRepository.findById(id).orElseThrow());
     }
 
@@ -90,4 +92,3 @@ public class AuthService {
         return normalized.isBlank() ? username : normalized;
     }
 }
-

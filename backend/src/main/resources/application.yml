@@ -1,5 +1,5 @@
 server:
-  port: ${INTP_BACKEND_PORT:8080}
+  port: ${INTP_BACKEND_PORT:8081}
 
 spring:
   application:

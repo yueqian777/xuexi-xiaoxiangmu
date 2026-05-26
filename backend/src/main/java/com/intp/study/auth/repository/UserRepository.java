@@ -90,6 +90,19 @@ public class UserRepository {
                 """, code);
     }
 
+    public boolean claimInviteUse(String code) {
+        int updated = jdbcTemplate.update("""
+                UPDATE invites
+                SET used_count = used_count + 1,
+                    updated_at = datetime('now', 'localtime')
+                WHERE code = ?
+                  AND is_active = 1
+                  AND used_count < max_uses
+                  AND (expires_at IS NULL OR TRIM(expires_at) = '' OR datetime(expires_at) >= datetime('now', 'localtime'))
+                """, code);
+        return updated > 0;
+    }
+
     public CurrentUser toCurrentUser(UserRow row) {
         String displayName = row.displayName() == null || row.displayName().isBlank() ? row.username() : row.displayName();
         String role = row.role() == null || row.role().isBlank() ? "user" : row.role();
@@ -126,4 +139,3 @@ public class UserRepository {
     ) {
     }
 }
-

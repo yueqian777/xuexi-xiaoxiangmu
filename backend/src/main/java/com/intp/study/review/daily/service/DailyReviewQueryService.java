@@ -6,7 +6,9 @@ import com.intp.study.review.daily.dto.DailyReviewLogDto;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 
 @Service
 public class DailyReviewQueryService {
@@ -36,13 +38,27 @@ public class DailyReviewQueryService {
 
     public List<DailyAiReviewPlanDto> listAiPlansForCurrentUser() {
         long userId = currentUserProvider.requireUserId();
-        return jdbcTemplate.query("""
+        return queryPlans("""
                 SELECT id, review_date, provider_key, model, plan_json, source_snapshot_json,
                        answers_json, evaluation_json, status, created_at, evaluated_at
                 FROM daily_ai_review_plans
                 WHERE user_id = ?
                 ORDER BY review_date DESC, id DESC
-                """, (rs, rowNum) -> new DailyAiReviewPlanDto(
+                """, userId);
+    }
+
+    public Optional<DailyAiReviewPlanDto> findTodayAiPlanForCurrentUser() {
+        long userId = currentUserProvider.requireUserId();
+        return queryPlans("""
+                SELECT id, review_date, provider_key, model, plan_json, source_snapshot_json,
+                       answers_json, evaluation_json, status, created_at, evaluated_at
+                FROM daily_ai_review_plans
+                WHERE user_id = ? AND review_date = ?
+                """, userId, LocalDate.now().toString()).stream().findFirst();
+    }
+
+    private List<DailyAiReviewPlanDto> queryPlans(String sql, Object... args) {
+        return jdbcTemplate.query(sql, (rs, rowNum) -> new DailyAiReviewPlanDto(
                 rs.getLong("id"),
                 rs.getString("review_date"),
                 rs.getString("provider_key"),
@@ -54,6 +70,6 @@ public class DailyReviewQueryService {
                 rs.getString("status"),
                 rs.getString("created_at"),
                 rs.getString("evaluated_at")
-        ), userId);
+        ), args);
     }
 }

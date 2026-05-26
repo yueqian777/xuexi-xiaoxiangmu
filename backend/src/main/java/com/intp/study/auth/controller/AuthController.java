@@ -8,6 +8,7 @@ import com.intp.study.auth.dto.SetupAdminRequest;
 import com.intp.study.auth.dto.SystemStatusResponse;
 import com.intp.study.auth.model.CurrentUser;
 import com.intp.study.auth.service.AuthService;
+import com.intp.study.common.error.UnauthorizedException;
 import jakarta.servlet.http.HttpSession;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -65,7 +66,6 @@ public class AuthController {
         if (raw instanceof CurrentUser user) {
             return CurrentUserResponse.from(user);
         }
-        throw new IllegalStateException("No authenticated user is available.");
+        throw new UnauthorizedException("No authenticated user is available.");
     }
 }
-

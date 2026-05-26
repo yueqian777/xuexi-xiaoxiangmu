@@ -6,6 +6,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Optional;
 
 @Service
 public class ReviewTaskQueryService {
@@ -45,6 +46,18 @@ public class ReviewTaskQueryService {
                 """, userId);
     }
 
+    public Optional<ReviewTaskDto> findForCurrentUser(long taskId) {
+        long userId = currentUserProvider.requireUserId();
+        return query("""
+                SELECT rt.id, rt.knowledge_id, rt.review_date, rt.review_stage, rt.status,
+                       rt.result, rt.created_at, kc.subject, kc.topic, kc.core_question,
+                       kc.one_sentence, kc.mastery
+                FROM review_tasks rt
+                JOIN knowledge_cards kc ON kc.id = rt.knowledge_id AND kc.user_id = rt.user_id
+                WHERE rt.user_id = ? AND kc.user_id = ? AND rt.id = ?
+                """, userId, taskId).stream().findFirst();
+    }
+
     private List<ReviewTaskDto> query(String sql, long userId) {
         return jdbcTemplate.query(sql, (rs, rowNum) -> new ReviewTaskDto(
                 rs.getLong("id"),
@@ -60,5 +73,22 @@ public class ReviewTaskQueryService {
                 rs.getString("one_sentence"),
                 rs.getInt("mastery")
         ), userId, userId);
+    }
+
+    private List<ReviewTaskDto> query(String sql, long userId, long taskId) {
+        return jdbcTemplate.query(sql, (rs, rowNum) -> new ReviewTaskDto(
+                rs.getLong("id"),
+                rs.getLong("knowledge_id"),
+                rs.getString("review_date"),
+                rs.getString("review_stage"),
+                rs.getString("status"),
+                rs.getString("result"),
+                rs.getString("created_at"),
+                rs.getString("subject"),
+                rs.getString("topic"),
+                rs.getString("core_question"),
+                rs.getString("one_sentence"),
+                rs.getInt("mastery")
+        ), userId, userId, taskId);
     }
 }

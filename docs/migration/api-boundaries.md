@@ -48,6 +48,8 @@ DTOs:
 - `InviteDto`
 - `UpdateUserQuotaRequest`
 
+Current Java admin user deletion removes database rows only. Physical uploaded-file and secret-vault cleanup remains deferred until Java file storage and local secret vault migration are implemented.
+
 ## Study API
 
 ```text
@@ -84,7 +86,26 @@ DTOs:
 - `KnowledgeCardDto`
 - `SaveKnowledgeCardRequest`
 - `KnowledgeLinkDto`
-- `CreateKnowledgeLinkRequest`
+- `SaveKnowledgeLinkRequest`
+
+`POST /api/knowledge-links` follows the Python knowledge-card page behavior: if a link with the same `sourceKnowledgeId`, `targetKnowledgeId`, and `relationType` already exists for the current user, the backend updates `relationNote`, `comparePoints`, and `created_at`; otherwise it inserts a new link.
+
+## Dashboard API
+
+```text
+GET /api/dashboard/summary
+```
+
+DTOs:
+
+- `DashboardSummaryDto`
+- `DashboardCountsDto`
+- `LowMasteryCardDto`
+- `RecentBlockerDto`
+- `OpenParkingQuestionDto`
+- `RecentKnowledgeLinkDto`
+
+The dashboard summary mirrors Python `pages.dashboard` and `services.stats_service`: due review tasks, low-mastery cards, recent blockers, open parking-lot questions, recent knowledge links, and daily reminder status. All reads are scoped to the current session user.
 
 ## Review API
 
@@ -93,11 +114,11 @@ GET  /api/reviews/due
 GET  /api/reviews/tasks
 POST /api/reviews/tasks/{taskId}/result
 GET  /api/reviews/daily-log
-POST /api/reviews/daily-log
 GET  /api/reviews/ai-plan
 POST /api/reviews/ai-plan
 POST /api/reviews/ai-plan/answers
 POST /api/reviews/ai-plan/evaluate
+GET  /api/reviews/ai-plan/today
 ```
 
 DTOs:
@@ -106,8 +127,27 @@ DTOs:
 - `MarkReviewResultRequest`
 - `DailyReviewLogDto`
 - `DailyAiReviewPlanDto`
+- `GenerateDailyAiReviewRequest`
+- `EvaluateDailyAiReviewRequest`
 - `SubmitDailyAiAnswersRequest`
 - `DailyAiEvaluationDto`
+
+## Daily Reminder API
+
+```text
+GET  /api/reminders/daily-review
+PUT  /api/reminders/daily-review
+POST /api/reminders/daily-review/done
+```
+
+DTOs:
+
+- `DailyReminderStatusDto`
+- `DailyReminderConfigDto`
+- `SaveDailyReminderConfigRequest`
+- `MarkDailyReviewDoneRequest`
+
+The reminder config preserves Python's `user:{user_id}:daily_review_reminder` `app_settings` key with `enabled` and `time`. Marking today done preserves Python's `daily_review_logs` upsert semantics. Windows scheduled-task install/test/uninstall remains deferred to the desktop shell boundary; the backend stores business state only.
 
 ## Mistake And Parking APIs
 
@@ -121,6 +161,9 @@ GET    /api/parking-lot
 POST   /api/parking-lot
 PUT    /api/parking-lot/{id}
 DELETE /api/parking-lot/{id}
+POST   /api/parking-lot/{id}/resolve
+POST   /api/parking-lot/{id}/convert-to-knowledge-card
+POST   /api/parking-lot/{id}/convert-to-branch-question
 ```
 
 DTOs:
@@ -129,6 +172,25 @@ DTOs:
 - `SaveMistakeRequest`
 - `ParkingLotItemDto`
 - `SaveParkingLotItemRequest`
+- `ConvertParkingLotToKnowledgeRequest`
+- `ConvertParkingLotToBranchQuestionRequest`
+
+## Mainline API
+
+```text
+GET /api/mainline/anchors
+GET /api/mainline/anchors/by-session/{sessionId}
+POST /api/mainline/anchors
+GET /api/mainline/anchors/branches/by-session/{sessionId}
+POST /api/mainline/anchors/branches
+```
+
+DTOs:
+
+- `MainlineAnchorDto`
+- `SaveMainlineAnchorRequest`
+- `BranchQuestionDto`
+- `SaveBranchQuestionRequest`
 
 ## AI Provider API
 
@@ -155,6 +217,10 @@ DTOs:
 - `GenerateTextRequest`
 - `GenerateTextResponse`
 
+Current Java generation supports `openai_chat` and `minimax_chat` first. Other provider types remain listed for compatibility but should return an explicit unsupported-provider error until their clients are migrated.
+
+Current Provider CRUD is user-scoped: all reads/writes filter by the current session user and new provider rows set `api_providers.user_id` from the backend session.
+
 Provider strategy interface:
 
 ```java
@@ -167,6 +233,7 @@ interface AiProviderClient {
 ## Secret Vault API
 
 ```text
+GET    /api/secrets/status
 GET    /api/secrets/providers
 POST   /api/secrets/unlock
 POST   /api/secrets/lock
@@ -186,12 +253,12 @@ Rules:
 - Do not return plaintext API keys in list endpoints.
 - Keep master password in memory only.
 - Maintain compatibility with current per-user vault files unless a migration explicitly replaces them.
+- Current Java vault uses AES-GCM plus PBKDF2-HMAC-SHA256 with the Python-compatible iteration count.
+- Unlock state is currently process memory by user id; add TTL/session binding before exposing widely.
 
 ## Balance API
 
 ```text
-GET  /api/ai/providers/{providerKey}/balance-config
-PUT  /api/ai/providers/{providerKey}/balance-config
 POST /api/ai/providers/{providerKey}/balance-query
 ```
 
@@ -202,6 +269,8 @@ DTOs:
 - `BalanceResultDto`
 
 Sensitive credentials such as API keys and access tokens must not be persisted in normal provider config.
+
+Current Java balance query supports `deepseek_wallet`, `openrouter_wallet`, `generic_wallet`/`auto_wallet` as generic `/user/balance`, and `custom_http_json`. More Python query types remain pending.
 
 ## PPT/PDF API
 
@@ -215,6 +284,10 @@ GET    /api/ppt/decks/{deckId}/slides
 GET    /api/ppt/slides/{slideId}/image
 GET    /api/ppt/decks/{deckId}/sections
 POST   /api/ppt/decks/{deckId}/structure-jobs
+POST   /api/ppt/decks/{deckId}/jobs
+GET    /api/ppt/jobs
+GET    /api/ppt/jobs/{jobId}
+POST   /api/ppt/jobs/{jobId}/stop
 ```
 
 DTOs:
@@ -225,6 +298,11 @@ DTOs:
 - `UploadDeckResponse`
 - `UpdateDeckRequest`
 - `StartStructureJobRequest`
+- `ImportDeckResponse`
+- `PptJobDto`
+- `StartPptJobRequest`
+
+Current Java import stores PDF/PPTX under `intp.storage.root/users/{userId}/decks/{deckUuid}`. PDF import extracts per-page text and renders page PNGs with PDFBox; PPTX import extracts per-slide text with Apache POI. PPTX page image rendering and OCR remain pending.
 
 ## PPT Reader API
 
