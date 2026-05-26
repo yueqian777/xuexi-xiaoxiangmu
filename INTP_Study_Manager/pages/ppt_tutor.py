@@ -48,7 +48,8 @@ LAST_READER_POSITION_SETTING_KEY = "ppt_reader_last_position"
 LAST_READER_DECK_STATE_KEY = "ppt_reader_deck_id"
 READER_ACTIVE_SLIDE_STATE_PREFIX = "ppt_reader_active_slide_"
 READER_IMAGE_WINDOW_RADIUS = 2
-PPT_GENERATION_MAX_PARALLELISM = 4
+PPT_GENERATION_MAX_PARALLELISM = 16
+PPT_GENERATION_MAX_PROVIDER_PARALLELISM = 8
 PPT_GENERATION_REFRESH_SECONDS = 1.5
 
 
@@ -422,36 +423,70 @@ def _render_deck_actions(
     )
     send_image_when_no_text = input_mode != "只用识别文字，不发原图"
     force_image_input = input_mode == "直接发原图，不使用识别文字"
-    supports_image_input = _active_provider_supports_image_input()
-    if force_image_input and not supports_image_input:
-        st.warning("当前 Provider / 模型看起来不支持图片输入。直接发原图模式无法生成；请切换视觉模型后再试。")
-    elif send_image_when_no_text and not supports_image_input:
-        st.warning("当前 Provider / 模型看起来不支持图片输入。空白扫描页会被跳过；请切换视觉模型，或重新导入可提取文字的 PDF。")
     selected_slides, range_label, force_regenerate = _select_generation_range(slides, sections)
-    parallelism = cols[2].slider(
-        "并行生成路数",
-        min_value=1,
-        max_value=PPT_GENERATION_MAX_PARALLELISM,
-        value=2,
-        help="后台生成时同时发起的逐页讲解请求数；遇到限流或上游不稳定时调低。",
-        key=f"ppt_generation_parallelism_{deck['id']}",
+    enabled_providers = list_api_providers(enabled_only=True)
+    active_provider_key = str(st.session_state.get("active_api_provider_key") or "")
+    provider_by_key = {str(provider["provider_key"]): provider for provider in enabled_providers}
+    default_provider_keys = [active_provider_key] if active_provider_key in provider_by_key else list(provider_by_key)[:1]
+    selected_provider_keys = st.multiselect(
+        "本次生成使用的 API 组",
+        list(provider_by_key),
+        default=default_provider_keys,
+        format_func=lambda item_key: provider_label(provider_by_key[item_key]),
+        help="可同时选择多个已启用 Provider；后台生成会按各 Provider 的并行上限分配页面。",
+        key=f"ppt_generation_provider_group_{deck['id']}",
     )
+    provider_pool = _build_generation_provider_pool(
+        enabled_providers,
+        selected_provider_keys=selected_provider_keys,
+        active_provider_key=active_provider_key,
+    )
+    adaptive_parallelism = cols[2].checkbox(
+        "自适应最快速度",
+        value=True,
+        help="自动使用当前 API 组的并行上限；如果触发限流，可关闭后手动调低。",
+        key=f"ppt_generation_adaptive_parallelism_{deck['id']}",
+    )
+    parallel_cap = _adaptive_generation_parallelism(provider_pool, max(1, len(selected_slides)))
+    if adaptive_parallelism:
+        parallelism = parallel_cap
+        cols[2].caption(f"自适应并行上限：{parallel_cap} 路。")
+    else:
+        parallelism = cols[2].slider(
+            "并行生成路数",
+            min_value=1,
+            max_value=max(1, parallel_cap),
+            value=min(2, max(1, parallel_cap)),
+            help="后台生成时同时发起的逐页讲解请求数；遇到限流或上游不稳定时调低。",
+            key=f"ppt_generation_parallelism_{deck['id']}",
+        )
+    cols[2].caption("生成出错的页面会自动重新加入队列，直到本次范围内可生成页面全部成功。")
+    group_supports_image_input = any(provider.get("supports_image_input") for provider in provider_pool)
+    if force_image_input and not group_supports_image_input:
+        st.warning("当前 API 组看起来没有支持图片输入的 Provider。直接发原图模式无法生成；请加入视觉模型后再试。")
+    elif send_image_when_no_text and not group_supports_image_input:
+        st.warning("当前 API 组看起来没有支持图片输入的 Provider。空白扫描页会被跳过；请加入视觉模型，或重新导入可提取文字的 PDF。")
     cols[2].caption("左侧滚动到某页时，右侧讲解会自动同步滚动到对应页。")
     st.caption(f"当前生成范围：{range_label}；将逐页调用 API 并保存到右侧讲解区。")
     run_in_background = st.checkbox("后台运行（切换页面时继续生成）", value=True)
     if st.button("生成所选范围逐页讲解", type="primary"):
+        if not provider_pool:
+            st.error("请至少选择一个已启用 Provider 作为本次生成的 API 组。")
+            return
         _generate_whole_deck_explanations(
             deck,
             selected_slides,
             only_missing=only_missing and not force_regenerate,
             send_image_when_no_text=send_image_when_no_text,
             force_image_input=force_image_input,
-            supports_image_input=supports_image_input,
+            supports_image_input=group_supports_image_input,
             latest_by_slide_id=latest_by_slide_id,
             all_slides=slides,
             sections=sections,
             background=run_in_background,
             parallelism=parallelism,
+            provider_pool=provider_pool,
+            adaptive_parallelism=adaptive_parallelism,
         )
 
 
@@ -1494,8 +1529,9 @@ def _resume_interrupted_generation() -> dict | None:
         st.success(f"✅ 生成完成：{int(task.get('generated') or 0)} 页")
         skipped = int(task.get("skipped") or 0)
         failed = int(task.get("failed") or 0)
-        if skipped or failed:
-            st.caption(f"跳过 {skipped} 页，失败 {failed} 页。")
+        retried = int(task.get("retried") or 0)
+        if skipped or failed or retried:
+            st.caption(f"跳过 {skipped} 页，失败 {failed} 页，重试 {retried} 次。")
         return task
     if status == "stopped":
         st.warning(f"⚠️ 已停止：{task.get('status_text', '生成已中断')}")
@@ -1511,7 +1547,8 @@ def _resume_interrupted_generation() -> dict | None:
             f"并行路数：{int(task.get('parallelism') or 1)}；"
             f"已生成 {int(task.get('generated') or 0)} 页，"
             f"跳过 {int(task.get('skipped') or 0)} 页，"
-            f"失败 {int(task.get('failed') or 0)} 页。"
+            f"失败 {int(task.get('failed') or 0)} 页，"
+            f"重试 {int(task.get('retried') or 0)} 次。"
         )
     with col2:
         if st.button("停止", key="stop_generation"):
@@ -1545,6 +1582,8 @@ def _generate_whole_deck_explanations(
     sections: list[dict] | None = None,
     background: bool = False,
     parallelism: int = 1,
+    provider_pool: list[dict] | None = None,
+    adaptive_parallelism: bool = False,
 ) -> None:
     targets = []
     for slide in slides:
@@ -1563,7 +1602,17 @@ def _generate_whole_deck_explanations(
     max_tokens = int(st.session_state.get("active_api_max_tokens", 4096))
     active_model_label = _active_model_label()
     total = len(targets)
-    parallelism = _normalize_generation_parallelism(parallelism, total)
+    provider_pool = provider_pool or _build_generation_provider_pool(
+        list_api_providers(enabled_only=True),
+        selected_provider_keys=[str(provider_key)] if provider_key else [],
+        active_provider_key=str(provider_key or ""),
+    )
+    group_parallel_cap = _adaptive_generation_parallelism(provider_pool, total)
+    parallelism = group_parallel_cap if adaptive_parallelism else _normalize_generation_parallelism(
+        parallelism,
+        total,
+        max_parallelism=group_parallel_cap,
+    )
     user_id = require_login().id
     context_by_slide = build_slide_context_map(deck, all_slides or slides, sections or [])
     related_knowledge = _related_knowledge_context(deck.get("subject") or "未分类", user_id=user_id)
@@ -1585,6 +1634,9 @@ def _generate_whole_deck_explanations(
             "active_model": active_model,
             "max_tokens": max_tokens,
             "parallelism": parallelism,
+            "provider_pool": provider_pool,
+            "adaptive_parallelism": adaptive_parallelism,
+            "group_parallel_cap": group_parallel_cap,
             "active_model_label": active_model_label,
             "reasoning_depth": st.session_state.get("active_api_reasoning_depth"),
             "context_by_slide": context_by_slide,
@@ -1593,6 +1645,7 @@ def _generate_whole_deck_explanations(
             "processed": 0,
             "skipped": 0,
             "failed": 0,
+            "retried": 0,
             "completed_slide_numbers": [],
             "skipped_slide_numbers": [],
             "failed_slide_numbers": [],
@@ -1727,11 +1780,89 @@ def _generate_whole_deck_explanations(
         st.info("没有生成新讲解。被跳过的页面需要可提取文字、OCR，或支持图片输入的视觉模型。")
 
 
-def _normalize_generation_parallelism(value: object, total: int) -> int:
+def _build_generation_provider_pool(
+    providers: list[dict],
+    *,
+    selected_provider_keys: list[str],
+    active_provider_key: str | None = None,
+    api_keys_by_provider: dict[str, str] | None = None,
+    models_by_provider: dict[str, str] | None = None,
+) -> list[dict]:
+    provider_by_key = {str(provider["provider_key"]): provider for provider in providers if provider.get("enabled", 1)}
+    selected = [str(provider_key) for provider_key in selected_provider_keys if str(provider_key) in provider_by_key]
+    active_key = str(active_provider_key or "")
+    ordered_keys: list[str] = []
+    if active_key in selected:
+        ordered_keys.append(active_key)
+    for provider_key in selected:
+        if provider_key not in ordered_keys:
+            ordered_keys.append(provider_key)
+
+    pool: list[dict] = []
+    for provider_key in ordered_keys:
+        provider = provider_by_key[provider_key]
+        if models_by_provider is not None:
+            model = str(models_by_provider.get(provider_key) or provider.get("model") or DEFAULT_MODEL)
+        else:
+            ensure_provider_model(provider)
+            model = str(st.session_state.get(provider_model_state_key(provider_key)) or provider.get("model") or DEFAULT_MODEL)
+        if api_keys_by_provider is not None:
+            api_key = str(api_keys_by_provider.get(provider_key) or "")
+        else:
+            api_key = str(st.session_state.get(f"api_key_provider_{provider_key}") or "")
+        pool.append(
+            {
+                "provider_key": provider_key,
+                "provider_name": provider.get("name") or provider_key,
+                "provider_type": provider.get("provider_type") or "",
+                "base_url": provider.get("base_url") or "",
+                "api_key": api_key,
+                "active_model": model.strip() or DEFAULT_MODEL,
+                "active_model_label": f"{provider.get('name') or provider_key} / {model.strip() or DEFAULT_MODEL}",
+                "supports_image_input": _provider_supports_image_input(provider, model),
+                "parallel_limit": _provider_parallel_limit(provider, model),
+            }
+        )
+    return pool
+
+
+def _provider_parallel_limit(provider: dict, model: str | None = None) -> int:
+    provider_type = str(provider.get("provider_type") or "").strip()
+    base_url = str(provider.get("base_url") or "").lower()
+    name = str(provider.get("name") or "").lower()
+    model_name = str(model or provider.get("model") or "").lower()
+    if any(marker in base_url for marker in ("localhost", "127.0.0.1", "0.0.0.0")) or "cliproxy" in name or "local" in name:
+        limit = 8
+    elif provider_type in {"openai_chat", "openai_responses"}:
+        limit = 6
+    elif provider_type in {"custom_http_json", "minimax_chat", "cohere_chat"}:
+        limit = 4
+    elif provider_type in {"gemini_generate_content", "anthropic_messages"}:
+        limit = 3
+    else:
+        limit = 2
+    if any(marker in model_name for marker in ("reason", "thinking", "deepseek-r1")):
+        limit = max(1, limit - 1)
+    return min(max(1, limit), PPT_GENERATION_MAX_PROVIDER_PARALLELISM)
+
+
+def _adaptive_generation_parallelism(provider_pool: list[dict], total: int) -> int:
+    if not provider_pool:
+        return _normalize_generation_parallelism(1, total)
+    group_limit = sum(max(1, int(provider.get("parallel_limit") or 1)) for provider in provider_pool)
+    return _normalize_generation_parallelism(group_limit, total)
+
+
+def _normalize_generation_parallelism(value: object, total: int, *, max_parallelism: int | None = None) -> int:
     try:
         requested = int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         requested = 1
+    try:
+        cap = int(max_parallelism if max_parallelism is not None else PPT_GENERATION_MAX_PARALLELISM)
+    except (TypeError, ValueError):
+        cap = PPT_GENERATION_MAX_PARALLELISM
+    cap = max(1, min(cap, PPT_GENERATION_MAX_PARALLELISM))
     try:
         target_count = int(total)
     except (TypeError, ValueError):
@@ -1740,7 +1871,7 @@ def _normalize_generation_parallelism(value: object, total: int) -> int:
         requested = 1
     if target_count <= 0:
         return 1
-    return min(requested, target_count, PPT_GENERATION_MAX_PARALLELISM)
+    return min(requested, target_count, cap)
 
 
 def _slide_generation_result(
@@ -1769,12 +1900,6 @@ def _save_generated_explanation(user_id: int, slide_id: int, model: str, explana
     )
 
 
-def _should_stop_generation_after_error(exc: Exception) -> bool:
-    if is_quota_error(exc):
-        return True
-    return isinstance(exc, AIServiceError) and exc.category in {"rate_limit", "model_not_found"}
-
-
 def _generation_error_message(slide: dict, exc: Exception) -> str:
     slide_number = int(slide.get("slide_number") or 0)
     if is_quota_error(exc):
@@ -1786,12 +1911,35 @@ def _generation_error_message(slide: dict, exc: Exception) -> str:
     return f"第 {slide_number} 页生成失败：{exc}"
 
 
-def _generate_slide_explanation_from_task(task: dict, deck: dict, slide: dict) -> dict:
+def _default_generation_provider_from_task(task: dict) -> dict:
+    parallel_limit = task.get("parallelism") or 1
+    try:
+        parallel_limit = int(parallel_limit)
+    except (TypeError, ValueError):
+        parallel_limit = 1
+    return {
+        "provider_key": task.get("provider_key"),
+        "provider_name": task.get("provider_key") or "当前 Provider",
+        "api_key": task.get("api_key"),
+        "active_model": task.get("active_model"),
+        "active_model_label": str(task.get("active_model_label") or task.get("active_model") or DEFAULT_MODEL),
+        "supports_image_input": bool(task.get("supports_image_input")),
+        "parallel_limit": max(1, parallel_limit),
+    }
+
+
+def _generate_slide_explanation_from_task(
+    task: dict,
+    deck: dict,
+    slide: dict,
+    provider_config: dict | None = None,
+) -> dict:
+    provider_config = provider_config or _default_generation_provider_from_task(task)
     context_by_slide = task.get("context_by_slide") or {}
     slide_number = int(slide.get("slide_number") or 0)
     context = context_by_slide.get(slide_number) or context_by_slide.get(str(slide_number))
     user_id = int(task.get("user_id") or 0)
-    active_model_label = str(task.get("active_model_label") or "")
+    active_model_label = str(provider_config.get("active_model_label") or task.get("active_model_label") or "")
     reasoning_depth = task.get("reasoning_depth")
     related_knowledge = str(task.get("related_knowledge") or "")
 
@@ -1808,7 +1956,7 @@ def _generate_slide_explanation_from_task(task: dict, deck: dict, slide: dict) -
     image_paths = _image_paths_for_generation(
         slide,
         bool(task.get("send_image_when_no_text")),
-        supports_image_input=bool(task.get("supports_image_input")),
+        supports_image_input=bool(provider_config.get("supports_image_input")),
         force_image_input=bool(task.get("force_image_input")),
     )
     if task.get("force_image_input") and not image_paths:
@@ -1836,9 +1984,9 @@ def _generate_slide_explanation_from_task(task: dict, deck: dict, slide: dict) -
     try:
         explanation = generate_text(
             prompt,
-            provider_key=task.get("provider_key"),
-            api_key=task.get("api_key"),
-            model_override=task.get("active_model"),
+            provider_key=provider_config.get("provider_key"),
+            api_key=provider_config.get("api_key"),
+            model_override=provider_config.get("active_model"),
             image_paths=image_paths,
             max_output_tokens=int(task.get("max_tokens") or 4096),
             reasoning_depth=reasoning_depth,
@@ -1851,8 +1999,7 @@ def _generate_slide_explanation_from_task(task: dict, deck: dict, slide: dict) -
                 return _slide_generation_result(
                     slide,
                     "failed",
-                    f"第 {slide_number} 页：当前模型拒绝图片输入，已停止后续页面生成。",
-                    stop=True,
+                    f"第 {slide_number} 页：当前模型拒绝图片输入，准备换用其它 Provider 重试。",
                 )
             if _is_text_empty(slide):
                 return _slide_generation_result(
@@ -1871,9 +2018,9 @@ def _generate_slide_explanation_from_task(task: dict, deck: dict, slide: dict) -
                 )
                 explanation = generate_text(
                     fallback_prompt,
-                    provider_key=task.get("provider_key"),
-                    api_key=task.get("api_key"),
-                    model_override=task.get("active_model"),
+                    provider_key=provider_config.get("provider_key"),
+                    api_key=provider_config.get("api_key"),
+                    model_override=provider_config.get("active_model"),
                     max_output_tokens=int(task.get("max_tokens") or 4096),
                     reasoning_depth=reasoning_depth,
                 )
@@ -1884,13 +2031,11 @@ def _generate_slide_explanation_from_task(task: dict, deck: dict, slide: dict) -
                     slide,
                     "failed",
                     _generation_error_message(slide, retry_exc),
-                    stop=_should_stop_generation_after_error(retry_exc),
                 )
         return _slide_generation_result(
             slide,
             "failed",
             _generation_error_message(slide, exc),
-            stop=_should_stop_generation_after_error(exc),
         )
 
 
@@ -1921,10 +2066,81 @@ def _update_generation_task_progress(
         task["status_text"] = f"已完成 {processed} / {total} 页。"
 
 
+def _provider_pool_from_task(task: dict) -> list[dict]:
+    pool = task.get("provider_pool")
+    if isinstance(pool, list) and pool:
+        return pool
+    return [_default_generation_provider_from_task(task)]
+
+
+def _provider_can_handle_slide(task: dict, slide: dict, provider: dict) -> bool:
+    if task.get("force_image_input"):
+        return bool(provider.get("supports_image_input"))
+    if task.get("send_image_when_no_text") and _is_text_empty(slide):
+        return bool(provider.get("supports_image_input"))
+    return True
+
+
+def _eligible_provider_states(task: dict, slide: dict, provider_states: list[dict]) -> list[dict]:
+    return [
+        state
+        for state in provider_states
+        if _provider_can_handle_slide(task, slide, state["provider"])
+    ]
+
+
+def _available_provider_state(candidates: list[dict], failed_provider_keys: set[str]) -> dict | None:
+    fresh_candidates = [
+        state
+        for state in candidates
+        if state["provider_key"] not in failed_provider_keys and state["running"] < state["parallel_limit"]
+    ]
+    if fresh_candidates:
+        return min(fresh_candidates, key=lambda state: (state["running"], state["order"]))
+
+    fallback_candidates = [
+        state
+        for state in candidates
+        if state["running"] < state["parallel_limit"]
+    ]
+    if fallback_candidates:
+        return min(fallback_candidates, key=lambda state: (state["running"], state["order"]))
+    return None
+
+
+def _skip_job_without_provider(
+    task: dict,
+    job: dict,
+    *,
+    processed: int,
+    total: int,
+    generated: int,
+    skipped: int,
+    failed: int,
+) -> tuple[int, int]:
+    slide = job["slide"]
+    slide_number = int(slide.get("slide_number") or 0)
+    processed += 1
+    skipped += 1
+    task.setdefault("skipped_slide_numbers", []).append(slide_number)
+    _update_generation_task_progress(
+        task,
+        processed=processed,
+        total=total,
+        generated=generated,
+        skipped=skipped,
+        failed=failed,
+        inflight=[],
+        message=f"第 {slide_number} 页没有可用 Provider，已跳过。",
+    )
+    return processed, skipped
+
+
 def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -> None:
     generated = 0
     skipped = 0
     failed = 0
+    retried = int(task.get("retried") or 0)
     processed = 0
     total = len(targets)
     if total <= 0:
@@ -1933,12 +2149,39 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
         task["generated"] = 0
         task["skipped"] = 0
         task["failed"] = 0
+        task["retried"] = 0
         task["status_text"] = "没有需要生成的页面。"
         return
 
-    parallelism = _normalize_generation_parallelism(task.get("parallelism"), total)
+    provider_pool = _provider_pool_from_task(task)
+    provider_states = []
+    for order, provider in enumerate(provider_pool):
+        parallel_limit = max(1, int(provider.get("parallel_limit") or 1))
+        provider_states.append(
+            {
+                "order": order,
+                "provider": provider,
+                "provider_key": str(provider.get("provider_key") or ""),
+                "parallel_limit": min(parallel_limit, PPT_GENERATION_MAX_PROVIDER_PARALLELISM),
+                "running": 0,
+            }
+        )
+    group_parallel_cap = _adaptive_generation_parallelism(provider_pool, total)
+    parallelism = _normalize_generation_parallelism(
+        task.get("parallelism"),
+        total,
+        max_parallelism=group_parallel_cap,
+    )
     task["parallelism"] = parallelism
-    pending = list(targets)
+    task["group_parallel_cap"] = group_parallel_cap
+    pending = [
+        {
+            "slide": slide,
+            "attempt": 0,
+            "failed_provider_keys": set(),
+        }
+        for slide in targets
+    ]
     future_to_slide = {}
 
     with ThreadPoolExecutor(max_workers=parallelism) as executor:
@@ -1947,11 +2190,42 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
                 pending.clear()
 
             while pending and len(future_to_slide) < parallelism and not task.get("stop_requested"):
-                slide = pending.pop(0)
-                future = executor.submit(_generate_slide_explanation_from_task, task, deck, slide)
-                future_to_slide[future] = slide
+                scheduled = False
+                for index, job in enumerate(list(pending)):
+                    slide = job["slide"]
+                    candidates = _eligible_provider_states(task, slide, provider_states)
+                    if not candidates:
+                        pending.pop(index)
+                        processed, skipped = _skip_job_without_provider(
+                            task,
+                            job,
+                            processed=processed,
+                            total=total,
+                            generated=generated,
+                            skipped=skipped,
+                            failed=failed,
+                        )
+                        scheduled = True
+                        break
+                    provider_state = _available_provider_state(candidates, job["failed_provider_keys"])
+                    if not provider_state:
+                        continue
+                    pending.pop(index)
+                    provider_state["running"] += 1
+                    future = executor.submit(
+                        _generate_slide_explanation_from_task,
+                        task,
+                        deck,
+                        slide,
+                        provider_state["provider"],
+                    )
+                    future_to_slide[future] = (job, provider_state)
+                    scheduled = True
+                    break
+                if not scheduled:
+                    break
 
-            inflight = [int(slide.get("slide_number") or 0) for slide in future_to_slide.values()]
+            inflight = [int(job["slide"].get("slide_number") or 0) for job, _ in future_to_slide.values()]
             _update_generation_task_progress(
                 task,
                 processed=processed,
@@ -1969,7 +2243,9 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
                 continue
 
             for future in done:
-                slide = future_to_slide.pop(future)
+                job, provider_state = future_to_slide.pop(future)
+                provider_state["running"] = max(0, provider_state["running"] - 1)
+                slide = job["slide"]
                 try:
                     result = future.result()
                 except Exception as exc:
@@ -1979,16 +2255,38 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
                         f"第 {int(slide.get('slide_number') or 0)} 页生成失败：{exc}",
                     )
 
-                processed += 1
                 status = result.get("status")
                 slide_number = int(result.get("slide_number") or 0)
                 if status == "generated":
+                    processed += 1
                     generated += 1
                     task.setdefault("completed_slide_numbers", []).append(slide_number)
                 elif status == "skipped":
+                    processed += 1
                     skipped += 1
                     task.setdefault("skipped_slide_numbers", []).append(slide_number)
                 else:
+                    if not task.get("stop_requested"):
+                        retry_job = {
+                            "slide": slide,
+                            "attempt": int(job.get("attempt") or 0) + 1,
+                            "failed_provider_keys": set(job.get("failed_provider_keys") or set()) | {provider_state["provider_key"]},
+                        }
+                        pending.append(retry_job)
+                        retried += 1
+                        task["retried"] = retried
+                        _update_generation_task_progress(
+                            task,
+                            processed=processed,
+                            total=total,
+                            generated=generated,
+                            skipped=skipped,
+                            failed=failed,
+                            inflight=[int(item["slide"].get("slide_number") or 0) for item, _ in future_to_slide.values()],
+                            message=f"第 {slide_number} 页生成失败，已重新加入队列（第 {retry_job['attempt']} 次重试）。",
+                        )
+                        continue
+                    processed += 1
                     failed += 1
                     task.setdefault("failed_slide_numbers", []).append(slide_number)
 
@@ -2003,7 +2301,7 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
                     generated=generated,
                     skipped=skipped,
                     failed=failed,
-                    inflight=[int(s.get("slide_number") or 0) for s in future_to_slide.values()],
+                    inflight=[int(item["slide"].get("slide_number") or 0) for item, _ in future_to_slide.values()],
                     message=str(result.get("message") or ""),
                 )
 
@@ -2011,16 +2309,17 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
     task["generated"] = generated
     task["skipped"] = skipped
     task["failed"] = failed
+    task["retried"] = retried
     task["processed"] = processed
     if task.get("stop_requested"):
         task["status"] = "stopped"
         task["progress"] = (processed / total) if total else 1.0
-        task["status_text"] = f"已停止：完成 {processed} / {total} 页，生成 {generated} 页，跳过 {skipped} 页，失败 {failed} 页。"
+        task["status_text"] = f"已停止：完成 {processed} / {total} 页，生成 {generated} 页，跳过 {skipped} 页，失败 {failed} 页，重试 {retried} 次。"
         return
 
     task["status"] = "completed"
     task["progress"] = 1.0
-    task["status_text"] = f"生成完成：{generated} 页，跳过 {skipped} 页，失败 {failed} 页。"
+    task["status_text"] = f"生成完成：{generated} 页，跳过 {skipped} 页，失败 {failed} 页，重试 {retried} 次。"
 
 
 def _build_reader_payload(
@@ -2862,16 +3161,11 @@ def _is_text_empty(slide: dict) -> bool:
     return not (slide.get("slide_text") or "").strip()
 
 
-def _active_provider_supports_image_input() -> bool:
-    provider_key = st.session_state.get("active_api_provider_key")
-    providers = list_api_providers()
-    provider = next((item for item in providers if item["provider_key"] == provider_key), None)
-    if not provider:
-        return False
+def _provider_supports_image_input(provider: dict, model: str | None = None) -> bool:
     if provider.get("provider_type") != "openai_chat":
         return False
 
-    model = str(st.session_state.get("active_api_model") or provider.get("model") or "").lower()
+    model = str(model or provider.get("model") or "").lower()
     text_only_markers = (
         "deepseek",
         "claude",
@@ -2900,6 +3194,16 @@ def _active_provider_supports_image_input() -> bool:
         "glm-4v",
     )
     return any(marker in model for marker in vision_markers)
+
+
+def _active_provider_supports_image_input() -> bool:
+    provider_key = st.session_state.get("active_api_provider_key")
+    providers = list_api_providers()
+    provider = next((item for item in providers if item["provider_key"] == provider_key), None)
+    if not provider:
+        return False
+    model = str(st.session_state.get("active_api_model") or provider.get("model") or "")
+    return _provider_supports_image_input(provider, model)
 
 
 def _is_image_input_error(exc: AIServiceError) -> bool:

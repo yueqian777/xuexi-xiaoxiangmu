@@ -1,8 +1,14 @@
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+from services.ai_service import AIServiceError
+from services import api_runtime
 from pages import ppt_tutor
+
+
+APP_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _Context:
@@ -43,12 +49,103 @@ class _FakeStreamlit:
         self.rerun_called = True
 
 
+class _LockedWidgetState(dict):
+    def __init__(self, locked_keys=()):
+        super().__init__()
+        self.locked_keys = set(locked_keys)
+
+    def __setitem__(self, key, value):
+        if key in self.locked_keys:
+            raise AssertionError(f"widget key was modified after instantiation: {key}")
+        super().__setitem__(key, value)
+
+
 class PptGenerationParallelTest(unittest.TestCase):
+    def test_generation_ui_does_not_expose_retry_choice_or_attempt_count(self):
+        source = (APP_ROOT / "pages" / "ppt_tutor.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("错误页自动重试", source)
+        self.assertNotIn("错误页最多重试次数", source)
+
     def test_generation_parallelism_is_clamped_to_safe_target_count(self):
         self.assertEqual(ppt_tutor._normalize_generation_parallelism(None, 10), 1)
         self.assertEqual(ppt_tutor._normalize_generation_parallelism(0, 10), 1)
         self.assertEqual(ppt_tutor._normalize_generation_parallelism(3, 2), 2)
-        self.assertEqual(ppt_tutor._normalize_generation_parallelism(99, 20), 4)
+        self.assertEqual(ppt_tutor._normalize_generation_parallelism(99, 20), 16)
+
+    def test_adaptive_parallelism_uses_selected_provider_group_capacity(self):
+        provider_pool = [
+            {"provider_key": "fast-a", "parallel_limit": 5},
+            {"provider_key": "fast-b", "parallel_limit": 4},
+            {"provider_key": "slow-c", "parallel_limit": 2},
+        ]
+
+        self.assertEqual(ppt_tutor._adaptive_generation_parallelism(provider_pool, 20), 11)
+        self.assertEqual(ppt_tutor._adaptive_generation_parallelism(provider_pool, 3), 3)
+
+    def test_generation_provider_pool_keeps_active_provider_first(self):
+        providers = [
+            {
+                "provider_key": "a",
+                "name": "Provider A",
+                "provider_type": "openai_chat",
+                "base_url": "https://api.a.example/v1",
+                "model": "gpt-5",
+                "api_key_env": "",
+            },
+            {
+                "provider_key": "b",
+                "name": "Provider B",
+                "provider_type": "openai_chat",
+                "base_url": "https://api.b.example/v1",
+                "model": "gpt-5",
+                "api_key_env": "",
+            },
+        ]
+
+        pool = ppt_tutor._build_generation_provider_pool(
+            providers,
+            selected_provider_keys=["b", "a"],
+            active_provider_key="a",
+            api_keys_by_provider={"a": "key-a", "b": "key-b"},
+            models_by_provider={"a": "model-a", "b": "model-b"},
+        )
+
+        self.assertEqual([item["provider_key"] for item in pool], ["a", "b"])
+        self.assertEqual(pool[0]["api_key"], "key-a")
+        self.assertEqual(pool[1]["active_model"], "model-b")
+
+    def test_generation_provider_pool_does_not_mutate_instantiated_model_widget(self):
+        provider_key = "本地-cliproxyapi"
+        model_key = ppt_tutor.provider_model_state_key(provider_key)
+        providers = [
+            {
+                "provider_key": provider_key,
+                "name": "本地 CLIProxyAPI",
+                "provider_type": "openai_chat",
+                "base_url": "http://localhost:8317/v1",
+                "model": "qwen-local",
+                "api_key_env": "",
+                "enabled": 1,
+            }
+        ]
+        session_state = _LockedWidgetState(locked_keys={model_key})
+        dict.__setitem__(session_state, model_key, "qwen-local")
+        dict.__setitem__(session_state, f"api_key_provider_{provider_key}", "local-key")
+
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(api_runtime.st, "session_state", session_state),
+        ):
+            pool = ppt_tutor._build_generation_provider_pool(
+                providers,
+                selected_provider_keys=[provider_key],
+                active_provider_key=provider_key,
+            )
+
+        self.assertEqual(pool[0]["provider_key"], provider_key)
+        self.assertEqual(pool[0]["active_model"], "qwen-local")
+        self.assertEqual(pool[0]["api_key"], "local-key")
 
     def test_running_generation_status_does_not_block_page_render(self):
         task = {
@@ -121,6 +218,205 @@ class PptGenerationParallelTest(unittest.TestCase):
         self.assertEqual(insert_and_get_id.call_count, 3)
         self.assertEqual(task["status"], "completed")
         self.assertEqual(task["generated"], 3)
+
+    def test_background_worker_uses_multiple_providers_with_per_provider_limits(self):
+        task = {
+            "status": "running",
+            "progress": 0.0,
+            "status_text": "",
+            "generated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "parallelism": 4,
+            "send_image_when_no_text": False,
+            "force_image_input": False,
+            "provider_pool": [
+                {
+                    "provider_key": "a",
+                    "provider_name": "Provider A",
+                    "api_key": "key-a",
+                    "active_model": "model-a",
+                    "active_model_label": "Provider A / model-a",
+                    "supports_image_input": False,
+                    "parallel_limit": 1,
+                },
+                {
+                    "provider_key": "b",
+                    "provider_name": "Provider B",
+                    "api_key": "key-b",
+                    "active_model": "model-b",
+                    "active_model_label": "Provider B / model-b",
+                    "supports_image_input": False,
+                    "parallel_limit": 1,
+                },
+            ],
+            "max_tokens": 100,
+            "reasoning_depth": "关闭",
+            "context_by_slide": {},
+            "related_knowledge": "",
+            "user_id": 7,
+            "stop_requested": False,
+            "retry_failed_pages": True,
+            "max_retries": 1,
+        }
+        slides = [
+            {"id": 1, "slide_number": 1, "title": "A", "slide_text": "text"},
+            {"id": 2, "slide_number": 2, "title": "B", "slide_text": "text"},
+            {"id": 3, "slide_number": 3, "title": "C", "slide_text": "text"},
+            {"id": 4, "slide_number": 4, "title": "D", "slide_text": "text"},
+        ]
+        active_by_provider = {"a": 0, "b": 0}
+        max_by_provider = {"a": 0, "b": 0}
+        used_providers = []
+
+        def fake_generate_text(prompt, **kwargs):
+            provider_key = kwargs["provider_key"]
+            used_providers.append(provider_key)
+            active_by_provider[provider_key] += 1
+            max_by_provider[provider_key] = max(max_by_provider[provider_key], active_by_provider[provider_key])
+            time.sleep(0.05)
+            active_by_provider[provider_key] -= 1
+            return f"{provider_key}:{prompt}"
+
+        with (
+            patch.object(ppt_tutor, "generate_text", side_effect=fake_generate_text),
+            patch.object(ppt_tutor, "insert_and_get_id", return_value=1),
+            patch.object(ppt_tutor, "_build_slide_prompt", side_effect=lambda deck, slide, **kwargs: f"slide-{slide['slide_number']}"),
+            patch.object(ppt_tutor, "_image_paths_for_generation", return_value=[]),
+            patch.object(ppt_tutor, "_is_text_empty", return_value=False),
+            patch.object(ppt_tutor, "should_use_lightweight_explanation", return_value=False),
+        ):
+            ppt_tutor._background_generation_worker(task, {"id": 9, "title": "Deck"}, slides)
+
+        self.assertEqual(set(used_providers), {"a", "b"})
+        self.assertLessEqual(max_by_provider["a"], 1)
+        self.assertLessEqual(max_by_provider["b"], 1)
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["generated"], 4)
+
+    def test_failed_slide_retries_with_another_provider(self):
+        task = {
+            "status": "running",
+            "progress": 0.0,
+            "status_text": "",
+            "generated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "parallelism": 2,
+            "send_image_when_no_text": False,
+            "force_image_input": False,
+            "provider_pool": [
+                {
+                    "provider_key": "bad",
+                    "provider_name": "Bad Provider",
+                    "api_key": "bad-key",
+                    "active_model": "bad-model",
+                    "active_model_label": "Bad Provider / bad-model",
+                    "supports_image_input": False,
+                    "parallel_limit": 1,
+                },
+                {
+                    "provider_key": "good",
+                    "provider_name": "Good Provider",
+                    "api_key": "good-key",
+                    "active_model": "good-model",
+                    "active_model_label": "Good Provider / good-model",
+                    "supports_image_input": False,
+                    "parallel_limit": 1,
+                },
+            ],
+            "max_tokens": 100,
+            "reasoning_depth": "关闭",
+            "context_by_slide": {},
+            "related_knowledge": "",
+            "user_id": 7,
+            "stop_requested": False,
+            "retry_failed_pages": True,
+            "max_retries": 2,
+        }
+        slide = {"id": 1, "slide_number": 1, "title": "A", "slide_text": "text"}
+        provider_attempts = []
+
+        def fake_generate_text(prompt, **kwargs):
+            provider_attempts.append(kwargs["provider_key"])
+            if kwargs["provider_key"] == "bad":
+                raise AIServiceError("temporary failure")
+            return "retry succeeded"
+
+        with (
+            patch.object(ppt_tutor, "generate_text", side_effect=fake_generate_text),
+            patch.object(ppt_tutor, "insert_and_get_id", return_value=1) as insert_and_get_id,
+            patch.object(ppt_tutor, "_build_slide_prompt", return_value="slide-1"),
+            patch.object(ppt_tutor, "_image_paths_for_generation", return_value=[]),
+            patch.object(ppt_tutor, "_is_text_empty", return_value=False),
+            patch.object(ppt_tutor, "should_use_lightweight_explanation", return_value=False),
+        ):
+            ppt_tutor._background_generation_worker(task, {"id": 9, "title": "Deck"}, [slide])
+
+        self.assertEqual(provider_attempts, ["bad", "good"])
+        self.assertEqual(insert_and_get_id.call_count, 1)
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["generated"], 1)
+        self.assertEqual(task["failed"], 0)
+        self.assertEqual(task["retried"], 1)
+
+    def test_failed_slide_keeps_retrying_until_success_without_user_retry_limits(self):
+        task = {
+            "status": "running",
+            "progress": 0.0,
+            "status_text": "",
+            "generated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "parallelism": 1,
+            "send_image_when_no_text": False,
+            "force_image_input": False,
+            "provider_pool": [
+                {
+                    "provider_key": "flaky",
+                    "provider_name": "Flaky Provider",
+                    "api_key": "flaky-key",
+                    "active_model": "flaky-model",
+                    "active_model_label": "Flaky Provider / flaky-model",
+                    "supports_image_input": False,
+                    "parallel_limit": 1,
+                },
+            ],
+            "max_tokens": 100,
+            "reasoning_depth": "关闭",
+            "context_by_slide": {},
+            "related_knowledge": "",
+            "user_id": 7,
+            "stop_requested": False,
+            "retry_failed_pages": False,
+            "max_retries": 0,
+        }
+        slide = {"id": 1, "slide_number": 1, "title": "A", "slide_text": "text"}
+        attempts = 0
+
+        def fake_generate_text(prompt, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise AIServiceError("temporary failure")
+            return "eventual success"
+
+        with (
+            patch.object(ppt_tutor, "generate_text", side_effect=fake_generate_text),
+            patch.object(ppt_tutor, "insert_and_get_id", return_value=1) as insert_and_get_id,
+            patch.object(ppt_tutor, "_build_slide_prompt", return_value="slide-1"),
+            patch.object(ppt_tutor, "_image_paths_for_generation", return_value=[]),
+            patch.object(ppt_tutor, "_is_text_empty", return_value=False),
+            patch.object(ppt_tutor, "should_use_lightweight_explanation", return_value=False),
+        ):
+            ppt_tutor._background_generation_worker(task, {"id": 9, "title": "Deck"}, [slide])
+
+        self.assertEqual(attempts, 3)
+        self.assertEqual(insert_and_get_id.call_count, 1)
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["generated"], 1)
+        self.assertEqual(task["failed"], 0)
+        self.assertEqual(task["retried"], 2)
 
 
 if __name__ == "__main__":

@@ -23,11 +23,11 @@ def provider_model_state_key(provider_key: str) -> str:
 def ensure_provider_model(provider: dict[str, Any]) -> str:
     provider_key = str(provider["provider_key"])
     key = provider_model_state_key(provider_key)
+    default_model = str(provider.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
     if key not in st.session_state:
-        st.session_state[key] = provider.get("model") or DEFAULT_MODEL
-    model = str(st.session_state.get(key) or provider.get("model") or DEFAULT_MODEL).strip()
-    st.session_state[key] = model
-    return model
+        st.session_state[key] = default_model
+        return default_model
+    return str(st.session_state.get(key) or default_model).strip() or default_model
 
 
 def set_active_provider(provider_key: str, model: str) -> None:

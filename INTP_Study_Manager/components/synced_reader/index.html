@@ -1036,10 +1036,21 @@
     let readerStructureSignature = '';
     let positionNotifyTimer = null;
     let lastPositionNotifyKey = '';
+    let nearbyContentTimer = null;
+    let pendingNearbySlideNumber = null;
+    let typesetFlushTimer = null;
+    let mathJaxRetryTimer = null;
+    let typesetChain = Promise.resolve();
+    const pendingTypesetTargets = new Set();
+    const hydratingNotePromises = new Map();
     const pendingExplanationSaves = new Map();
     const PENDING_SAVE_TTL_MS = 30000;
     const VIEWPORT_ANCHOR_MS = 1400;
     const NOTE_HYDRATE_RADIUS = 1;
+    const TYPESET_BATCH_DELAY_MS = 40;
+    const MATHJAX_RETRY_MS = 180;
+    const NEARBY_CONTENT_IDLE_MS = 90;
+    const IMAGE_WINDOW_NOTIFY_IDLE_MS = 420;
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -1065,8 +1076,93 @@
       return -1;
     }
 
+    function isAsciiWordLike(char) {
+      return /[A-Za-z0-9_$]/.test(String(char || ''));
+    }
+
+    function isLikelyEqualityOperator(source, index) {
+      if (!source.startsWith('==', index)) return false;
+      const before = source[index - 1] || '';
+      const after = source[index + 2] || '';
+      if (/\s/.test(before) && /\s/.test(after)) return true;
+      return isAsciiWordLike(before) && isAsciiWordLike(after);
+    }
+
+    function findHighlightDelimiter(source, start) {
+      let index = start;
+      while (index < source.length) {
+        const found = findUnescaped(source, '==', index);
+        if (found < 0) return -1;
+        if (!isLikelyEqualityOperator(source, found)) return found;
+        index = found + 2;
+      }
+      return -1;
+    }
+
     function normalizeMathDelimiters(value) {
       return String(value ?? '').replace(/\\\\([()[\]])/g, '\\$1');
+    }
+
+    function protectMarkdownCodeSegments(value) {
+      const source = String(value ?? '');
+      const segments = [];
+      let protectedSource = '';
+      let index = 0;
+      const pushSegment = (endIndex, segment) => {
+        const token = `MARKDOWNCODEPLACEHOLDER${segments.length}TOKEN`;
+        segments.push({ token, segment });
+        protectedSource += token;
+        index = endIndex;
+      };
+
+      scan:
+      while (index < source.length) {
+        if (source.startsWith('```', index) || source.startsWith('~~~', index)) {
+          const fence = source.slice(index, index + 3);
+          const firstLineEnd = source.indexOf('\n', index + 3);
+          if (firstLineEnd >= 0) {
+            let searchFrom = firstLineEnd + 1;
+            while (searchFrom < source.length) {
+              const close = source.indexOf(fence, searchFrom);
+              if (close < 0) break;
+              if (close === 0 || source[close - 1] === '\n') {
+                const closeLineEnd = source.indexOf('\n', close + fence.length);
+                const endIndex = closeLineEnd >= 0 ? closeLineEnd + 1 : close + fence.length;
+                pushSegment(endIndex, source.slice(index, endIndex));
+                continue scan;
+              }
+              searchFrom = close + fence.length;
+            }
+          }
+        }
+
+        if (source[index] === '`') {
+          let tickEnd = index;
+          while (source[tickEnd] === '`') tickEnd += 1;
+          const tickCount = tickEnd - index;
+          if (tickCount < 3) {
+            const fence = '`'.repeat(tickCount);
+            const end = source.indexOf(fence, tickEnd);
+            if (end >= 0) {
+              pushSegment(end + tickCount, source.slice(index, end + tickCount));
+              continue;
+            }
+          }
+        }
+
+        protectedSource += source[index];
+        index += 1;
+      }
+
+      return { protectedSource, segments };
+    }
+
+    function restoreMarkdownCodeSegments(value, segments) {
+      let output = String(value ?? '');
+      segments.forEach(({ token, segment }) => {
+        output = output.replaceAll(token, segment);
+      });
+      return output;
     }
 
     function protectMathSegments(value) {
@@ -1132,8 +1228,8 @@
       let protectedSource = '';
       let index = 0;
       while (index < source.length) {
-        if (source.startsWith('==', index)) {
-          const end = findUnescaped(source, '==', index + 2);
+        if (source.startsWith('==', index) && !isLikelyEqualityOperator(source, index)) {
+          const end = findHighlightDelimiter(source, index + 2);
           if (end >= 0) {
             const token = `HIGHLIGHTPLACEHOLDER${segments.length}TOKEN`;
             segments.push({ token, segment: source.slice(index + 2, end) });
@@ -1156,16 +1252,57 @@
       return html;
     }
 
+    function renderFallbackCodeSegment(segment) {
+      const source = String(segment ?? '');
+      if (source.startsWith('```') || source.startsWith('~~~')) {
+        const fence = source.slice(0, 3);
+        const firstLineEnd = source.indexOf('\n');
+        const info = firstLineEnd >= 0 ? source.slice(3, firstLineEnd).trim() : '';
+        const language = (info.split(/\s+/)[0] || '').replace(/[^\w-]/g, '');
+        const codeStart = firstLineEnd >= 0 ? firstLineEnd + 1 : 3;
+        let codeEnd = source.lastIndexOf(`\n${fence}`);
+        if (codeEnd < codeStart) {
+          codeEnd = source.endsWith(fence) ? source.length - fence.length : source.length;
+        }
+        const code = source.slice(codeStart, codeEnd);
+        const languageClass = language ? ` class="language-${escapeHtml(language)}"` : '';
+        return `<pre><code${languageClass}>${escapeHtml(code)}</code></pre>`;
+      }
+
+      if (source.startsWith('`')) {
+        let tickCount = 0;
+        while (source[tickCount] === '`') tickCount += 1;
+        return `<code>${escapeHtml(source.slice(tickCount, source.length - tickCount))}</code>`;
+      }
+
+      return escapeHtml(source);
+    }
+
+    function renderFallbackMarkdown(value) {
+      const codeProtected = protectMarkdownCodeSegments(value);
+      let html = escapeHtml(codeProtected.protectedSource).replaceAll('\n', '<br>');
+      codeProtected.segments.forEach(({ token, segment }) => {
+        html = html.replaceAll(token, renderFallbackCodeSegment(segment));
+      });
+      return html;
+    }
+
     function renderMarkdown(value) {
       const source = String(value ?? '');
-      if (!window.marked || !window.DOMPurify) {
-        return escapeHtml(source)
-          .replace(/==([^=\n][\s\S]*?[^=\n])==/g, '<mark class="reader-highlight">$1</mark>')
-          .replaceAll('\n', '<br>');
-      }
-      const mathProtected = protectMathSegments(source);
+      const codeProtected = protectMarkdownCodeSegments(source);
+      const mathProtected = protectMathSegments(codeProtected.protectedSource);
       const highlightProtected = protectHighlightSegments(mathProtected.protectedSource);
-      const rawHtml = window.marked.parse(highlightProtected.protectedSource, {
+      const markdownSource = restoreMarkdownCodeSegments(
+        highlightProtected.protectedSource,
+        codeProtected.segments
+      );
+      if (!window.marked || !window.DOMPurify) {
+        return restoreMathSegments(
+          restoreHighlightSegments(renderFallbackMarkdown(markdownSource), highlightProtected.segments),
+          mathProtected.segments
+        );
+      }
+      const rawHtml = window.marked.parse(markdownSource, {
         gfm: true,
         breaks: true,
       });
@@ -1178,17 +1315,81 @@
       );
     }
 
-    function typesetTargets(targets) {
+    function connectedTypesetTargets(targets) {
+      const seen = new Set();
+      return (Array.isArray(targets) ? targets : [targets])
+        .filter(target => {
+          if (!target || seen.has(target)) return false;
+          if (target.isConnected === false) return false;
+          if (
+            typeof document !== 'undefined'
+            && target.nodeType
+            && document.contains
+            && !document.contains(target)
+          ) {
+            return false;
+          }
+          seen.add(target);
+          return true;
+        });
+    }
+
+    function scheduleMathJaxRetry() {
+      if (mathJaxRetryTimer) return;
+      mathJaxRetryTimer = window.setTimeout(() => {
+        mathJaxRetryTimer = null;
+        if (pendingTypesetTargets.size) flushTypesetQueue();
+      }, MATHJAX_RETRY_MS);
+    }
+
+    function flushTypesetQueue() {
+      if (typesetFlushTimer) {
+        window.clearTimeout(typesetFlushTimer);
+        typesetFlushTimer = null;
+      }
+      const targets = connectedTypesetTargets(Array.from(pendingTypesetTargets));
+      pendingTypesetTargets.clear();
+      if (!targets.length) return Promise.resolve(false);
       if (!window.MathJax?.typesetPromise) {
-        window.setTimeout(() => typesetTargets(targets), 120);
-        return Promise.resolve();
+        targets.forEach(target => pendingTypesetTargets.add(target));
+        scheduleMathJaxRetry();
+        return Promise.resolve(false);
       }
-      try {
-        window.MathJax.typesetClear?.(targets);
-      } catch (error) {
-        console.error(error);
+      typesetChain = typesetChain
+        .catch(error => {
+          console.error(error);
+          return false;
+        })
+        .then(() => {
+          const freshTargets = connectedTypesetTargets(targets);
+          if (!freshTargets.length) return false;
+          try {
+            window.MathJax.typesetClear?.(freshTargets);
+          } catch (error) {
+            console.error(error);
+          }
+          return window.MathJax.typesetPromise(freshTargets)
+            .then(() => true)
+            .catch(error => {
+              console.error(error);
+              return false;
+            });
+        });
+      return typesetChain;
+    }
+
+    function typesetTargets(targets) {
+      const freshTargets = connectedTypesetTargets(targets);
+      if (!freshTargets.length) return Promise.resolve(false);
+      freshTargets.forEach(target => pendingTypesetTargets.add(target));
+      if (!window.MathJax?.typesetPromise) {
+        scheduleMathJaxRetry();
+        return Promise.resolve(false);
       }
-      return window.MathJax.typesetPromise(targets).catch(error => console.error(error));
+      if (!typesetFlushTimer) {
+        typesetFlushTimer = window.setTimeout(flushTypesetQueue, TYPESET_BATCH_DELAY_MS);
+      }
+      return typesetChain;
     }
 
     function typesetMath() {
@@ -1580,11 +1781,21 @@
       const body = note?.querySelector?.('.note-body');
       const editor = note?.querySelector?.('.note-editor');
       if (!page || !body || body.dataset.hydrated === '1') return Promise.resolve(false);
+      const hydrateKey = Number(slideNumber);
+      const pending = hydratingNotePromises.get(hydrateKey);
+      if (pending?.body === body) return pending.promise;
       body.innerHTML = renderMarkdown(page.explanation);
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (editor) editor.value = String(page.explanation || '');
-      return typesetTargets([body]).then(() => true);
+      const promise = typesetTargets([body])
+        .then(() => true)
+        .finally(() => {
+          const latest = hydratingNotePromises.get(hydrateKey);
+          if (latest?.body === body) hydratingNotePromises.delete(hydrateKey);
+        });
+      hydratingNotePromises.set(hydrateKey, { body, promise });
+      return promise;
     }
 
     function requestImageWindowIfNeeded(slideNumber) {
@@ -1601,7 +1812,7 @@
           deckId,
           slideNumber: Number(slideNumber),
         });
-      }, 160);
+      }, IMAGE_WINDOW_NOTIFY_IDLE_MS);
     }
 
     function ensureNearbyContent(slideNumber) {
@@ -1610,6 +1821,18 @@
         if (shouldHydrateNote(pageNumber, slideNumber)) hydrateNote(pageNumber);
       });
       requestImageWindowIfNeeded(slideNumber);
+    }
+
+    function scheduleNearbyContent(slideNumber) {
+      pendingNearbySlideNumber = Number(slideNumber);
+      window.clearTimeout(nearbyContentTimer);
+      nearbyContentTimer = window.setTimeout(() => {
+        nearbyContentTimer = null;
+        const slideToHydrate = pendingNearbySlideNumber;
+        pendingNearbySlideNumber = null;
+        if (!pageForSlide(slideToHydrate)) return;
+        ensureNearbyContent(slideToHydrate);
+      }, NEARBY_CONTENT_IDLE_MS);
     }
 
     function maxSlideNumber() {
@@ -1843,6 +2066,18 @@
       const nextSlideNumber = Number(pageNumber || 1);
       if (!pageForSlide(nextSlideNumber)) return;
       const sameSlide = nextSlideNumber === currentSlideNumber;
+      const currentPage = document.getElementById(`page-${nextSlideNumber}`);
+      const currentNote = document.getElementById(`note-${nextSlideNumber}`);
+      if (
+        sameSlide
+        && currentPage?.classList.contains('active')
+        && currentNote?.classList.contains('active')
+        && !options.scrollPage
+        && !options.forceNoteScroll
+      ) {
+        scheduleScrollStateSave();
+        return;
+      }
       currentSlideNumber = nextSlideNumber;
       document.querySelectorAll('.page.active,.note.active').forEach(el => el.classList.remove('active'));
       const page = document.getElementById(`page-${currentSlideNumber}`);
@@ -1863,7 +2098,11 @@
       if (options.scrollPage) {
         centerPage(currentSlideNumber, options.behavior || 'smooth');
       }
-      ensureNearbyContent(currentSlideNumber);
+      if (options.immediateNearbyContent) {
+        ensureNearbyContent(currentSlideNumber);
+      } else {
+        scheduleNearbyContent(currentSlideNumber);
+      }
       if (!options.skipSave) saveScrollState();
     }
 
@@ -1920,7 +2159,7 @@
       const markdownMarkers = new Set(['#', '*', '_', '`', '>', '|']);
       for (let index = 0; index < source.length; index += 1) {
         const char = source[index];
-        if (source.startsWith('==', index)) {
+        if (source.startsWith('==', index) && !isLikelyEqualityOperator(source, index)) {
           index += 1;
           continue;
         }
@@ -2020,9 +2259,9 @@
       if (!location) return null;
       let index = 0;
       while (index < source.length) {
-        const open = source.indexOf('==', index);
+        const open = findHighlightDelimiter(source, index);
         if (open < 0) return null;
-        const close = findUnescaped(source, '==', open + 2);
+        const close = findHighlightDelimiter(source, open + 2);
         if (close < 0) return null;
         const contentStart = open + 2;
         const contentEnd = close;
@@ -2154,6 +2393,11 @@
       if (nextDeckId && nextDeckId !== deckId) {
         hasCenteredOnEntry = false;
         pendingExplanationSaves.clear();
+        hydratingNotePromises.clear();
+        pendingTypesetTargets.clear();
+        window.clearTimeout(nearbyContentTimer);
+        nearbyContentTimer = null;
+        pendingNearbySlideNumber = null;
       }
       const nextPages = applyPendingExplanationOverrides(incomingPages);
       const nextStructureSignature = buildReaderStructureSignature(nextDeckId, nextPages, incomingSections);
