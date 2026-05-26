@@ -2,6 +2,7 @@ package com.intp.study.study.service;
 
 import com.intp.study.common.error.ResourceNotFoundException;
 import com.intp.study.common.tenant.CurrentUserProvider;
+import com.intp.study.review.service.ReviewScheduleService;
 import com.intp.study.study.dto.SaveStudySessionRequest;
 import com.intp.study.study.dto.StudySessionDto;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -19,15 +20,18 @@ public class StudySessionCommandService {
     private final JdbcTemplate jdbcTemplate;
     private final CurrentUserProvider currentUserProvider;
     private final StudySessionQueryService studySessionQueryService;
+    private final ReviewScheduleService reviewScheduleService;
 
     public StudySessionCommandService(
             JdbcTemplate jdbcTemplate,
             CurrentUserProvider currentUserProvider,
-            StudySessionQueryService studySessionQueryService
+            StudySessionQueryService studySessionQueryService,
+            ReviewScheduleService reviewScheduleService
     ) {
         this.jdbcTemplate = jdbcTemplate;
         this.currentUserProvider = currentUserProvider;
         this.studySessionQueryService = studySessionQueryService;
+        this.reviewScheduleService = reviewScheduleService;
     }
 
     @Transactional
@@ -47,6 +51,12 @@ public class StudySessionCommandService {
             return ps;
         }, keyHolder);
         long id = Objects.requireNonNull(keyHolder.getKey()).longValue();
+        if (request.createKnowledgeCard()) {
+            long knowledgeId = createKnowledgeCardFromSession(userId, id, request);
+            if (request.needReview()) {
+                reviewScheduleService.createInitialReviewTasks(userId, knowledgeId, request.date());
+            }
+        }
         return studySessionQueryService.findForCurrentUser(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Study session not found."));
     }
@@ -109,6 +119,32 @@ public class StudySessionCommandService {
         ps.setInt(11, request.mastery());
         ps.setInt(12, request.needReview() ? 1 : 0);
         ps.setInt(13, request.key() ? 1 : 0);
+    }
+
+    private long createKnowledgeCardFromSession(long userId, long sessionId, SaveStudySessionRequest request) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbcTemplate.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement("""
+                    INSERT INTO knowledge_cards (
+                        user_id, subject, topic, core_question, one_sentence,
+                        logic_or_formula, application, mastery, need_review, source_session_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, Statement.RETURN_GENERATED_KEYS);
+            ps.setLong(1, userId);
+            ps.setString(2, request.subject());
+            ps.setString(3, request.title());
+            ps.setString(4, request.mainQuestion());
+            String masteredContent = defaultString(request.masteredContent());
+            ps.setString(5, masteredContent.isBlank() ? "待补充一句话解释" : masteredContent);
+            ps.setString(6, defaultString(request.summary()));
+            ps.setString(7, defaultString(request.wrongQuestions()));
+            ps.setInt(8, request.mastery());
+            ps.setInt(9, request.needReview() ? 1 : 0);
+            ps.setLong(10, sessionId);
+            return ps;
+        }, keyHolder);
+        return Objects.requireNonNull(keyHolder.getKey()).longValue();
     }
 
     private String defaultString(String value) {

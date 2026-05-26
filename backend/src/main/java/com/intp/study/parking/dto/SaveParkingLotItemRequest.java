@@ -6,6 +6,6 @@ public record SaveParkingLotItemRequest(
         String subject,
         @NotBlank String question,
         String source,
-        @NotBlank String status
+        String status
 ) {
 }

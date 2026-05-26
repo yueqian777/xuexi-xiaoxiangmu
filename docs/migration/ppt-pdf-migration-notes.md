@@ -133,6 +133,18 @@ Rules preserved:
 - Knowledge cards now support full CRUD; `source_session_id` is accepted only when the referenced study session belongs to the current user.
 - Parking-lot items now support full CRUD; all writes are scoped to the current session user.
 - Missing single resources now return a shared 404 `ResourceNotFoundException` response instead of being treated as bad requests.
+- A Python-comparison review found that mastery must stay in the Python 0-100 range; Java validation was corrected from 0-5 to 0-100.
+- A shared Java `ReviewScheduleService` now mirrors Python `REVIEW_INTERVALS`: 1, 3, 7, and 14 day review tasks.
+- Creating a knowledge card with `needReview=true` now ensures initial review tasks, matching Python `ensure_initial_review_tasks`.
+- Creating a mistake with `addToReview=true` and a linked `knowledgeId` now ensures initial review tasks, matching Python behavior.
+- Creating a study session with `createKnowledgeCard=true` now mirrors Python's "同时创建知识点卡片" flow in one transaction.
+- Parking-lot create now defaults blank status to `未解决`, matching Python's database-default behavior.
+- Mistake create/update can inherit `subject` and `topic` from the linked knowledge card when those fields are blank, matching Python's form behavior.
+
+Remaining Python-parity gaps:
+
+- Parking-lot conversion actions are not migrated yet: mark resolved, convert to knowledge card, convert to branch question.
+- Java DELETE endpoints are currently an intentional API expansion; confirm final product permissions before exposing them in React.
 
 Verification:
 

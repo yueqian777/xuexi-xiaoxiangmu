@@ -11,7 +11,7 @@ public record SaveKnowledgeCardRequest(
         @NotBlank String oneSentence,
         String logicOrFormula,
         String application,
-        @Min(0) @Max(5) int mastery,
+        @Min(0) @Max(100) int mastery,
         boolean needReview,
         Long sourceSessionId
 ) {

@@ -43,7 +43,7 @@ public class ParkingLotCommandService {
             ps.setString(2, defaultString(request.subject()));
             ps.setString(3, request.question());
             ps.setString(4, defaultString(request.source()));
-            ps.setString(5, request.status());
+            ps.setString(5, defaultStatus(request.status()));
             return ps;
         }, keyHolder);
         long id = Objects.requireNonNull(keyHolder.getKey()).longValue();
@@ -62,7 +62,7 @@ public class ParkingLotCommandService {
                 defaultString(request.subject()),
                 request.question(),
                 defaultString(request.source()),
-                request.status(),
+                defaultStatus(request.status()),
                 id,
                 userId
         );
@@ -87,5 +87,9 @@ public class ParkingLotCommandService {
 
     private String defaultString(String value) {
         return value == null ? "" : value;
+    }
+
+    private String defaultStatus(String value) {
+        return value == null || value.isBlank() ? "未解决" : value;
     }
 }

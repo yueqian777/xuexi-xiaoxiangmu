@@ -4,6 +4,7 @@ import com.intp.study.common.error.ResourceNotFoundException;
 import com.intp.study.common.tenant.CurrentUserProvider;
 import com.intp.study.knowledge.dto.KnowledgeCardDto;
 import com.intp.study.knowledge.dto.SaveKnowledgeCardRequest;
+import com.intp.study.review.service.ReviewScheduleService;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
@@ -19,15 +20,18 @@ public class KnowledgeCardCommandService {
     private final JdbcTemplate jdbcTemplate;
     private final CurrentUserProvider currentUserProvider;
     private final KnowledgeCardQueryService knowledgeCardQueryService;
+    private final ReviewScheduleService reviewScheduleService;
 
     public KnowledgeCardCommandService(
             JdbcTemplate jdbcTemplate,
             CurrentUserProvider currentUserProvider,
-            KnowledgeCardQueryService knowledgeCardQueryService
+            KnowledgeCardQueryService knowledgeCardQueryService,
+            ReviewScheduleService reviewScheduleService
     ) {
         this.jdbcTemplate = jdbcTemplate;
         this.currentUserProvider = currentUserProvider;
         this.knowledgeCardQueryService = knowledgeCardQueryService;
+        this.reviewScheduleService = reviewScheduleService;
     }
 
     @Transactional
@@ -47,6 +51,9 @@ public class KnowledgeCardCommandService {
             return ps;
         }, keyHolder);
         long id = Objects.requireNonNull(keyHolder.getKey()).longValue();
+        if (request.needReview()) {
+            reviewScheduleService.ensureInitialReviewTasks(userId, id, null);
+        }
         return knowledgeCardQueryService.findForCurrentUser(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge card not found."));
     }

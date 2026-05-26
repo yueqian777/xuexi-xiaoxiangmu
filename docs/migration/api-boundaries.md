@@ -63,6 +63,8 @@ DTOs:
 - `StudySessionDto`
 - `SaveStudySessionRequest`
 
+`SaveStudySessionRequest.createKnowledgeCard` preserves the Python "同时创建知识点卡片" workflow. When true, the backend creates the related card and initial review tasks in the same transaction.
+
 ## Knowledge API
 
 ```text
@@ -124,7 +126,7 @@ DELETE /api/parking-lot/{id}
 DTOs:
 
 - `MistakeDto`
-- `CreateMistakeRequest`
+- `SaveMistakeRequest`
 - `ParkingLotItemDto`
 - `SaveParkingLotItemRequest`
 

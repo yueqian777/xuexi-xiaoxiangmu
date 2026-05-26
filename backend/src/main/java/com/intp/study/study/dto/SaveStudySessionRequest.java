@@ -14,8 +14,9 @@ public record SaveStudySessionRequest(
         String blockers,
         String wrongQuestions,
         String summary,
-        @Min(0) @Max(5) int mastery,
+        @Min(0) @Max(100) int mastery,
         boolean needReview,
-        boolean key
+        boolean key,
+        boolean createKnowledgeCard
 ) {
 }
