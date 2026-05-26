@@ -10,12 +10,20 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
+import time
 
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
 from db import BASE_DIR, execute, fetch_all, fetch_one, insert_and_get_id
+from repositories.ppt_repository import (
+    add_slide_explanation,
+    add_slide_question,
+    latest_explanation,
+    latest_explanations_by_slide_ids,
+    questions_by_slide_ids,
+)
 from services.ai_service import (
     AIServiceError,
     DEFAULT_MODEL,
@@ -38,18 +46,33 @@ from services.ppt_context_service import (
     save_deck_structure,
     should_use_lightweight_explanation,
 )
+from services.ppt_generation_state import apply_stop_request, generation_progress_patch
 from services.ppt_service import import_deck, refresh_pdf_slide_text, render_missing_page_images
 from services.prompt_service import render_template
+from services.ppt_reader_state import (
+    LAST_READER_DECK_STATE_KEY,
+    LAST_READER_POSITION_SETTING_KEY,
+    READER_ACTIVE_SLIDE_STATE_PREFIX,
+    build_reader_position_payload,
+    default_reader_deck_id,
+    initial_reader_slide_number,
+    parse_reader_position,
+    reader_active_slide_number,
+    reader_active_slide_state_key,
+    reader_image_window_slide_numbers,
+    reader_position_setting_key,
+    should_refresh_task,
+    update_reader_position_state,
+)
 from services.study_asset_service import parse_study_assets, save_study_assets
 
 SYNCED_READER_COMPONENT_PATH = BASE_DIR / "components" / "synced_reader"
 SYNCED_READER_COMPONENT = None
-LAST_READER_POSITION_SETTING_KEY = "ppt_reader_last_position"
-LAST_READER_DECK_STATE_KEY = "ppt_reader_deck_id"
-READER_ACTIVE_SLIDE_STATE_PREFIX = "ppt_reader_active_slide_"
 READER_IMAGE_WINDOW_RADIUS = 2
 PPT_GENERATION_MAX_PARALLELISM = 4
 PPT_GENERATION_REFRESH_SECONDS = 1.5
+PPT_GENERATION_REFRESH_STATE_KEY = "ppt_generation_last_refresh"
+PPT_STRUCTURE_REFRESH_STATE_KEY = "ppt_structure_last_refresh"
 
 
 def _get_synced_reader_component():
@@ -68,26 +91,11 @@ def _get_synced_reader_component():
 def _read_last_reader_position(user_id: int) -> dict[str, int]:
     row = fetch_one(
         "SELECT value FROM app_settings WHERE key = ?",
-        (f"user:{user_id}:{LAST_READER_POSITION_SETTING_KEY}",),
+        (reader_position_setting_key(user_id),),
     )
     if not row:
         return {}
-    try:
-        data = json.loads(row["value"])
-    except (TypeError, json.JSONDecodeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-
-    position: dict[str, int] = {}
-    for key in ("deck_id", "slide_number"):
-        try:
-            value = int(data.get(key) or 0)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            position[key] = value
-    return position
+    return parse_reader_position(row["value"])
 
 
 def _save_last_reader_position(
@@ -97,25 +105,11 @@ def _save_last_reader_position(
     *,
     existing: dict[str, int] | None = None,
 ) -> None:
-    try:
-        deck_id = int(deck_id)
-    except (TypeError, ValueError):
-        return
-    if deck_id <= 0:
+    payload = build_reader_position_payload(deck_id, slide_number, existing=existing if existing is not None else _read_last_reader_position(user_id))
+    if not payload:
         return
 
     existing = existing if existing is not None else _read_last_reader_position(user_id)
-    if slide_number is None and existing.get("deck_id") == deck_id:
-        slide_number = existing.get("slide_number")
-
-    payload = {"deck_id": deck_id}
-    try:
-        slide_number_value = int(slide_number or 0)
-    except (TypeError, ValueError):
-        slide_number_value = 0
-    if slide_number_value > 0:
-        payload["slide_number"] = slide_number_value
-
     if existing == payload:
         return
 
@@ -128,27 +122,12 @@ def _save_last_reader_position(
             value = excluded.value,
             updated_at = excluded.updated_at
         """,
-        (f"user:{user_id}:{LAST_READER_POSITION_SETTING_KEY}", user_id, json.dumps(payload, ensure_ascii=False)),
+        (reader_position_setting_key(user_id), user_id, json.dumps(payload, ensure_ascii=False)),
     )
 
 
 def _default_reader_deck_id(deck_ids: list[int], last_position: dict[str, int]) -> int:
-    if not deck_ids:
-        return 0
-
-    remembered_deck_id = int(last_position.get("deck_id") or 0)
-    if remembered_deck_id in deck_ids:
-        return remembered_deck_id
-
-    state_deck_id = st.session_state.get(LAST_READER_DECK_STATE_KEY)
-    try:
-        state_deck_id = int(state_deck_id or 0)
-    except (TypeError, ValueError):
-        state_deck_id = 0
-    if state_deck_id in deck_ids:
-        return state_deck_id
-
-    return deck_ids[0]
+    return default_reader_deck_id(deck_ids, last_position, st.session_state.get(LAST_READER_DECK_STATE_KEY))
 
 
 def _remember_reader_deck_selection(user_id: int, deck_id: int, last_position: dict[str, int]) -> None:
@@ -159,41 +138,19 @@ def _remember_reader_deck_selection(user_id: int, deck_id: int, last_position: d
 
 
 def _initial_reader_slide_number(deck_id: int, slides: list[dict], last_position: dict[str, int]) -> int:
-    if not slides:
-        return 1
-    slide_numbers = {int(slide["slide_number"]) for slide in slides}
-    remembered_slide = int(last_position.get("slide_number") or 0)
-    if int(last_position.get("deck_id") or 0) == int(deck_id) and remembered_slide in slide_numbers:
-        return remembered_slide
-    return int(slides[0]["slide_number"])
+    return initial_reader_slide_number(deck_id, slides, last_position)
 
 
 def _reader_active_slide_state_key(deck_id: int) -> str:
-    return f"{READER_ACTIVE_SLIDE_STATE_PREFIX}{int(deck_id)}"
+    return reader_active_slide_state_key(deck_id)
 
 
 def _reader_active_slide_number(deck_id: int, slides: list[dict], initial_slide_number: int) -> int:
-    slide_numbers = {int(slide["slide_number"]) for slide in slides}
-    if not slide_numbers:
-        return 1
-    try:
-        active = int(st.session_state.get(_reader_active_slide_state_key(deck_id)) or initial_slide_number)
-    except (TypeError, ValueError):
-        active = int(initial_slide_number)
-    return active if active in slide_numbers else int(initial_slide_number)
+    return reader_active_slide_number(deck_id, slides, initial_slide_number, st.session_state)
 
 
 def _reader_image_window_slide_numbers(slides: list[dict], active_slide_number: int) -> set[int]:
-    if not slides:
-        return set()
-    ordered = [int(slide["slide_number"]) for slide in slides]
-    try:
-        active_index = ordered.index(int(active_slide_number))
-    except ValueError:
-        active_index = 0
-    start = max(0, active_index - READER_IMAGE_WINDOW_RADIUS)
-    end = min(len(ordered), active_index + READER_IMAGE_WINDOW_RADIUS + 1)
-    return set(ordered[start:end])
+    return reader_image_window_slide_numbers(slides, active_slide_number, radius=READER_IMAGE_WINDOW_RADIUS)
 
 
 def render() -> None:
@@ -531,11 +488,7 @@ def _resume_interrupted_structure_generation() -> None:
     if not task:
         return
 
-    status = task.get("status")
-    if task.get("stop_requested") and status == "running":
-        task["status"] = "stopped"
-        task["status_text"] = task.get("status_text", "文档目录分块已停止")
-        status = "stopped"
+    status = apply_stop_request(task, default_status_text="文档目录分块已停止")
 
     if status == "completed":
         st.success(f"AI 文档目录分块完成：{task.get('sections', 0)} 个目录块。")
@@ -559,9 +512,9 @@ def _resume_interrupted_structure_generation() -> None:
             st.rerun()
             return
 
-    import time
-
-    time.sleep(1.5)
+    if not _should_refresh_task(task, PPT_STRUCTURE_REFRESH_STATE_KEY, interval=1.5):
+        return
+    time.sleep(0.5)
     st.rerun()
 
 
@@ -709,14 +662,8 @@ def _handle_synced_reader_action(
 
     token = str(payload.get("token") or "").strip()
     if action == "reader_position":
-        last_position_token_key = f"ppt_reader_position_last_token_{deck['id']}"
-        if token and st.session_state.get(last_position_token_key) == token:
-            return
-        st.session_state[_reader_active_slide_state_key(int(deck["id"]))] = slide_number
-        _save_last_reader_position(require_login().id, int(deck["id"]), slide_number)
-        if token:
-            st.session_state[last_position_token_key] = token
-        st.rerun()
+        if _handle_reader_position_update(deck, slide_number, token):
+            st.rerun()
         return
 
     if action == "save_explanation_edit":
@@ -761,13 +708,7 @@ def _handle_synced_reader_action(
                 model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
             )
-        insert_and_get_id(
-            """
-            INSERT INTO slide_questions (user_id, slide_id, question, answer, model)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (require_login().id, slide["id"], full_question, answer, _active_model_label()),
-        )
+        add_slide_question(require_login().id, slide["id"], full_question, answer, _active_model_label())
     except AIServiceError as exc:
         st.error(str(exc))
         st.caption("侧边插问调用失败，当前阅读位置不会被修改。")
@@ -779,13 +720,22 @@ def _handle_synced_reader_action(
 
 
 def _save_manual_explanation(slide_id: int, explanation: str) -> int:
-    return insert_and_get_id(
-        """
-        INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
-        VALUES (?, ?, ?, ?)
-        """,
-        (require_login().id, int(slide_id), f"手动编辑 / {_active_model_label()}", explanation),
+    return add_slide_explanation(require_login().id, int(slide_id), f"手动编辑 / {_active_model_label()}", explanation)
+
+
+def _handle_reader_position_update(deck: dict, slide_number: int, token: str = "") -> bool:
+    deck_id = int(deck["id"])
+    last_position_token_key = f"ppt_reader_position_last_token_{deck_id}"
+    if token and st.session_state.get(last_position_token_key) == token:
+        return False
+    changed = update_reader_position_state(
+        st.session_state,
+        deck_id=deck_id,
+        slide_number=int(slide_number),
+        token=token,
     )
+    _save_last_reader_position(require_login().id, deck_id, int(slide_number))
+    return changed
 
 
 def _quote_from_component_payload(deck: dict, slide: dict, payload: dict) -> dict | None:
@@ -1321,13 +1271,7 @@ def _render_main_explanation(deck: dict, slide: dict) -> None:
                     max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
                     reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
                 )
-            insert_and_get_id(
-                """
-                INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
-                VALUES (?, ?, ?, ?)
-                """,
-                (require_login().id, slide["id"], _active_model_label(), explanation),
-            )
+            add_slide_explanation(require_login().id, slide["id"], _active_model_label(), explanation)
             st.success("本页主线讲解已保存。")
             st.rerun()
         except AIServiceError as exc:
@@ -1412,13 +1356,7 @@ def _render_branch_question_form(
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
                 reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
             )
-        insert_and_get_id(
-            """
-            INSERT INTO slide_questions (user_id, slide_id, question, answer, model)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (require_login().id, slide["id"], full_question, answer, _active_model_label()),
-        )
+        add_slide_question(require_login().id, slide["id"], full_question, answer, _active_model_label())
         if quote:
             st.session_state.pop(_branch_quote_state_key(quote["deck_id"]), None)
         st.success(f"插问已保存。现在回到第 {slide['slide_number']} 页主线。")
@@ -1481,14 +1419,7 @@ def _resume_interrupted_generation() -> dict | None:
     if not task:
         return None
 
-    status = task.get("status")
-    stop_requested = task.get("stop_requested")
-
-    # 处理停止请求：用户点击停止时立即更新状态，不等后台线程
-    if stop_requested and status == "running":
-        task["status"] = "stopped"
-        task["status_text"] = task.get("status_text", "生成已停止")
-        status = "stopped"
+    status = apply_stop_request(task, default_status_text="生成已停止")
 
     if status == "completed":
         st.success(f"✅ 生成完成：{int(task.get('generated') or 0)} 页")
@@ -1525,11 +1456,16 @@ def _resume_interrupted_generation() -> dict | None:
 def _auto_refresh_running_generation(task: dict | None) -> None:
     if not task or task.get("status") != "running":
         return
-    import time
 
     # 放在阅读器渲染之后刷新，避免生成期间只显示进度条而不显示新入库讲解。
-    time.sleep(PPT_GENERATION_REFRESH_SECONDS)
+    if not _should_refresh_task(task, PPT_GENERATION_REFRESH_STATE_KEY, interval=PPT_GENERATION_REFRESH_SECONDS):
+        return
+    time.sleep(min(PPT_GENERATION_REFRESH_SECONDS, 0.5))
     st.rerun()
+
+
+def _should_refresh_task(task: dict, state_key: str, *, interval: float) -> bool:
+    return should_refresh_task(st.session_state, task, state_key, interval=interval, now=time.monotonic())
 
 
 def _generate_whole_deck_explanations(
@@ -1617,13 +1553,7 @@ def _generate_whole_deck_explanations(
         context = context_by_slide.get(int(slide["slide_number"]))
         if should_use_lightweight_explanation(slide):
             explanation = build_lightweight_explanation(deck, slide, context)
-            insert_and_get_id(
-                """
-                INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
-                VALUES (?, ?, ?, ?)
-                """,
-                (user_id, slide["id"], f"{active_model_label} / 分块摘要", explanation),
-            )
+            add_slide_explanation(user_id, slide["id"], f"{active_model_label} / 分块摘要", explanation)
             generated += 1
             progress.progress(
                 index / len(targets),
@@ -1667,13 +1597,7 @@ def _generate_whole_deck_explanations(
                 max_output_tokens=max_tokens,
                 reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
             )
-            insert_and_get_id(
-                """
-                INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
-                VALUES (?, ?, ?, ?)
-                """,
-                (user_id, slide["id"], active_model_label, explanation),
-            )
+            add_slide_explanation(user_id, slide["id"], active_model_label, explanation)
             generated += 1
         except AIServiceError as exc:
             if image_paths and _is_image_input_error(exc):
@@ -1701,13 +1625,7 @@ def _generate_whole_deck_explanations(
                         max_output_tokens=max_tokens,
                         reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
                     )
-                    insert_and_get_id(
-                        """
-                        INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        (user_id, slide["id"], active_model_label, explanation),
-                    )
+                    add_slide_explanation(user_id, slide["id"], active_model_label, explanation)
                     generated += 1
                     continue
                 except AIServiceError as retry_exc:
@@ -1760,13 +1678,7 @@ def _slide_generation_result(
 
 
 def _save_generated_explanation(user_id: int, slide_id: int, model: str, explanation: str) -> int:
-    return insert_and_get_id(
-        """
-        INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
-        VALUES (?, ?, ?, ?)
-        """,
-        (user_id, int(slide_id), model, explanation),
-    )
+    return add_slide_explanation(user_id, int(slide_id), model, explanation)
 
 
 def _should_stop_generation_after_error(exc: Exception) -> bool:
@@ -1905,20 +1817,17 @@ def _update_generation_task_progress(
     inflight: list[int],
     message: str = "",
 ) -> None:
-    task["processed"] = processed
-    task["generated"] = generated
-    task["skipped"] = skipped
-    task["failed"] = failed
-    task["inflight_slide_numbers"] = inflight
-    task["progress"] = (processed / total) if total else 1.0
-    if message:
-        task["status_text"] = message
-    elif inflight:
-        pages = "、".join(str(number) for number in inflight[:4])
-        suffix = "..." if len(inflight) > 4 else ""
-        task["status_text"] = f"正在并行分析第 {pages}{suffix} 页；已完成 {processed} / {total} 页。"
-    else:
-        task["status_text"] = f"已完成 {processed} / {total} 页。"
+    task.update(
+        generation_progress_patch(
+            processed=processed,
+            total=total,
+            generated=generated,
+            skipped=skipped,
+            failed=failed,
+            inflight=inflight,
+            message=message,
+        )
+    )
 
 
 def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -> None:
@@ -2666,80 +2575,30 @@ def _image_paths_for_generation(
 
 
 def _latest_explanation(slide_id: int) -> dict | None:
-    user_id = require_login().id
-    return fetch_one(
-        """
-        SELECT *
-        FROM slide_explanations
-        WHERE user_id = ? AND slide_id = ?
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        """,
-        (user_id, slide_id),
-    )
+    return latest_explanation(require_login().id, slide_id)
 
 
 def _latest_explanations_by_slide_ids(slide_ids: list[int]) -> dict[int, dict]:
-    if not slide_ids:
-        return {}
-    user_id = require_login().id
-    latest: dict[int, dict] = {}
-    chunk_size = 900
-    for start in range(0, len(slide_ids), chunk_size):
-        chunk = slide_ids[start : start + chunk_size]
-        placeholders = ",".join("?" for _ in chunk)
-        rows = fetch_all(
-            f"""
-            SELECT id, slide_id, model, explanation, created_at
-            FROM (
-                SELECT
-                    se.*,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY se.slide_id
-                        ORDER BY se.created_at DESC, se.id DESC
-                    ) AS rn
-                FROM slide_explanations se
-                WHERE se.user_id = ? AND se.slide_id IN ({placeholders})
-            )
-            WHERE rn = 1
-            """,
-            (user_id, *tuple(chunk)),
-        )
-        latest.update({int(row["slide_id"]): row for row in rows})
-    return latest
+    return latest_explanations_by_slide_ids(require_login().id, slide_ids)
 
 
 def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
-    if not slide_ids:
-        return {}
-    user_id = require_login().id
-    grouped: dict[int, list[dict]] = {int(slide_id): [] for slide_id in slide_ids}
-    chunk_size = 900
-    for start in range(0, len(slide_ids), chunk_size):
-        chunk = slide_ids[start : start + chunk_size]
-        placeholders = ",".join("?" for _ in chunk)
-        rows = fetch_all(
-            f"""
-            SELECT slide_id, question, answer, model, category, status, sort_order, created_at
-            FROM slide_questions
-            WHERE user_id = ? AND slide_id IN ({placeholders})
-            ORDER BY sort_order ASC, created_at ASC, id ASC
-            """,
-            (user_id, *tuple(chunk)),
-        )
-        for row in rows:
-            grouped.setdefault(int(row["slide_id"]), []).append(
-                {
-                    "question": row["question"],
-                    "answer": row["answer"],
-                    "model": row["model"],
-                    "category": row["category"],
-                    "status": row["status"],
-                    "sortOrder": row["sort_order"],
-                    "createdAt": row["created_at"],
-                }
-            )
-    return grouped
+    grouped = questions_by_slide_ids(require_login().id, slide_ids)
+    return {
+        slide_id: [
+            {
+                "question": row["question"],
+                "answer": row["answer"],
+                "model": row["model"],
+                "category": row["category"],
+                "status": row["status"],
+                "sortOrder": row["sort_order"],
+                "createdAt": row["created_at"],
+            }
+            for row in rows
+        ]
+        for slide_id, rows in grouped.items()
+    }
 
 
 def _build_slide_prompt(

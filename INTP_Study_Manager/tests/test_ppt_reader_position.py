@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from pages import ppt_tutor
+from services import ppt_reader_state
 
 
 class PptReaderPositionTest(unittest.TestCase):
@@ -17,6 +18,37 @@ class PptReaderPositionTest(unittest.TestCase):
     def test_read_last_reader_position_ignores_bad_json(self):
         with patch.object(ppt_tutor, "fetch_one", return_value={"value": "not-json"}):
             self.assertEqual(ppt_tutor._read_last_reader_position(42), {})
+
+    def test_parse_reader_position_filters_invalid_values(self):
+        payload = json.dumps({"deck_id": "-7", "slide_number": "abc", "ignored": 3})
+
+        self.assertEqual(ppt_reader_state.parse_reader_position(payload), {})
+
+    def test_build_reader_position_payload_reuses_slide_for_same_deck(self):
+        self.assertEqual(
+            ppt_reader_state.build_reader_position_payload(3, existing={"deck_id": 3, "slide_number": 9}),
+            {"deck_id": 3, "slide_number": 9},
+        )
+
+    def test_build_reader_position_payload_does_not_reuse_slide_for_new_deck(self):
+        self.assertEqual(
+            ppt_reader_state.build_reader_position_payload(4, existing={"deck_id": 3, "slide_number": 9}),
+            {"deck_id": 4},
+        )
+
+    def test_default_reader_deck_id_prefers_session_when_no_valid_memory(self):
+        self.assertEqual(
+            ppt_reader_state.default_reader_deck_id([2, 4], {"deck_id": 99}, "4"),
+            4,
+        )
+
+    def test_reader_image_window_slide_numbers_clips_edges(self):
+        slides = [{"slide_number": 1}, {"slide_number": 2}, {"slide_number": 3}, {"slide_number": 4}]
+
+        self.assertEqual(
+            ppt_reader_state.reader_image_window_slide_numbers(slides, 1, radius=2),
+            {1, 2, 3},
+        )
 
     def test_save_last_reader_position_keeps_slide_for_same_deck(self):
         with (
@@ -52,6 +84,117 @@ class PptReaderPositionTest(unittest.TestCase):
             ppt_tutor._initial_reader_slide_number(2, slides, {"deck_id": 2, "slide_number": 99}),
             1,
         )
+
+    def test_reader_position_update_does_not_refresh_duplicate_token(self):
+        with (
+            patch.object(ppt_tutor.st, "session_state", {"ppt_reader_position_last_token_3": "tok"}),
+            patch.object(ppt_tutor, "_save_last_reader_position") as save_last_reader_position,
+        ):
+            changed = ppt_tutor._handle_reader_position_update({"id": 3}, 5, "tok")
+
+        self.assertFalse(changed)
+        save_last_reader_position.assert_not_called()
+
+    def test_reader_position_update_does_not_refresh_same_slide(self):
+        session_state = {"ppt_reader_active_slide_3": 5}
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 42})()),
+            patch.object(ppt_tutor, "_save_last_reader_position") as save_last_reader_position,
+        ):
+            changed = ppt_tutor._handle_reader_position_update({"id": 3}, 5, "tok")
+
+        self.assertFalse(changed)
+        self.assertEqual(session_state["ppt_reader_position_last_token_3"], "tok")
+        save_last_reader_position.assert_called_once_with(42, 3, 5)
+
+    def test_reader_position_update_refreshes_new_slide(self):
+        session_state = {"ppt_reader_active_slide_3": 4}
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 42})()),
+            patch.object(ppt_tutor, "_save_last_reader_position"),
+        ):
+            changed = ppt_tutor._handle_reader_position_update({"id": 3}, 5, "tok")
+
+        self.assertTrue(changed)
+        self.assertEqual(session_state["ppt_reader_active_slide_3"], 5)
+
+    def test_auto_refresh_running_generation_skips_unchanged_recent_task(self):
+        session_state = {
+            ppt_tutor.PPT_GENERATION_REFRESH_STATE_KEY: {
+                "task_key": (3, 1, 1, 0, 0, 0, "处理中"),
+                "time": 100.0,
+            }
+        }
+        task = {
+            "status": "running",
+            "deck_id": 3,
+            "processed": 1,
+            "generated": 1,
+            "skipped": 0,
+            "failed": 0,
+            "status_text": "处理中",
+        }
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor.time, "monotonic", return_value=100.4),
+            patch.object(ppt_tutor.st, "rerun") as rerun,
+        ):
+            ppt_tutor._auto_refresh_running_generation(task)
+
+        rerun.assert_not_called()
+
+    def test_should_refresh_task_allows_changed_progress(self):
+        session_state = {
+            "refresh_key": {
+                "task_key": (3, 1, 1, 0, 0, 0, "处理中"),
+                "time": 100.0,
+            }
+        }
+        task = {
+            "deck_id": 3,
+            "processed": 2,
+            "generated": 2,
+            "skipped": 0,
+            "failed": 0,
+            "status_text": "处理中",
+        }
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor.time, "monotonic", return_value=100.4),
+        ):
+            self.assertTrue(ppt_tutor._should_refresh_task(task, "refresh_key", interval=1.5))
+
+    def test_should_refresh_task_skips_unchanged_recent_progress(self):
+        session_state = {
+            "refresh_key": {
+                "task_key": (3, 1, 1, 0, 0, 0, "处理中"),
+                "time": 100.0,
+            }
+        }
+        task = {
+            "deck_id": 3,
+            "processed": 1,
+            "generated": 1,
+            "skipped": 0,
+            "failed": 0,
+            "status_text": "处理中",
+        }
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor.time, "monotonic", return_value=100.4),
+        ):
+            self.assertFalse(ppt_tutor._should_refresh_task(task, "refresh_key", interval=1.5))
+
+    def test_service_should_refresh_task_updates_state_on_change(self):
+        session_state = {}
+        task = {"deck_id": 3, "processed": 1, "generated": 1, "status_text": "处理中"}
+
+        self.assertTrue(
+            ppt_reader_state.should_refresh_task(session_state, task, "refresh_key", interval=1.5, now=100.0)
+        )
+        self.assertIn("refresh_key", session_state)
 
     def test_reader_payload_exposes_structure_fields_for_component(self):
         payload = ppt_tutor._build_reader_payload(

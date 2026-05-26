@@ -1595,13 +1595,15 @@
       lastPositionNotifyKey = key;
       window.clearTimeout(positionNotifyTimer);
       positionNotifyTimer = window.setTimeout(() => {
+        const latestPage = pageForSlide(slideNumber);
+        if (!latestPage || !latestPage.imageAvailable || latestPage.image) return;
         Streamlit.setComponentValue({
           action: 'reader_position',
           token: createComponentToken(),
           deckId,
           slideNumber: Number(slideNumber),
         });
-      }, 160);
+      }, 700);
     }
 
     function ensureNearbyContent(slideNumber) {
