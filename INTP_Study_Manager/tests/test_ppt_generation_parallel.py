@@ -206,7 +206,7 @@ class PptGenerationParallelTest(unittest.TestCase):
 
         with (
             patch.object(ppt_tutor, "generate_text", side_effect=fake_generate_text),
-            patch.object(ppt_tutor, "insert_and_get_id", return_value=1) as insert_and_get_id,
+            patch.object(ppt_tutor, "add_slide_explanation", return_value=1) as add_slide_explanation,
             patch.object(ppt_tutor, "_build_slide_prompt", side_effect=lambda deck, slide, **kwargs: f"slide-{slide['slide_number']}"),
             patch.object(ppt_tutor, "_image_paths_for_generation", return_value=[]),
             patch.object(ppt_tutor, "_is_text_empty", return_value=False),
@@ -215,7 +215,7 @@ class PptGenerationParallelTest(unittest.TestCase):
             ppt_tutor._background_generation_worker(task, {"id": 9, "title": "Deck"}, slides)
 
         self.assertEqual(max_active_calls, 2)
-        self.assertEqual(insert_and_get_id.call_count, 3)
+        self.assertEqual(add_slide_explanation.call_count, 3)
         self.assertEqual(task["status"], "completed")
         self.assertEqual(task["generated"], 3)
 
@@ -280,7 +280,7 @@ class PptGenerationParallelTest(unittest.TestCase):
 
         with (
             patch.object(ppt_tutor, "generate_text", side_effect=fake_generate_text),
-            patch.object(ppt_tutor, "insert_and_get_id", return_value=1),
+            patch.object(ppt_tutor, "add_slide_explanation", return_value=1),
             patch.object(ppt_tutor, "_build_slide_prompt", side_effect=lambda deck, slide, **kwargs: f"slide-{slide['slide_number']}"),
             patch.object(ppt_tutor, "_image_paths_for_generation", return_value=[]),
             patch.object(ppt_tutor, "_is_text_empty", return_value=False),
@@ -345,7 +345,7 @@ class PptGenerationParallelTest(unittest.TestCase):
 
         with (
             patch.object(ppt_tutor, "generate_text", side_effect=fake_generate_text),
-            patch.object(ppt_tutor, "insert_and_get_id", return_value=1) as insert_and_get_id,
+            patch.object(ppt_tutor, "add_slide_explanation", return_value=1) as add_slide_explanation,
             patch.object(ppt_tutor, "_build_slide_prompt", return_value="slide-1"),
             patch.object(ppt_tutor, "_image_paths_for_generation", return_value=[]),
             patch.object(ppt_tutor, "_is_text_empty", return_value=False),
@@ -354,7 +354,7 @@ class PptGenerationParallelTest(unittest.TestCase):
             ppt_tutor._background_generation_worker(task, {"id": 9, "title": "Deck"}, [slide])
 
         self.assertEqual(provider_attempts, ["bad", "good"])
-        self.assertEqual(insert_and_get_id.call_count, 1)
+        self.assertEqual(add_slide_explanation.call_count, 1)
         self.assertEqual(task["status"], "completed")
         self.assertEqual(task["generated"], 1)
         self.assertEqual(task["failed"], 0)
@@ -403,7 +403,7 @@ class PptGenerationParallelTest(unittest.TestCase):
 
         with (
             patch.object(ppt_tutor, "generate_text", side_effect=fake_generate_text),
-            patch.object(ppt_tutor, "insert_and_get_id", return_value=1) as insert_and_get_id,
+            patch.object(ppt_tutor, "add_slide_explanation", return_value=1) as add_slide_explanation,
             patch.object(ppt_tutor, "_build_slide_prompt", return_value="slide-1"),
             patch.object(ppt_tutor, "_image_paths_for_generation", return_value=[]),
             patch.object(ppt_tutor, "_is_text_empty", return_value=False),
@@ -412,7 +412,7 @@ class PptGenerationParallelTest(unittest.TestCase):
             ppt_tutor._background_generation_worker(task, {"id": 9, "title": "Deck"}, [slide])
 
         self.assertEqual(attempts, 3)
-        self.assertEqual(insert_and_get_id.call_count, 1)
+        self.assertEqual(add_slide_explanation.call_count, 1)
         self.assertEqual(task["status"], "completed")
         self.assertEqual(task["generated"], 1)
         self.assertEqual(task["failed"], 0)

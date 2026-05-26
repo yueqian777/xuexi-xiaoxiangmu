@@ -75,6 +75,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "scheduleMathJaxRetry",
             "flushTypesetQueue",
             "typesetTargets",
+            "requestImageWindowIfNeeded",
         ]
         cls.js_helpers = "\n\n".join(
             block for name in helper_names if (block := _extract_function(cls.source, name))
@@ -167,6 +168,40 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
     def test_nearby_content_hydration_is_scheduled_for_fast_navigation(self):
         self.assertIn("function scheduleNearbyContent", self.source)
         self.assertIn("scheduleNearbyContent(currentSlideNumber)", self.source)
+
+    def test_image_window_request_rechecks_page_state_before_notify(self):
+        self.run_js(
+            r"""
+            let pages = [{ slideNumber: 1, imageAvailable: true, image: '' }];
+            let deckId = 9;
+            let lastPositionNotifyKey = '';
+            let positionNotifyTimer = null;
+            const IMAGE_WINDOW_NOTIFY_IDLE_MS = 0;
+            const notifications = [];
+            const Streamlit = {
+              setComponentValue: value => notifications.push(value),
+            };
+            function pageForSlide(slideNumber) {
+              return pages.find(item => Number(item.slideNumber) === Number(slideNumber)) || null;
+            }
+            function createComponentToken() {
+              return 'token';
+            }
+            global.window = {
+              clearTimeout: () => {},
+              setTimeout: fn => {
+                pages[0].image = 'data:image/png;base64,loaded';
+                fn();
+                return 1;
+              },
+            };
+
+            requestImageWindowIfNeeded(1);
+            if (notifications.length !== 0) {
+              throw new Error(`expected no stale notification, got ${notifications.length}`);
+            }
+            """
+        )
 
 
 if __name__ == "__main__":
