@@ -79,6 +79,27 @@ class PptReaderPositionTest(unittest.TestCase):
         self.assertEqual(payload[0]["slideRole"], "承接定义")
         self.assertEqual(payload[0]["keyPoints"], "边界条件")
 
+    def test_reader_payload_only_embeds_images_in_active_window(self):
+        slides = [
+            {"id": 1, "slide_number": 1, "title": "A", "slide_text": "", "image_path": "a.png"},
+            {"id": 2, "slide_number": 2, "title": "B", "slide_text": "", "image_path": "b.png"},
+        ]
+        with (
+            patch.object(ppt_tutor.Path, "exists", return_value=True),
+            patch.object(ppt_tutor.Path, "is_file", return_value=True),
+            patch.object(ppt_tutor, "_image_data_uri", side_effect=lambda path: f"data:{path}"),
+        ):
+            payload = ppt_tutor._build_reader_payload(
+                slides,
+                {},
+                {},
+                image_slide_numbers={2},
+            )
+
+        self.assertTrue(payload[0]["imageAvailable"])
+        self.assertEqual(payload[0]["image"], "")
+        self.assertEqual(payload[1]["image"], "data:b.png")
+
     def test_reader_sections_payload_uses_component_key_names(self):
         payload = ppt_tutor._reader_sections_payload(
             [

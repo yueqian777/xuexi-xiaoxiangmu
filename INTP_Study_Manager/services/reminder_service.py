@@ -186,6 +186,49 @@ def _task_run_command() -> str:
     return f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{REMINDER_SCRIPT}"'
 
 
+def _is_windows() -> bool:
+    return platform.system().lower() == "windows"
+
+
+def _run_command(command: list[str]) -> tuple[bool, str]:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            encoding=locale.getpreferredencoding(False),
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+
+    output = "\n".join(
+        item.strip()
+        for item in (completed.stdout, completed.stderr)
+        if item and item.strip()
+    )
+    return completed.returncode == 0, output
+
+
+def _looks_like_missing_task(output: str) -> bool:
+    text = str(output or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "cannot find",
+            "does not exist",
+            "not found",
+            "no msft_scheduledtask",
+            "找不到",
+            "不存在",
+            "未找到",
+        )
+    )
+
+
 def _scheduled_task_status_script() -> str:
     task_name = REMINDER_TASK_NAME.replace("'", "''")
     return f"""

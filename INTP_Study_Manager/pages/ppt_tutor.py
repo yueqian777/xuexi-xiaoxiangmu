@@ -7,6 +7,7 @@ import os
 import re
 import threading
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -44,6 +45,8 @@ SYNCED_READER_COMPONENT_PATH = BASE_DIR / "components" / "synced_reader"
 SYNCED_READER_COMPONENT = None
 LAST_READER_POSITION_SETTING_KEY = "ppt_reader_last_position"
 LAST_READER_DECK_STATE_KEY = "ppt_reader_deck_id"
+READER_ACTIVE_SLIDE_STATE_PREFIX = "ppt_reader_active_slide_"
+READER_IMAGE_WINDOW_RADIUS = 2
 
 
 def _get_synced_reader_component():
@@ -84,7 +87,13 @@ def _read_last_reader_position(user_id: int) -> dict[str, int]:
     return position
 
 
-def _save_last_reader_position(user_id: int, deck_id: int, slide_number: int | None = None) -> None:
+def _save_last_reader_position(
+    user_id: int,
+    deck_id: int,
+    slide_number: int | None = None,
+    *,
+    existing: dict[str, int] | None = None,
+) -> None:
     try:
         deck_id = int(deck_id)
     except (TypeError, ValueError):
@@ -92,7 +101,7 @@ def _save_last_reader_position(user_id: int, deck_id: int, slide_number: int | N
     if deck_id <= 0:
         return
 
-    existing = _read_last_reader_position(user_id)
+    existing = existing if existing is not None else _read_last_reader_position(user_id)
     if slide_number is None and existing.get("deck_id") == deck_id:
         slide_number = existing.get("slide_number")
 
@@ -143,7 +152,7 @@ def _remember_reader_deck_selection(user_id: int, deck_id: int, last_position: d
     slide_number = None
     if last_position.get("deck_id") == deck_id:
         slide_number = last_position.get("slide_number")
-    _save_last_reader_position(user_id, deck_id, slide_number)
+    _save_last_reader_position(user_id, deck_id, slide_number, existing=last_position)
 
 
 def _initial_reader_slide_number(deck_id: int, slides: list[dict], last_position: dict[str, int]) -> int:
@@ -154,6 +163,34 @@ def _initial_reader_slide_number(deck_id: int, slides: list[dict], last_position
     if int(last_position.get("deck_id") or 0) == int(deck_id) and remembered_slide in slide_numbers:
         return remembered_slide
     return int(slides[0]["slide_number"])
+
+
+def _reader_active_slide_state_key(deck_id: int) -> str:
+    return f"{READER_ACTIVE_SLIDE_STATE_PREFIX}{int(deck_id)}"
+
+
+def _reader_active_slide_number(deck_id: int, slides: list[dict], initial_slide_number: int) -> int:
+    slide_numbers = {int(slide["slide_number"]) for slide in slides}
+    if not slide_numbers:
+        return 1
+    try:
+        active = int(st.session_state.get(_reader_active_slide_state_key(deck_id)) or initial_slide_number)
+    except (TypeError, ValueError):
+        active = int(initial_slide_number)
+    return active if active in slide_numbers else int(initial_slide_number)
+
+
+def _reader_image_window_slide_numbers(slides: list[dict], active_slide_number: int) -> set[int]:
+    if not slides:
+        return set()
+    ordered = [int(slide["slide_number"]) for slide in slides]
+    try:
+        active_index = ordered.index(int(active_slide_number))
+    except ValueError:
+        active_index = 0
+    start = max(0, active_index - READER_IMAGE_WINDOW_RADIUS)
+    end = min(len(ordered), active_index + READER_IMAGE_WINDOW_RADIUS + 1)
+    return set(ordered[start:end])
 
 
 def render() -> None:
@@ -221,7 +258,7 @@ def render() -> None:
     _render_synced_reader(deck, slides, latest_by_slide_id, last_position, sections)
 
     st.divider()
-    _render_study_asset_generator(deck, sections)
+    _render_study_asset_generator(deck, sections, slides, latest_by_slide_id)
 
 
 def _render_api_settings() -> None:
@@ -594,8 +631,21 @@ def _render_synced_reader(
 ) -> None:
     st.subheader("同步阅读器")
     st.caption("提示：右侧固定插问栏会绑定当前页。你可以直接提问，或选中讲解文字后引用到插问。")
-    question_by_slide_id = _questions_by_slide_ids([int(slide["id"]) for slide in slides])
-    payload = _build_reader_payload(slides, latest_by_slide_id, question_by_slide_id)
+    initial_slide_number = _initial_reader_slide_number(int(deck["id"]), slides, last_position)
+    active_slide_number = _reader_active_slide_number(int(deck["id"]), slides, initial_slide_number)
+    image_slide_numbers = _reader_image_window_slide_numbers(slides, active_slide_number)
+    active_slide_ids = [
+        int(slide["id"])
+        for slide in slides
+        if int(slide["slide_number"]) in image_slide_numbers
+    ]
+    question_by_slide_id = _questions_by_slide_ids(active_slide_ids)
+    payload = _build_reader_payload(
+        slides,
+        latest_by_slide_id,
+        question_by_slide_id,
+        image_slide_numbers=image_slide_numbers,
+    )
     if not payload:
         st.warning("当前资料没有任何幻灯片数据。")
         return
@@ -613,7 +663,7 @@ def _render_synced_reader(
         active_model=_active_model_label(),
         pages=payload,
         sections=_reader_sections_payload(sections),
-        initial_slide_number=_initial_reader_slide_number(int(deck["id"]), slides, last_position),
+        initial_slide_number=active_slide_number,
         height=850,
         default=None,
         key=f"synced_reader_{deck['id']}",
@@ -630,7 +680,7 @@ def _handle_synced_reader_action(
     sections: list[dict],
 ) -> None:
     action = payload.get("action")
-    if action not in {"canvas_question", "save_explanation_edit"}:
+    if action not in {"canvas_question", "save_explanation_edit", "reader_position"}:
         return
     try:
         query_deck_id = int(payload.get("deckId", 0))
@@ -645,6 +695,17 @@ def _handle_synced_reader_action(
         return
 
     token = str(payload.get("token") or "").strip()
+    if action == "reader_position":
+        last_position_token_key = f"ppt_reader_position_last_token_{deck['id']}"
+        if token and st.session_state.get(last_position_token_key) == token:
+            return
+        st.session_state[_reader_active_slide_state_key(int(deck["id"]))] = slide_number
+        _save_last_reader_position(require_login().id, int(deck["id"]), slide_number)
+        if token:
+            st.session_state[last_position_token_key] = token
+        st.rerun()
+        return
+
     if action == "save_explanation_edit":
         last_edit_token_key = f"ppt_explanation_edit_last_token_{deck['id']}"
         if token and st.session_state.get(last_edit_token_key) == token:
@@ -855,16 +916,26 @@ def _group_label(group: list[dict]) -> str:
     return f"第 {start}-{end} 页（共 {len(group)} 页）"
 
 
-def _render_study_asset_generator(deck: dict, sections: list[dict]) -> None:
+def _render_study_asset_generator(
+    deck: dict,
+    sections: list[dict],
+    slides: list[dict],
+    latest_by_slide_id: dict[int, dict],
+) -> None:
     with st.expander("学习沉淀：从今日阅读内容生成学习登记和知识卡片", expanded=False):
-        _render_study_asset_generator_inner(deck, sections)
+        _render_study_asset_generator_inner(deck, sections, slides, latest_by_slide_id)
 
 
-def _render_study_asset_generator_inner(deck: dict, sections: list[dict]) -> None:
+def _render_study_asset_generator_inner(
+    deck: dict,
+    sections: list[dict],
+    slides: list[dict],
+    latest_by_slide_id: dict[int, dict],
+) -> None:
     st.caption("根据当前资料的目录块、手动选择的今日学习页码范围和已生成讲解，调用当前 API 生成草稿；确认后写入学习登记、知识点卡片和 1-3-7-14 复习计划。")
 
-    slides = _slides_with_latest_explanations(deck["id"])
-    recognized = [slide for slide in slides if _slide_has_learning_content(slide)]
+    slides_with_explanations = _slides_with_latest_explanations(slides, latest_by_slide_id)
+    recognized = [slide for slide in slides_with_explanations if _slide_has_learning_content(slide)]
     today_slides = [slide for slide in recognized if _is_today(slide.get("explanation_created_at"))]
     if not recognized:
         st.info("当前资料还没有可沉淀的文字或讲解。请先重新提取 PDF 文字，或生成逐页讲解。")
@@ -967,29 +1038,16 @@ def _render_study_asset_generator_inner(deck: dict, sections: list[dict]) -> Non
             st.rerun()
 
 
-def _slides_with_latest_explanations(deck_id: int) -> list[dict]:
-    user_id = require_login().id
-    return fetch_all(
-        """
-        SELECT
-            ps.*,
-            se.explanation AS latest_explanation,
-            se.model AS latest_model,
-            se.created_at AS explanation_created_at
-        FROM ppt_slides ps
-        LEFT JOIN slide_explanations se
-            ON se.id = (
-                SELECT id
-                FROM slide_explanations
-                WHERE user_id = ps.user_id AND slide_id = ps.id
-                ORDER BY created_at DESC, id DESC
-                LIMIT 1
-            )
-        WHERE ps.user_id = ? AND ps.deck_id = ?
-        ORDER BY ps.slide_number ASC
-        """,
-        (user_id, deck_id),
-    )
+def _slides_with_latest_explanations(slides: list[dict], latest_by_slide_id: dict[int, dict]) -> list[dict]:
+    enriched = []
+    for slide in slides:
+        item = dict(slide)
+        latest = latest_by_slide_id.get(int(slide["id"]))
+        item["latest_explanation"] = latest["explanation"] if latest else ""
+        item["latest_model"] = latest["model"] if latest else ""
+        item["explanation_created_at"] = latest["created_at"] if latest else ""
+        enriched.append(item)
+    return enriched
 
 
 def _slide_has_learning_content(slide: dict) -> bool:
@@ -1476,6 +1534,7 @@ def _generate_whole_deck_explanations(
     total = len(targets)
     user_id = require_login().id
     context_by_slide = build_slide_context_map(deck, all_slides or slides, sections or [])
+    related_knowledge = _related_knowledge_context(deck.get("subject") or "未分类", user_id=user_id)
 
     if background:
         task = {
@@ -1496,6 +1555,7 @@ def _generate_whole_deck_explanations(
             "active_model_label": active_model_label,
             "reasoning_depth": st.session_state.get("active_api_reasoning_depth"),
             "context_by_slide": context_by_slide,
+            "related_knowledge": related_knowledge,
             "user_id": user_id,
             "completed": False,
             "stop_requested": False,
@@ -1551,6 +1611,7 @@ def _generate_whole_deck_explanations(
             ignore_extracted_text=force_image_input,
             context=context,
             user_id=user_id,
+            related_knowledge=related_knowledge,
         )
         try:
             progress.progress(
@@ -1586,7 +1647,14 @@ def _generate_whole_deck_explanations(
                     continue
                 try:
                     explanation = generate_text(
-                        _build_slide_prompt(deck, slide, image_attached=False, context=context, user_id=user_id),
+                        _build_slide_prompt(
+                            deck,
+                            slide,
+                            image_attached=False,
+                            context=context,
+                            user_id=user_id,
+                            related_knowledge=related_knowledge,
+                        ),
                         provider_key=provider_key,
                         api_key=api_key,
                         model_override=active_model,
@@ -1626,6 +1694,7 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
     total = len(targets)
     reasoning_depth = task.get("reasoning_depth")
     context_by_slide = task.get("context_by_slide") or {}
+    related_knowledge = str(task.get("related_knowledge") or "")
     user_id = int(task.get("user_id") or 0)
 
     for index, slide in enumerate(targets, start=1):
@@ -1668,6 +1737,7 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
             ignore_extracted_text=task.get("force_image_input", False),
             context=context,
             user_id=user_id,
+            related_knowledge=related_knowledge,
         )
         try:
             explanation = generate_text(
@@ -1700,15 +1770,19 @@ def _build_reader_payload(
     slides: list[dict],
     latest_by_slide_id: dict[int, dict],
     question_by_slide_id: dict[int, list[dict]],
+    *,
+    image_slide_numbers: set[int] | None = None,
 ) -> list[dict]:
     payload = []
+    image_slide_numbers = image_slide_numbers or set()
     for slide in slides:
         image_path = Path(slide.get("image_path") or "")
         latest = latest_by_slide_id.get(int(slide["id"]))
         slide_text = slide.get("slide_text") or ""
         slide_title = slide.get("title") or f"第 {slide['slide_number']} 页"
 
-        if image_path.exists() and image_path.is_file():
+        image_available = image_path.exists() and image_path.is_file()
+        if image_available and int(slide["slide_number"]) in image_slide_numbers:
             image_data = _image_data_uri(image_path)
         else:
             image_data = ""
@@ -1718,6 +1792,7 @@ def _build_reader_payload(
                 "slideNumber": int(slide["slide_number"]),
                 "title": slide_title,
                 "image": image_data,
+                "imageAvailable": image_available,
                 "explanation": latest["explanation"] if latest else "本页还没有 AI 讲解。" + (f"\n\n参考文字：\n{slide_text[:200]}..." if slide_text else ""),
                 "model": latest["model"] if latest else "",
                 "createdAt": latest["created_at"] if latest else "",
@@ -2294,9 +2369,16 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
 def _image_data_uri(path: Path) -> str:
     if not path.exists() or not path.is_file():
         return ""
+    stat = path.stat()
     suffix = path.suffix.lower().lstrip(".") or "png"
     mime = "jpeg" if suffix in {"jpg", "jpeg"} else "png"
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return _cached_image_data_uri(str(path), stat.st_mtime_ns, stat.st_size, mime)
+
+
+@lru_cache(maxsize=128)
+def _cached_image_data_uri(path_text: str, mtime_ns: int, size: int, mime: str) -> str:
+    del mtime_ns, size
+    encoded = base64.b64encode(Path(path_text).read_bytes()).decode("ascii")
     return f"data:image/{mime};base64,{encoded}"
 
 
@@ -2411,6 +2493,7 @@ def _build_slide_prompt(
     ignore_extracted_text: bool = False,
     context: dict | None = None,
     user_id: int | None = None,
+    related_knowledge: str | None = None,
 ) -> str:
     slide_text = "" if ignore_extracted_text else (slide["slide_text"] or "")
     subject = deck.get("subject") or "未分类"
@@ -2431,7 +2514,9 @@ def _build_slide_prompt(
             "slide_title": slide["title"] or "未命名页面",
             "slide_text": slide_text or "这一页没有解析到文字。",
             "context_package": format_slide_context_package(context),
-            "related_knowledge": _related_knowledge_context(subject, user_id=user_id),
+            "related_knowledge": related_knowledge
+            if related_knowledge is not None
+            else _related_knowledge_context(subject, user_id=user_id),
         },
     )
 
