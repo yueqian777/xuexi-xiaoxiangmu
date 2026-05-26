@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=INTP Study Manager
+Comment=Start the local INTP Study Manager Streamlit app
+Exec=/home/q/Desktop/other/xuexi-xiaoxiangmu/INTP_Study_Manager/start_intp_study_manager.sh
+Path=/home/q/Desktop/other/xuexi-xiaoxiangmu/INTP_Study_Manager
+Terminal=true
+X-GNOME-Autostart-enabled=true
+Icon=
+StartupNotify=false

@@ -583,15 +583,19 @@ def generate_text(
     except ValueError as exc:
         raise AIServiceError(f"API 没有返回 JSON：{_decode_response_text(response)[:1200]}") from exc
 
-    output = _extract_path(payload, provider.response_path or _default_response_path(provider.provider_type))
-    if isinstance(output, list):
-        output = "\n".join(str(item) for item in output)
+    output, _extracted_path = _extract_text_output(
+        payload,
+        provider.response_path or _default_response_path(provider.provider_type),
+        provider.provider_type,
+    )
     if output is None or not str(output).strip():
         reasoning = _safe_extract_path(payload, "choices.0.message.reasoning_content")
         finish_reason = _safe_extract_path(payload, "choices.0.finish_reason")
         if reasoning and finish_reason == "length":
             raise AIServiceError("模型只返回了 reasoning，最终回答为空。请把\"最大输出 token\"调高后重试。")
-        raise AIServiceError(f"没有从响应路径中提取到文本：{provider.response_path}")
+        raise AIServiceError(
+            f"没有从响应中提取到文本。已尝试路径：{', '.join(_candidate_response_paths(provider.response_path or _default_response_path(provider.provider_type), provider.provider_type))}"
+        )
     output_str = _repair_utf8_mojibake(str(output)).strip()
     # 对 MiniMax 始终执行思考内容移除（MiniMax 的思考内容无论是否开启推理都会出现）
     # 其他模型仅在推理深度非"关闭"时移除
@@ -1138,6 +1142,74 @@ def _default_response_path(provider_type: str) -> str:
         "minimax_chat": "choices.0.message.content",
         "cohere_chat": "generations.0.text",
     }.get(provider_type, "")
+
+
+def _extract_text_output(payload: Any, preferred_path: str, provider_type: str) -> tuple[str | None, str]:
+    for path in _candidate_response_paths(preferred_path, provider_type):
+        value = _safe_extract_path(payload, path)
+        text = _coerce_text_output(value)
+        if text.strip():
+            return text, path
+    return None, preferred_path
+
+
+def _candidate_response_paths(preferred_path: str, provider_type: str) -> list[str]:
+    candidates = [
+        preferred_path,
+        _default_response_path(provider_type),
+        "choices.0.message.content",
+        "choices.0.delta.content",
+        "choices.0.text",
+        "output_text",
+        "output",
+        "output.0.content.0.text",
+        "output.0.content.0.content",
+        "output.0.text",
+        "message.content",
+        "message.content.0.text",
+        "content",
+        "content.0.text",
+        "candidates.0.content.parts.0.text",
+        "message.content.0.text",
+        "generations.0.text",
+        "text",
+        "response",
+        "result",
+        "data.choices.0.message.content",
+        "data.output_text",
+        "data.content",
+    ]
+    if provider_type == "cohere_chat":
+        candidates.insert(2, "message.content.0.text")
+    if provider_type == "openai_responses":
+        candidates.insert(2, "output.0.content.0.text")
+
+    unique: list[str] = []
+    for path in candidates:
+        normalized = str(path or "").strip()
+        if normalized and normalized not in unique:
+            unique.append(normalized)
+    return unique
+
+
+def _coerce_text_output(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        parts = [_coerce_text_output(item).strip() for item in value]
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        for key in ("text", "content", "output_text", "response", "result"):
+            if key in value:
+                text = _coerce_text_output(value.get(key)).strip()
+                if text:
+                    return text
+        return ""
+    return str(value)
 
 
 def _extract_path(payload: Any, path: str) -> Any:
