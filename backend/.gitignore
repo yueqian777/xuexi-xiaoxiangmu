@@ -1,0 +1,4 @@
+target/
+data/
+study_manager_dev.db*
+*.log

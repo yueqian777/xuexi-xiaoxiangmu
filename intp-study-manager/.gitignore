@@ -1,7 +1,0 @@
-target/
-.mvn/wrapper/maven-wrapper.jar
-data/study_manager.db
-data/uploads/
-data/page_images/
-data/*.db-wal
-data/*.db-shm
