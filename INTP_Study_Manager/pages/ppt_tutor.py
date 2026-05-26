@@ -904,7 +904,7 @@ def _render_study_asset_generator_inner(
         st.info("当前资料还没有可沉淀的文字或讲解。请先重新提取 PDF 文字，或生成逐页讲解。")
         return
 
-    selected_slides, range_label = _select_study_asset_scope(deck, recognized, sections, today_slides)
+    selected_slides, range_label, scope_mode = _select_study_asset_scope(deck, recognized, sections, today_slides)
 
     cols = st.columns([1, 1])
     max_chars = cols[1].number_input(
@@ -923,48 +923,78 @@ def _render_study_asset_generator_inner(
         help="勾选后会把逐页讲解也作为沉淀依据；如果讲解质量不稳定，可以只用 PPT/PDF 识别文字。",
     )
 
-    reading_content, used_pages, truncated = _build_reading_content(
+    split_by_sections = scope_mode == "全部目录块" and bool(sections)
+    batches = _build_study_asset_batches(
         selected_slides,
         sections=sections,
         max_chars=int(max_chars),
         include_ai_explanation=include_ai_explanation,
+        split_by_sections=split_by_sections,
+        fallback_range_label=range_label,
     )
-    st.caption(f"将用于生成：{range_label}；实际纳入 {used_pages} 页。{'内容过长，已截断。' if truncated else ''}")
+    total_used_pages = sum(int(batch["used_pages"]) for batch in batches)
+    truncated_count = sum(1 for batch in batches if batch["truncated"])
+    st.caption(
+        f"将用于生成：{range_label}；分 {len(batches)} 批；实际纳入 {total_used_pages} 页。"
+        + (f" {truncated_count} 批内容过长，已按批截断。" if truncated_count else "")
+    )
+    if split_by_sections:
+        st.info("已启用逐目录块生成：每个目录块会单独调用 API，再合并成一个学习登记和知识卡片草稿，减少长课件漏掉后半部分内容。")
 
     draft_key = f"study_asset_draft_{deck['id']}"
     raw_key = f"study_asset_raw_{deck['id']}"
     meta_key = f"study_asset_meta_{deck['id']}"
     if st.button("调用 API 生成学习登记 / 知识卡片草稿", type="primary", key=f"generate_assets_{deck['id']}"):
-        if not reading_content.strip():
+        usable_batches = [batch for batch in batches if str(batch["reading_content"]).strip()]
+        if not usable_batches:
             st.error("没有可发送给 API 的阅读内容。")
             return
-        prompt = render_template(
-            "ppt_to_study_assets.md",
-            {
-                "today": date.today().isoformat(),
-                "subject": deck.get("subject") or "未分类",
-                "deck_title": deck.get("title") or "未命名资料",
-                "range_label": range_label,
-                "reading_content": reading_content,
-            },
-        )
+        batch_results = []
+        raw_outputs = []
         try:
-            with st.spinner("正在调用 API 生成结构化学习资产..."):
-                output = generate_text(
-                    prompt,
-                    provider_key=st.session_state.get("active_api_provider_key"),
-                    api_key=_active_api_key(),
-                    model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
-                    max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+            for index, batch in enumerate(usable_batches, start=1):
+                prompt = render_template(
+                    "ppt_to_study_assets.md",
+                    {
+                        "today": date.today().isoformat(),
+                        "subject": deck.get("subject") or "未分类",
+                        "deck_title": deck.get("title") or "未命名资料",
+                        "range_label": batch["range_label"],
+                        "reading_content": batch["reading_content"],
+                    },
                 )
-            assets = parse_study_assets(output)
+                with st.spinner(f"正在生成第 {index}/{len(usable_batches)} 批：{batch['range_label']}"):
+                    output = generate_text(
+                        prompt,
+                        provider_key=st.session_state.get("active_api_provider_key"),
+                        api_key=_active_api_key(),
+                        model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
+                        max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+                    )
+                assets = parse_study_assets(output)
+                batch_results.append({"batch": batch, "assets": assets})
+                raw_outputs.append({"range_label": batch["range_label"], "output": output})
+            assets = _merge_study_asset_batches(
+                batch_results,
+                deck=deck,
+                range_label=range_label,
+            )
+            coverage_report = _build_study_asset_coverage_report(batch_results, batches)
             st.session_state[draft_key] = assets
-            st.session_state[raw_key] = output
-            st.session_state[meta_key] = {"range_label": range_label, "used_pages": used_pages}
+            st.session_state[raw_key] = raw_outputs
+            st.session_state[meta_key] = {
+                "range_label": range_label,
+                "used_pages": total_used_pages,
+                "batch_count": len(usable_batches),
+                "coverage_report": coverage_report,
+            }
             st.success("草稿已生成，请先预览再写入数据库。")
         except (AIServiceError, ValueError, json.JSONDecodeError) as exc:
             st.error(f"生成或解析失败：{exc}")
-            if "output" in locals():
+            if raw_outputs:
+                st.caption("已完成批次的 API 原始返回：")
+                st.json(raw_outputs)
+            elif "output" in locals():
                 st.caption("API 原始返回：")
                 st.code(output, language="json")
 
@@ -978,6 +1008,10 @@ def _render_study_asset_generator_inner(
             st.caption(f"当前草稿来源：{draft_meta.get('range_label')}；纳入 {draft_meta.get('used_pages')} 页。")
             if draft_meta.get("range_label") != range_label:
                 st.warning("你已经调整了登记范围，但当前预览仍是上一次生成的草稿；需要重新调用 API 才会使用新范围。")
+            coverage_report = draft_meta.get("coverage_report") or []
+            if coverage_report:
+                st.markdown("**覆盖率检查**")
+                st.dataframe(pd.DataFrame(coverage_report), use_container_width=True, hide_index=True)
         st.json(draft)
         cols = st.columns(2)
         if cols[0].button("确认写入学习登记和知识卡片", key=f"save_assets_{deck['id']}"):
@@ -1026,7 +1060,7 @@ def _select_study_asset_scope(
     slides: list[dict],
     sections: list[dict],
     today_slides: list[dict],
-) -> tuple[list[dict], str]:
+) -> tuple[list[dict], str, str]:
     modes = ["手动选择今天学习页码范围"]
     if sections:
         modes.extend(["选择一个目录块", "全部目录块"])
@@ -1044,13 +1078,13 @@ def _select_study_asset_scope(
         )
         section = next(item for item in sections if int(item["section_index"]) == int(selected_index))
         selected = _filter_slides_by_page_range(slides, int(section["start_slide"]), int(section["end_slide"]))
-        return selected, _section_label(sections, int(selected_index))
+        return selected, _section_label(sections, int(selected_index)), mode
 
     if mode in {"全部目录块", "全部已识别页面"}:
         first_page = int(slides[0]["slide_number"])
         last_page = int(slides[-1]["slide_number"])
         label = "全部目录块" if sections else "全部已识别页面"
-        return slides, f"{label}（第 {first_page}-{last_page} 页）"
+        return slides, f"{label}（第 {first_page}-{last_page} 页）", mode
 
     first_page = int(slides[0]["slide_number"])
     last_page = int(slides[-1]["slide_number"])
@@ -1074,7 +1108,7 @@ def _select_study_asset_scope(
     selected = _filter_slides_by_page_range(slides, int(start_page), int(end_page))
     if not selected:
         st.warning("这个页码范围内没有已识别文字或已生成讲解的页面。")
-    return selected, f"今天手动页码范围：第 {start_page}-{end_page} 页"
+    return selected, f"今天手动页码范围：第 {start_page}-{end_page} 页", mode
 
 
 def _filter_slides_by_page_range(slides: list[dict], start_page: int, end_page: int) -> list[dict]:
@@ -1084,6 +1118,149 @@ def _filter_slides_by_page_range(slides: list[dict], start_page: int, end_page: 
         for slide in slides
         if start_page <= int(slide["slide_number"]) <= end_page
     ]
+
+
+def _build_study_asset_batches(
+    slides: list[dict],
+    *,
+    sections: list[dict] | None,
+    max_chars: int,
+    include_ai_explanation: bool,
+    split_by_sections: bool,
+    fallback_range_label: str,
+) -> list[dict]:
+    if not split_by_sections:
+        reading_content, used_pages, truncated = _build_reading_content(
+            slides,
+            sections=sections,
+            max_chars=max_chars,
+            include_ai_explanation=include_ai_explanation,
+        )
+        return [
+            {
+                "range_label": fallback_range_label,
+                "reading_content": reading_content,
+                "used_pages": used_pages,
+                "truncated": truncated,
+                "section_index": None,
+            }
+        ]
+
+    section_by_index = {int(section["section_index"]): section for section in (sections or [])}
+    batches: list[dict] = []
+    for section_key, group in _group_slides_for_study_assets(slides, section_by_index):
+        if not group:
+            continue
+        section = section_by_index.get(section_key)
+        label = _study_asset_batch_label(section, group)
+        reading_content, used_pages, truncated = _build_reading_content(
+            group,
+            sections=sections,
+            max_chars=max_chars,
+            include_ai_explanation=include_ai_explanation,
+        )
+        batches.append(
+            {
+                "range_label": label,
+                "reading_content": reading_content,
+                "used_pages": used_pages,
+                "truncated": truncated,
+                "section_index": int(section_key) if section else None,
+            }
+        )
+    return batches
+
+
+def _study_asset_batch_label(section: dict | None, slides: list[dict]) -> str:
+    start_page = int(slides[0]["slide_number"])
+    end_page = int(slides[-1]["slide_number"])
+    if section:
+        return f"目录块 {section['section_index']}：{section.get('title') or '未命名目录块'}（第 {start_page}-{end_page} 页）"
+    return f"未匹配目录块页面（第 {start_page}-{end_page} 页）"
+
+
+def _merge_study_asset_batches(batch_results: list[dict], *, deck: dict, range_label: str) -> dict:
+    if not batch_results:
+        raise ValueError("没有可合并的学习沉淀批次。")
+
+    first_session = dict(batch_results[0]["assets"]["study_session"])
+    session_summaries = []
+    blockers = []
+    wrong_questions = []
+    mastered = []
+    cards: list[dict] = []
+    seen_topics: set[tuple[str, str]] = set()
+    mastery_values = []
+
+    for item in batch_results:
+        batch = item["batch"]
+        assets = item["assets"]
+        session = assets["study_session"]
+        label = str(batch["range_label"])
+        summary = str(session.get("summary") or "").strip()
+        if summary:
+            session_summaries.append(f"{label}：{summary}")
+        for source, target in (
+            ("mastered_content", mastered),
+            ("blockers", blockers),
+            ("wrong_questions", wrong_questions),
+        ):
+            value = str(session.get(source) or "").strip()
+            if value:
+                target.append(f"{label}：{value}")
+        try:
+            mastery_values.append(int(session.get("mastery")))
+        except (TypeError, ValueError):
+            pass
+        for card in assets["knowledge_cards"]:
+            normalized = dict(card)
+            topic_key = (
+                str(normalized.get("subject") or deck.get("subject") or "").strip(),
+                str(normalized.get("topic") or "").strip(),
+            )
+            if topic_key in seen_topics:
+                continue
+            seen_topics.add(topic_key)
+            cards.append(normalized)
+
+    first_session.update(
+        {
+            "subject": first_session.get("subject") or deck.get("subject") or "未分类",
+            "chapter": deck.get("title") or first_session.get("chapter") or "",
+            "title": f"{deck.get('title') or '资料'} 学习沉淀",
+            "main_question": f"这份资料在 {range_label} 中围绕哪些主线问题展开？",
+            "mastered_content": "\n".join(mastered),
+            "blockers": "\n".join(blockers),
+            "wrong_questions": "\n".join(wrong_questions),
+            "summary": "\n".join(session_summaries),
+            "mastery": min(mastery_values) if mastery_values else first_session.get("mastery", 60),
+            "need_review": True,
+            "is_key": True,
+        }
+    )
+    return {"study_session": first_session, "knowledge_cards": cards}
+
+
+def _build_study_asset_coverage_report(batch_results: list[dict], batches: list[dict]) -> list[dict]:
+    card_count_by_label = {
+        str(item["batch"]["range_label"]): len(item["assets"].get("knowledge_cards") or [])
+        for item in batch_results
+    }
+    rows = []
+    for batch in batches:
+        label = str(batch["range_label"])
+        used_pages = int(batch.get("used_pages") or 0)
+        generated_cards = int(card_count_by_label.get(label, 0))
+        rows.append(
+            {
+                "范围": label,
+                "纳入页数": used_pages,
+                "生成卡片": generated_cards,
+                "截断": "是" if batch.get("truncated") else "否",
+                "状态": "已覆盖" if used_pages and generated_cards else "需补充",
+            }
+        )
+    return rows
 
 
 def _build_reading_content(
