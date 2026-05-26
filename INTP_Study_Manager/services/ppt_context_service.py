@@ -191,32 +191,35 @@ def build_slide_context_map(
     section_by_index = {int(section["section_index"]): section for section in sections}
     slide_by_number = {int(slide["slide_number"]): slide for slide in slides}
     sorted_numbers = sorted(slide_by_number)
+    resolved_section_by_slide = {
+        slide_number: _section_index_for_slide(slide_number, sections)
+        for slide_number in sorted_numbers
+    }
+    slides_by_section: dict[int, list[dict]] = {}
+    for slide_number in sorted_numbers:
+        slides_by_section.setdefault(resolved_section_by_slide[slide_number], []).append(slide_by_number[slide_number])
+    summary_lines_by_section: dict[int, list[tuple[int, str]]] = {}
+    formula_lines_by_section: dict[int, list[tuple[int, str]]] = {}
+    formula_page_types = {PAGE_TYPES[1], PAGE_TYPES[2]}
+    for section_index, section_slides in slides_by_section.items():
+        summary_lines: list[tuple[int, str]] = []
+        formula_lines: list[tuple[int, str]] = []
+        for item in section_slides:
+            item_number = int(item["slide_number"])
+            if (item.get("one_sentence_summary") or item.get("title") or "").strip():
+                summary_lines.append((item_number, _page_summary_line(item)))
+            if item.get("page_type") in formula_page_types:
+                formula_lines.append((item_number, _page_summary_line(item)))
+        summary_lines_by_section[section_index] = summary_lines
+        formula_lines_by_section[section_index] = formula_lines
     contexts: dict[int, dict[str, Any]] = {}
 
     for position, slide_number in enumerate(sorted_numbers):
         slide = slide_by_number[slide_number]
         section = section_by_index.get(int(slide.get("section_index") or 0))
         if section is None and sections:
-            section = next(
-                (
-                    item
-                    for item in sections
-                    if int(item["start_slide"]) <= slide_number <= int(item["end_slide"])
-                ),
-                sections[0],
-            )
+            section = section_by_index.get(resolved_section_by_slide[slide_number], sections[0])
         section_index = int(section["section_index"]) if section else 0
-        same_section = [
-            item
-            for item in slides
-            if _section_index_for_slide(int(item["slide_number"]), sections) == section_index
-            and int(item["slide_number"]) != slide_number
-        ]
-        related_pages = [
-            _page_summary_line(item)
-            for item in same_section
-            if (item.get("one_sentence_summary") or item.get("title") or "").strip()
-        ]
         prev_slide = slide_by_number.get(sorted_numbers[position - 1]) if position > 0 else None
         next_slide = slide_by_number.get(sorted_numbers[position + 1]) if position + 1 < len(sorted_numbers) else None
         contexts[slide_number] = {
@@ -227,12 +230,16 @@ def build_slide_context_map(
             "slide": slide,
             "prev_slide": prev_slide,
             "next_slide": next_slide,
-            "related_page_summaries": related_pages[:12],
-            "formula_or_example_pages": [
-                _page_summary_line(item)
-                for item in same_section
-                if item.get("page_type") in {"公式页", "例题页"}
-            ][:8],
+            "related_page_summaries": _limited_context_lines(
+                summary_lines_by_section.get(section_index, []),
+                slide_number,
+                12,
+            ),
+            "formula_or_example_pages": _limited_context_lines(
+                formula_lines_by_section.get(section_index, []),
+                slide_number,
+                8,
+            ),
         }
     return contexts
 
@@ -265,6 +272,10 @@ def format_slide_context_package(context: dict[str, Any] | None) -> str:
     if formula_pages:
         lines.extend(["", "同块内公式页 / 例题页线索：", *[f"- {item}" for item in formula_pages]])
     return "\n".join(lines).strip()
+
+
+def _limited_context_lines(items: list[tuple[int, str]], current_slide_number: int, limit: int) -> list[str]:
+    return [line for slide_number, line in items if slide_number != current_slide_number][:limit]
 
 
 def should_use_lightweight_explanation(slide: dict) -> bool:

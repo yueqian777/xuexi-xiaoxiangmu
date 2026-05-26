@@ -333,6 +333,20 @@
     .page-visual {
       width: 100%;
     }
+    .page-placeholder {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      min-height: 220px;
+      border: 1px dashed #b9dde6;
+      border-radius: 8px;
+      background: #f8fffd;
+      color: #5d7c86;
+      font-size: 13px;
+      font-weight: 800;
+      text-align: center;
+    }
     .pages.paged .page-visual {
       flex: 1;
       min-height: 0;
@@ -348,6 +362,10 @@
       max-width: 100%;
       max-height: 100%;
       object-fit: contain;
+    }
+    .pages.paged .page-placeholder {
+      height: 100%;
+      min-height: 0;
     }
     .notes {
       padding: 22px 20px 80px;
@@ -467,6 +485,19 @@
     }
     .note-body {
       overflow-wrap: anywhere;
+    }
+    .note-body.lazy {
+      min-height: 120px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px dashed #cbece3;
+      border-radius: 8px;
+      background: #f8fffd;
+      color: #5d7c86;
+      font-size: 13px;
+      font-weight: 800;
+      text-align: center;
     }
     .note-edit-panel {
       display: none;
@@ -1003,9 +1034,12 @@
     let parentCenterTimer = null;
     let lastFullscreenState = false;
     let readerStructureSignature = '';
+    let positionNotifyTimer = null;
+    let lastPositionNotifyKey = '';
     const pendingExplanationSaves = new Map();
     const PENDING_SAVE_TTL_MS = 30000;
     const VIEWPORT_ANCHOR_MS = 1400;
+    const NOTE_HYDRATE_RADIUS = 1;
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -1514,6 +1548,70 @@
       return pages.findIndex(item => Number(item.slideNumber) === Number(slideNumber));
     }
 
+    function pageIndexDistance(slideNumber, centerSlideNumber) {
+      const index = pageIndexForSlide(slideNumber);
+      const centerIndex = pageIndexForSlide(centerSlideNumber);
+      if (index < 0 || centerIndex < 0) return Number.POSITIVE_INFINITY;
+      return Math.abs(index - centerIndex);
+    }
+
+    function shouldHydrateNote(slideNumber, centerSlideNumber) {
+      return pageIndexDistance(slideNumber, centerSlideNumber) <= NOTE_HYDRATE_RADIUS;
+    }
+
+    function renderPageVisual(page) {
+      if (page.image) {
+        return `<img src="${page.image}" alt="第 ${page.slideNumber} 页原页面" loading="lazy" />`;
+      }
+      const text = page.imageAvailable ? '原页面按需加载中' : '暂无原页面图片';
+      return `<div class="page-placeholder">${escapeHtml(text)}</div>`;
+    }
+
+    function renderNoteBody(page, hydrate = false) {
+      if (hydrate) {
+        return `<div class="note-body" data-hydrated="1">${renderMarkdown(page.explanation)}</div>`;
+      }
+      return '<div class="note-body lazy" data-hydrated="0">讲解按需渲染</div>';
+    }
+
+    function hydrateNote(slideNumber) {
+      const page = pageForSlide(slideNumber);
+      const note = document.getElementById(`note-${Number(slideNumber)}`);
+      const body = note?.querySelector?.('.note-body');
+      const editor = note?.querySelector?.('.note-editor');
+      if (!page || !body || body.dataset.hydrated === '1') return Promise.resolve(false);
+      body.innerHTML = renderMarkdown(page.explanation);
+      body.classList.remove('lazy');
+      body.dataset.hydrated = '1';
+      if (editor) editor.value = String(page.explanation || '');
+      return typesetTargets([body]).then(() => true);
+    }
+
+    function requestImageWindowIfNeeded(slideNumber) {
+      const page = pageForSlide(slideNumber);
+      if (!page || !page.imageAvailable || page.image) return;
+      const key = `${deckId}:${Number(slideNumber)}`;
+      if (key === lastPositionNotifyKey) return;
+      lastPositionNotifyKey = key;
+      window.clearTimeout(positionNotifyTimer);
+      positionNotifyTimer = window.setTimeout(() => {
+        Streamlit.setComponentValue({
+          action: 'reader_position',
+          token: createComponentToken(),
+          deckId,
+          slideNumber: Number(slideNumber),
+        });
+      }, 160);
+    }
+
+    function ensureNearbyContent(slideNumber) {
+      pages.forEach(page => {
+        const pageNumber = Number(page.slideNumber);
+        if (shouldHydrateNote(pageNumber, slideNumber)) hydrateNote(pageNumber);
+      });
+      requestImageWindowIfNeeded(slideNumber);
+    }
+
     function maxSlideNumber() {
       if (!pages.length) return 1;
       return Math.max(...pages.map(page => Number(page.slideNumber || 1)));
@@ -1605,7 +1703,6 @@
         deckId: Number(nextDeckId || 0),
         pages: nextPages.map(page => [
           Number(page.slideNumber || 0),
-          String(page.image || ''),
           String(page.title || ''),
           String(page.pageType || ''),
           Number(page.sectionIndex || 0),
@@ -1634,6 +1731,8 @@
       const previousPageScroll = pageRoot.scrollTop;
       page.explanation = explanation;
       body.innerHTML = renderMarkdown(explanation);
+      body.classList.remove('lazy');
+      body.dataset.hydrated = '1';
       if (editor) editor.value = explanation;
       if (!options.keepEditing) note.classList.remove('editing');
 
@@ -1671,6 +1770,13 @@
         const slideNumber = Number(page.slideNumber);
         const previous = previousBySlide.get(slideNumber) || {};
         const note = document.getElementById(`note-${slideNumber}`);
+        const pageArticle = document.getElementById(`page-${slideNumber}`);
+
+        if (String(previous.image || '') !== String(page.image || '')) {
+          const visual = pageArticle?.querySelector?.('.page-visual');
+          if (visual) visual.innerHTML = renderPageVisual(page);
+        }
+
         if (!note) return;
 
         const meta = note.querySelector('.note-meta');
@@ -1685,6 +1791,8 @@
         const editor = note.querySelector('.note-editor');
         if (!body) return;
         body.innerHTML = renderMarkdown(page.explanation);
+        body.classList.remove('lazy');
+        body.dataset.hydrated = '1';
         if (editor) editor.value = String(page.explanation || '');
         typesetQueue.push(body);
       });
@@ -1755,6 +1863,7 @@
       if (options.scrollPage) {
         centerPage(currentSlideNumber, options.behavior || 'smooth');
       }
+      ensureNearbyContent(currentSlideNumber);
       if (!options.skipSave) saveScrollState();
     }
 
@@ -1995,6 +2104,8 @@
 
       const previousScrollTop = noteRoot.scrollTop;
       body.innerHTML = renderMarkdown(page.explanation);
+      body.classList.remove('lazy');
+      body.dataset.hydrated = '1';
       if (button) {
         button.disabled = true;
         button.textContent = '刷新中';
@@ -2062,6 +2173,11 @@
       Streamlit.setFrameHeight(height);
       loadLayoutState();
       loadReadingMode();
+      const stored = readScrollState();
+      const requestedSlide = Number(
+        stored?.currentSlide || args.initial_slide_number || restoreScrollAfterRender?.currentSlide || pages[0]?.slideNumber || 1
+      );
+      const targetSlide = pageForSlide(requestedSlide) ? requestedSlide : Number(pages[0]?.slideNumber || 1);
 
       deckTitle.textContent = String(args.title || '学习资料');
       deckMeta.textContent = `${String(args.subject || '未分类')} · 原页面同步阅读`;
@@ -2084,13 +2200,13 @@
         const previousPageScroll = restoreScrollAfterRender.pageScroll;
         const previousNoteScroll = restoreScrollAfterRender.noteScroll;
         const typesetQueue = patchRenderedReader(previousPages);
-        const targetSlide = pageForSlide(currentSlideNumber)
+        currentSlideNumber = pageForSlide(currentSlideNumber)
           ? currentSlideNumber
-          : Number(pages[0]?.slideNumber || 1);
-        currentSlideNumber = targetSlide;
+          : targetSlide;
         updatePageJumpDisplay();
         updateSectionSelect(currentSlideNumber);
         renderChatForPage(currentSlideNumber);
+        ensureNearbyContent(currentSlideNumber);
         pageRoot.scrollTop = previousPageScroll;
         noteRoot.scrollTop = previousNoteScroll;
         if (typesetQueue.length) {
@@ -2122,7 +2238,7 @@
               ${pageMeta ? `<span>${escapeHtml(pageMeta)}</span>` : ''}
             </div>
             <div class="page-visual">
-              <img src="${page.image}" alt="第 ${page.slideNumber} 页原页面" loading="lazy" />
+              ${renderPageVisual(page)}
             </div>
           </article>
         `;
@@ -2139,9 +2255,9 @@
           </div>
           <div class="note-meta">${escapeHtml(page.model || '未生成')} ${page.createdAt ? '· ' + escapeHtml(page.createdAt) : ''}</div>
           ${renderPageContext(page)}
-          <div class="note-body">${renderMarkdown(page.explanation)}</div>
+          ${renderNoteBody(page, shouldHydrateNote(Number(page.slideNumber), targetSlide))}
           <div class="note-edit-panel">
-            <textarea class="note-editor" spellcheck="false">${escapeHtml(page.explanation || '')}</textarea>
+            <textarea class="note-editor" spellcheck="false">${shouldHydrateNote(Number(page.slideNumber), targetSlide) ? escapeHtml(page.explanation || '') : ''}</textarea>
             <div class="note-edit-actions">
               <button type="button" class="note-action-button note-cancel" data-cancel-edit-page="${page.slideNumber}">取消</button>
               <button type="button" class="note-action-button note-save" data-save-edit-page="${page.slideNumber}">保存修改</button>
@@ -2163,11 +2279,6 @@
       });
 
       document.querySelectorAll('.page').forEach(page => observer.observe(page));
-      const stored = readScrollState();
-      const requestedSlide = Number(
-        stored?.currentSlide || args.initial_slide_number || restoreScrollAfterRender?.currentSlide || pages[0]?.slideNumber || 1
-      );
-      const targetSlide = pageForSlide(requestedSlide) ? requestedSlide : Number(pages[0]?.slideNumber || 1);
       if (pages.length) setActive(targetSlide);
       window.setTimeout(() => {
         const state = stored || restoreScrollAfterRender;
@@ -2180,7 +2291,8 @@
         noteRoot.scrollTop = state.noteScroll || 0;
         renderChatForPage(currentSlideNumber);
       }, 80);
-      typesetMath();
+      const hydratedBodies = Array.from(noteRoot.querySelectorAll('.note-body[data-hydrated="1"]'));
+      typesetTargets([...hydratedBodies, canvasMessages]);
       if (!hasCenteredOnEntry && pages.length) {
         hasCenteredOnEntry = true;
         scheduleParentReaderCenter({
@@ -2341,7 +2453,7 @@
         </div>
       `).join('');
       canvasMessages.scrollTop = canvasMessages.scrollHeight;
-      typesetMath();
+      typesetTargets([canvasMessages]);
     }
 
     function sendCanvasQuestion() {

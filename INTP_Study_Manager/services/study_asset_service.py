@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 
-from db import insert_and_get_id
+from db import managed_connection
+from models import REVIEW_INTERVALS
 from services.auth_service import require_login
-from services.review_service import ensure_initial_review_tasks
 
 
 def parse_study_assets(raw_text: str) -> dict[str, Any]:
@@ -45,61 +45,82 @@ def save_study_assets(
     chapter = _text(session.get("chapter")) or fallback_chapter
     mastery = _clamp_int(session.get("mastery"), 60)
 
-    session_id = insert_and_get_id(
-        """
-        INSERT INTO study_sessions (
-            user_id, date, subject, chapter, title, main_question, mastered_content,
-            blockers, wrong_questions, summary, mastery, need_review, is_key
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            user.id,
-            session_date,
-            subject,
-            chapter,
-            _text(session.get("title")) or f"{chapter} 阅读复盘",
-            _text(session.get("main_question")) or "这份资料主要想解决什么问题？",
-            _text(session.get("mastered_content")),
-            _text(session.get("blockers")),
-            _text(session.get("wrong_questions")),
-            _text(session.get("summary")),
-            mastery,
-            int(_bool(session.get("need_review"), True)),
-            int(_bool(session.get("is_key"), mastery < 70)),
-        ),
-    )
-
     knowledge_ids: list[int] = []
-    for card in assets["knowledge_cards"]:
-        card_mastery = _clamp_int(card.get("mastery"), mastery)
-        need_review = _bool(card.get("need_review"), True)
-        knowledge_id = insert_and_get_id(
+    review_rows: list[tuple[int, int, str, str]] = []
+    with managed_connection() as conn:
+        cursor = conn.execute(
             """
-            INSERT INTO knowledge_cards (
-                user_id, subject, topic, core_question, one_sentence, logic_or_formula,
-                application, mastery, need_review, source_session_id
+            INSERT INTO study_sessions (
+                user_id, date, subject, chapter, title, main_question, mastered_content,
+                blockers, wrong_questions, summary, mastery, need_review, is_key
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user.id,
-                _text(card.get("subject")) or subject,
-                _text(card.get("topic")) or "未命名知识点",
-                _text(card.get("core_question")),
-                _text(card.get("one_sentence")) or "待补充一句话解释",
-                _text(card.get("logic_or_formula")),
-                _text(card.get("application")),
-                card_mastery,
-                int(need_review),
-                session_id,
+                session_date,
+                subject,
+                chapter,
+                _text(session.get("title")) or f"{chapter} 阅读复盘",
+                _text(session.get("main_question")) or "这份资料主要想解决什么问题？",
+                _text(session.get("mastered_content")),
+                _text(session.get("blockers")),
+                _text(session.get("wrong_questions")),
+                _text(session.get("summary")),
+                mastery,
+                int(_bool(session.get("need_review"), True)),
+                int(_bool(session.get("is_key"), mastery < 70)),
             ),
         )
-        if need_review:
-            ensure_initial_review_tasks(knowledge_id, session_date, user_id=user.id)
-        knowledge_ids.append(knowledge_id)
+        session_id = int(cursor.lastrowid)
+
+        for card in assets["knowledge_cards"]:
+            card_mastery = _clamp_int(card.get("mastery"), mastery)
+            need_review = _bool(card.get("need_review"), True)
+            cursor = conn.execute(
+                """
+                INSERT INTO knowledge_cards (
+                    user_id, subject, topic, core_question, one_sentence, logic_or_formula,
+                    application, mastery, need_review, source_session_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user.id,
+                    _text(card.get("subject")) or subject,
+                    _text(card.get("topic")) or "未命名知识点",
+                    _text(card.get("core_question")),
+                    _text(card.get("one_sentence")) or "待补充一句话解释",
+                    _text(card.get("logic_or_formula")),
+                    _text(card.get("application")),
+                    card_mastery,
+                    int(need_review),
+                    session_id,
+                ),
+            )
+            knowledge_id = int(cursor.lastrowid)
+            knowledge_ids.append(knowledge_id)
+            if need_review:
+                review_rows.extend(_initial_review_rows(user.id, knowledge_id, session_date))
+
+        if review_rows:
+            conn.executemany(
+                """
+                INSERT INTO review_tasks (user_id, knowledge_id, review_date, review_stage)
+                VALUES (?, ?, ?, ?)
+                """,
+                review_rows,
+            )
 
     return session_id, knowledge_ids
+
+
+def _initial_review_rows(user_id: int, knowledge_id: int, start_date: str) -> list[tuple[int, int, str, str]]:
+    base_date = datetime.fromisoformat(start_date[:10]).date()
+    return [
+        (user_id, knowledge_id, (base_date + timedelta(days=days)).isoformat(), stage)
+        for days, stage in REVIEW_INTERVALS
+    ]
 
 
 def _extract_json_text(raw_text: str) -> str:

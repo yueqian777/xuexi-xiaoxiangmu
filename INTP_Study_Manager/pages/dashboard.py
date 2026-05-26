@@ -46,6 +46,7 @@ def _render_default_api_and_daily_ai_review() -> None:
 
     provider_key, _ = ensure_active_provider(providers)
     provider_keys = [str(provider["provider_key"]) for provider in providers]
+    provider_by_key = {str(provider["provider_key"]): provider for provider in providers}
     selected_index = provider_keys.index(str(provider_key)) if provider_key in provider_keys else 0
 
     with st.container(border=True):
@@ -54,10 +55,10 @@ def _render_default_api_and_daily_ai_review() -> None:
             "项目默认 API",
             provider_keys,
             index=selected_index,
-            format_func=lambda item_key: provider_label(next(p for p in providers if str(p["provider_key"]) == str(item_key))),
+            format_func=lambda item_key: provider_label(provider_by_key[str(item_key)]),
             key="dashboard_default_api_provider",
         )
-        provider = next(p for p in providers if str(p["provider_key"]) == str(selected_provider_key))
+        provider = provider_by_key[str(selected_provider_key)]
         ensure_provider_model(provider)
         model = cols[1].text_input(
             "默认模型",
