@@ -71,7 +71,19 @@ class PptGenerationParallelTest(unittest.TestCase):
         self.assertEqual(ppt_tutor._normalize_generation_parallelism(None, 10), 1)
         self.assertEqual(ppt_tutor._normalize_generation_parallelism(0, 10), 1)
         self.assertEqual(ppt_tutor._normalize_generation_parallelism(3, 2), 2)
-        self.assertEqual(ppt_tutor._normalize_generation_parallelism(99, 20), 16)
+        self.assertEqual(ppt_tutor._normalize_generation_parallelism(99, 20), 20)
+        self.assertEqual(ppt_tutor._normalize_generation_parallelism(99, 50, max_parallelism=40), 40)
+
+    def test_provider_parallel_limit_defaults_to_eight_without_benchmark(self):
+        provider = {
+            "provider_key": "generic",
+            "name": "Generic Provider",
+            "provider_type": "unknown",
+            "base_url": "https://api.example.com/v1",
+            "model": "slow-thinking-model",
+        }
+
+        self.assertEqual(ppt_tutor._provider_parallel_limit(provider), 8)
 
     def test_adaptive_parallelism_uses_selected_provider_group_capacity(self):
         provider_pool = [
@@ -82,6 +94,102 @@ class PptGenerationParallelTest(unittest.TestCase):
 
         self.assertEqual(ppt_tutor._adaptive_generation_parallelism(provider_pool, 20), 11)
         self.assertEqual(ppt_tutor._adaptive_generation_parallelism(provider_pool, 3), 3)
+
+    def test_adaptive_parallelism_has_no_global_cap(self):
+        provider_pool = [
+            {"provider_key": "a", "parallel_limit": 20},
+            {"provider_key": "b", "parallel_limit": 18},
+        ]
+
+        self.assertEqual(ppt_tutor._adaptive_generation_parallelism(provider_pool, 100), 38)
+
+    def test_parallel_benchmark_starts_near_default_and_uses_success_threshold(self):
+        provider = {
+            "provider_key": "bench",
+            "provider_name": "Benchmark",
+            "api_key": "key",
+            "active_model": "model",
+            "active_model_label": "Benchmark / model",
+            "parallel_limit": 8,
+        }
+        active_calls = 0
+
+        def fake_request(prompt, **kwargs):
+            nonlocal active_calls
+            active_calls += 1
+            try:
+                if active_calls > 6:
+                    raise AIServiceError("rate limit", category="rate_limit")
+                time.sleep(0.02)
+                return "ok"
+            finally:
+                active_calls -= 1
+
+        result = ppt_tutor._probe_provider_parallel_limit(
+            provider,
+            max_parallelism=8,
+            request_func=fake_request,
+        )
+
+        self.assertEqual([probe["concurrency"] for probe in result["probes"][:2]], [8, 6])
+        self.assertEqual(result["parallel_limit"], 6)
+        self.assertTrue(result["ok"])
+
+    def test_parallel_benchmark_group_sums_measured_provider_limits(self):
+        provider_pool = [
+            {
+                "provider_key": "a",
+                "provider_name": "Provider A",
+                "api_key": "key-a",
+                "active_model": "model-a",
+                "active_model_label": "Provider A / model-a",
+                "parallel_limit": 8,
+            },
+            {
+                "provider_key": "b",
+                "provider_name": "Provider B",
+                "api_key": "key-b",
+                "active_model": "model-b",
+                "active_model_label": "Provider B / model-b",
+                "parallel_limit": 8,
+            },
+        ]
+        limits = {"a": 2, "b": 4}
+        active_by_provider = {"a": 0, "b": 0}
+
+        def fake_request(prompt, **kwargs):
+            provider_key = kwargs["provider_key"]
+            active_by_provider[provider_key] += 1
+            try:
+                if active_by_provider[provider_key] > limits[provider_key]:
+                    raise AIServiceError("rate limit", category="rate_limit")
+                time.sleep(0.02)
+                return "ok"
+            finally:
+                active_by_provider[provider_key] -= 1
+
+        result = ppt_tutor._benchmark_generation_provider_pool(
+            provider_pool,
+            max_parallelism=5,
+            request_func=fake_request,
+        )
+
+        self.assertEqual(result["group_parallel_limit"], 6)
+        self.assertEqual({item["provider_key"]: item["parallel_limit"] for item in result["providers"]}, {"a": 2, "b": 4})
+
+    def test_measured_parallel_limits_are_applied_to_provider_pool(self):
+        provider_pool = [
+            {"provider_key": "a", "base_url": "https://a.example/v1", "active_model": "model-a", "parallel_limit": 8},
+            {"provider_key": "b", "base_url": "https://b.example/v1", "active_model": "model-b", "parallel_limit": 8},
+        ]
+        benchmark_results = {
+            ppt_tutor._parallel_benchmark_key(provider_pool[0]): {"parallel_limit": 12},
+        }
+
+        applied = ppt_tutor._apply_parallel_benchmark_results(provider_pool, benchmark_results)
+
+        self.assertEqual(applied[0]["parallel_limit"], 12)
+        self.assertEqual(applied[1]["parallel_limit"], 8)
 
     def test_generation_provider_pool_keeps_active_provider_first(self):
         providers = [

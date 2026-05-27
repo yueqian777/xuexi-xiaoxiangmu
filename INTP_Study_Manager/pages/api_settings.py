@@ -18,6 +18,7 @@ from services.ai_service import (
     save_api_provider,
     save_api_provider_order,
 )
+from services import api_parallel_benchmark_service as parallel_benchmark
 from services.api_key_ui import render_local_secret_unlock
 from services.api_runtime import ensure_provider_model, provider_model_state_key
 from services.auth_service import require_login
@@ -856,26 +857,39 @@ def _render_unlocked_secret_vault(providers: list[dict]) -> None:
             placeholder=f"当前：{masked_secret(current_secret)}；留空不会保存",
         )
         submitted = st.form_submit_button("加密保存这个 API Key", type="primary")
+        measure_submitted = st.form_submit_button("保存并测速绑定")
 
-    if submitted:
+    if submitted or measure_submitted:
+        if submitted and not api_key.strip():
+            st.error("API Key 不能为空。")
+            return
+        target_api_key = api_key.strip() or current_secret
         try:
-            updated = upsert_provider_secret(
-                data,
-                provider_key=provider_key,
-                provider_name=provider["name"],
-                api_key=api_key,
-                model=provider.get("model") or "",
-                provider_type=provider.get("provider_type") or "",
-                base_url=provider.get("base_url") or "",
-            )
-            save_secret_store(st.session_state["secret_vault_master_password"], updated)
+            updated = data
+            if api_key.strip():
+                updated = upsert_provider_secret(
+                    data,
+                    provider_key=provider_key,
+                    provider_name=provider["name"],
+                    api_key=api_key,
+                    model=provider.get("model") or "",
+                    provider_type=provider.get("provider_type") or "",
+                    base_url=provider.get("base_url") or "",
+                )
+                save_secret_store(st.session_state["secret_vault_master_password"], updated)
         except SecretStoreError as exc:
             st.error(str(exc))
             return
         st.session_state["secret_vault_data"] = updated
-        st.session_state[f"api_key_provider_{provider_key}"] = api_key.strip()
-        st.success("API Key 已加密保存，并已应用到当前会话。")
-        st.rerun()
+        st.session_state[f"api_key_provider_{provider_key}"] = target_api_key
+        if measure_submitted:
+            if not target_api_key:
+                st.error("请先填写或保存当前 Provider 的 API Key 后再测速。")
+                return
+            _benchmark_and_bind_provider_key(provider, target_api_key)
+        else:
+            st.success("API Key 已加密保存，并已应用到当前会话。")
+            st.rerun()
 
     cols = st.columns(3)
     if cols[0].button("应用全部已保存 Key 到当前会话"):
@@ -896,6 +910,27 @@ def _render_unlocked_secret_vault(providers: list[dict]) -> None:
         _lock_secret_vault(providers)
         st.success("已锁定。")
         st.rerun()
+
+
+def _benchmark_and_bind_provider_key(provider: dict, api_key: str) -> None:
+    provider_key = str(provider.get("provider_key") or "")
+    active_model = str(st.session_state.get(provider_model_state_key(provider_key)) or provider.get("model") or DEFAULT_MODEL)
+    provider_config = {
+        **provider,
+        "provider_name": provider.get("name") or provider_key,
+        "api_key": api_key,
+        "active_model": active_model,
+    }
+    with st.spinner("正在按当前 API Key 测速并绑定最大并行路数..."):
+        result = parallel_benchmark.probe_provider_parallel_limit(provider_config)
+        parallel_benchmark.save_benchmark_result(result)
+    limit = int(result.get("parallel_limit") or 0)
+    success_rate = float(result.get("success_rate") or 0.0)
+    samples = int(result.get("sample_count") or 0)
+    if result.get("is_authoritative") and limit > 0:
+        st.success(f"测速完成并已绑定到当前 API Key：{limit} 路，成功率 {success_rate:.0%}，样本 {samples} 次。")
+    else:
+        st.warning(f"测速完成但结论不可靠，已记录本地样本但未绑定：成功率 {success_rate:.0%}，样本 {samples} 次。")
 
 
 def _apply_vault_to_session(providers: list[dict], data: dict) -> None:

@@ -257,6 +257,26 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
 
+            CREATE TABLE IF NOT EXISTS api_parallel_benchmarks (
+                benchmark_key TEXT PRIMARY KEY,
+                provider_key TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                base_url TEXT NOT NULL DEFAULT '',
+                api_key_fingerprint TEXT NOT NULL DEFAULT '',
+                parallel_limit INTEGER NOT NULL DEFAULT 0,
+                success_rate REAL NOT NULL DEFAULT 0,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                rate_limit_count INTEGER NOT NULL DEFAULT 0,
+                timeout_count INTEGER NOT NULL DEFAULT 0,
+                probe_json TEXT NOT NULL DEFAULT '{}',
+                is_authoritative INTEGER NOT NULL DEFAULT 0,
+                invalidated_at TEXT DEFAULT '',
+                invalidated_reason TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );
+
             CREATE TABLE IF NOT EXISTS daily_review_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL DEFAULT 0,
@@ -350,6 +370,8 @@ def init_db() -> None:
                 ON slide_questions(user_id, slide_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_daily_ai_review_plans_user_date
                 ON daily_ai_review_plans(user_id, review_date DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_api_parallel_benchmarks_provider
+                ON api_parallel_benchmarks(provider_key, model, base_url, api_key_fingerprint);
             """
         )
         _migrate_api_provider_identity(conn)

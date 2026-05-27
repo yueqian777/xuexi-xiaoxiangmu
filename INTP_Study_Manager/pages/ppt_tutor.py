@@ -34,6 +34,7 @@ from services.ai_service import (
     list_available_models,
     provider_label,
 )
+from services import api_parallel_benchmark_service as parallel_benchmark
 from services.api_key_ui import render_local_secret_unlock
 from services.api_runtime import ensure_active_provider, ensure_provider_model, provider_model_state_key, set_active_provider
 from services.auth_service import require_login
@@ -71,8 +72,10 @@ from services.study_asset_service import parse_study_assets, save_study_assets
 SYNCED_READER_COMPONENT_PATH = BASE_DIR / "components" / "synced_reader"
 SYNCED_READER_COMPONENT = None
 READER_IMAGE_WINDOW_RADIUS = 2
-PPT_GENERATION_MAX_PARALLELISM = 16
-PPT_GENERATION_MAX_PROVIDER_PARALLELISM = 8
+PPT_GENERATION_DEFAULT_PARALLELISM = parallel_benchmark.DEFAULT_PARALLELISM
+PPT_PARALLEL_BENCHMARK_MAX_PARALLELISM = parallel_benchmark.DEFAULT_MAX_PARALLELISM
+PPT_INLINE_BENCHMARK_MIN_SLIDES = parallel_benchmark.INLINE_BENCHMARK_MIN_SAMPLES
+PPT_PARALLEL_BENCHMARK_STATE_KEY = "ppt_parallel_benchmark_results"
 PPT_GENERATION_REFRESH_SECONDS = 1.5
 PPT_GENERATION_REFRESH_STATE_KEY = "ppt_generation_last_refresh"
 PPT_STRUCTURE_REFRESH_STATE_KEY = "ppt_structure_last_refresh"
@@ -409,6 +412,33 @@ def _render_deck_actions(
             selected_provider_keys=selected_provider_keys,
             active_provider_key=active_provider_key,
         )
+        provider_pool = _apply_parallel_benchmark_results(provider_pool)
+        benchmark_cols = st.columns([1.1, 2])
+        if benchmark_cols[0].button("测速最大并行路数", disabled=not provider_pool, key=f"ppt_parallel_benchmark_{deck['id']}"):
+            if not provider_pool:
+                st.warning("请先选择至少一个 API。")
+            else:
+                with st.spinner("正在测速当前 API 组的最大稳定并行路数..."):
+                    benchmark_result = _benchmark_generation_provider_pool(provider_pool)
+                _store_parallel_benchmark_results(benchmark_result)
+                provider_pool = _apply_parallel_benchmark_results(provider_pool)
+                st.success(_format_parallel_benchmark_result(benchmark_result))
+        benchmark_summary = _format_parallel_benchmark_summary(provider_pool)
+        if benchmark_summary:
+            benchmark_cols[1].caption(benchmark_summary)
+        benchmark_during_generation = False
+        if len(selected_slides) >= PPT_INLINE_BENCHMARK_MIN_SLIDES:
+            benchmark_during_generation = st.checkbox(
+                "生成时顺带压测当前 API 组",
+                value=False,
+                help=(
+                    f"仅在本次范围不少于 {PPT_INLINE_BENCHMARK_MIN_SLIDES} 页时建议开启；"
+                    "如果样本不足或结论不可靠，只记录本地样本，不绑定为最大并行路数。"
+                ),
+                key=f"ppt_generation_inline_benchmark_{deck['id']}",
+            )
+        else:
+            st.caption(f"生成范围少于 {PPT_INLINE_BENCHMARK_MIN_SLIDES} 页时不建议用生成过程压测，测速结果容易偏低。")
         generation_cols = st.columns([1.3, 1.3, 2])
         adaptive_parallelism = generation_cols[2].checkbox(
             "自适应最快速度",
@@ -458,6 +488,7 @@ def _render_deck_actions(
                 parallelism=parallelism,
                 provider_pool=provider_pool,
                 adaptive_parallelism=adaptive_parallelism,
+                benchmark_during_generation=benchmark_during_generation,
             )
 
 
@@ -1654,6 +1685,12 @@ def _resume_interrupted_generation() -> dict | None:
         retried = int(task.get("retried") or 0)
         if skipped or failed or retried:
             st.caption(f"跳过 {skipped} 页，失败 {failed} 页，重试 {retried} 次。")
+        parallel_warning_text = _parallel_degradation_warning_text(task)
+        if parallel_warning_text:
+            st.warning(parallel_warning_text)
+        benchmark_status_text = str(task.get("parallel_benchmark_status_text") or "")
+        if benchmark_status_text:
+            st.caption(benchmark_status_text)
         return task
     if status == "stopped":
         st.warning(f"⚠️ 已停止：{task.get('status_text', '生成已中断')}")
@@ -1711,6 +1748,7 @@ def _generate_whole_deck_explanations(
     parallelism: int = 1,
     provider_pool: list[dict] | None = None,
     adaptive_parallelism: bool = False,
+    benchmark_during_generation: bool = False,
 ) -> None:
     targets = []
     for slide in slides:
@@ -1734,6 +1772,7 @@ def _generate_whole_deck_explanations(
         selected_provider_keys=[str(provider_key)] if provider_key else [],
         active_provider_key=str(provider_key or ""),
     )
+    provider_pool = _apply_parallel_benchmark_results(provider_pool)
     group_parallel_cap = _adaptive_generation_parallelism(provider_pool, total)
     parallelism = group_parallel_cap if adaptive_parallelism else _normalize_generation_parallelism(
         parallelism,
@@ -1763,6 +1802,7 @@ def _generate_whole_deck_explanations(
             "parallelism": parallelism,
             "provider_pool": provider_pool,
             "adaptive_parallelism": adaptive_parallelism,
+            "benchmark_during_generation": benchmark_during_generation,
             "group_parallel_cap": group_parallel_cap,
             "active_model_label": active_model_label,
             "reasoning_depth": st.session_state.get("active_api_reasoning_depth"),
@@ -1921,9 +1961,12 @@ def _build_generation_provider_pool(
         pool.append(
             {
                 "provider_key": provider_key,
+                "name": provider.get("name") or provider_key,
                 "provider_name": provider.get("name") or provider_key,
                 "provider_type": provider.get("provider_type") or "",
                 "base_url": provider.get("base_url") or "",
+                "api_key_env": provider.get("api_key_env") or "",
+                "auth_type": provider.get("auth_type") or "",
                 "api_key": api_key,
                 "active_model": model.strip() or DEFAULT_MODEL,
                 "active_model_label": f"{provider.get('name') or provider_key} / {model.strip() or DEFAULT_MODEL}",
@@ -1934,24 +1977,117 @@ def _build_generation_provider_pool(
     return pool
 
 
+def _parallel_benchmark_key(provider: dict) -> str:
+    return parallel_benchmark.benchmark_key(provider)
+
+
+def _parallel_benchmark_results_from_state() -> dict:
+    results = st.session_state.get(PPT_PARALLEL_BENCHMARK_STATE_KEY)
+    return results if isinstance(results, dict) else {}
+
+
+def _apply_parallel_benchmark_results(provider_pool: list[dict], benchmark_results: dict | None = None) -> list[dict]:
+    benchmark_results = benchmark_results if benchmark_results is not None else parallel_benchmark.load_benchmark_results(provider_pool)
+    applied: list[dict] = []
+    for provider in provider_pool:
+        provider_config = dict(provider)
+        result = benchmark_results.get(_parallel_benchmark_key(provider_config))
+        if isinstance(result, dict):
+            try:
+                measured_limit = int(result.get("parallel_limit") or 0)
+            except (TypeError, ValueError):
+                measured_limit = 0
+            if measured_limit > 0:
+                provider_config["parallel_limit"] = measured_limit
+                provider_config["parallel_benchmark_measured"] = True
+                provider_config["parallel_benchmark_success_rate"] = result.get("success_rate")
+                provider_config["parallel_benchmark_samples"] = result.get("sample_count")
+        applied.append(provider_config)
+    return applied
+
+
+def _store_parallel_benchmark_results(benchmark_result: dict) -> None:
+    for provider_result in benchmark_result.get("providers") or []:
+        parallel_benchmark.save_benchmark_result(provider_result)
+    st.session_state[PPT_PARALLEL_BENCHMARK_STATE_KEY] = {
+        _parallel_benchmark_key(provider_result): provider_result
+        for provider_result in benchmark_result.get("providers") or []
+    }
+
+
+def _format_parallel_benchmark_summary(provider_pool: list[dict], benchmark_results: dict | None = None) -> str:
+    benchmark_results = benchmark_results if benchmark_results is not None else parallel_benchmark.load_benchmark_results(provider_pool)
+    measured = []
+    for provider in provider_pool:
+        result = benchmark_results.get(_parallel_benchmark_key(provider))
+        if not isinstance(result, dict):
+            continue
+        try:
+            measured_limit = int(result.get("parallel_limit") or 0)
+        except (TypeError, ValueError):
+            measured_limit = 0
+        if measured_limit > 0:
+            measured.append(f"{provider.get('provider_name') or provider.get('provider_key')}：{measured_limit} 路")
+    if not measured:
+        return "未测速时每个 API 默认按 8 路并行估算。"
+    return f"已测速：{'；'.join(measured)}。API 组上限 {sum(int(item.get('parallel_limit') or 1) for item in provider_pool)} 路。"
+
+
+def _format_parallel_benchmark_result(benchmark_result: dict) -> str:
+    providers = benchmark_result.get("providers") or []
+    if not providers:
+        return "测速完成，但没有可用 API。"
+    parts = []
+    for provider in providers:
+        name = provider.get("provider_name") or provider.get("provider_key") or "API"
+        limit = int(provider.get("parallel_limit") or 0)
+        if limit > 0:
+            parts.append(f"{name} {limit} 路")
+        else:
+            parts.append(f"{name} 测速失败")
+    return f"测速完成：{'；'.join(parts)}；API 组最大稳定并行 {int(benchmark_result.get('group_parallel_limit') or 0)} 路。"
+
+
+def _run_provider_parallel_probe(
+    provider: dict,
+    concurrency: int,
+    *,
+    request_func=generate_text,
+) -> dict:
+    return parallel_benchmark.run_provider_parallel_probe(provider, concurrency, request_func=request_func)
+
+
+def _probe_provider_parallel_limit(
+    provider: dict,
+    *,
+    max_parallelism: int = PPT_PARALLEL_BENCHMARK_MAX_PARALLELISM,
+    request_func=generate_text,
+) -> dict:
+    previous_result = parallel_benchmark.load_benchmark_result(provider, authoritative_only=False)
+    return parallel_benchmark.probe_provider_parallel_limit(
+        provider,
+        max_parallelism=max_parallelism,
+        request_func=request_func,
+        previous_result=previous_result,
+    )
+
+
+def _benchmark_generation_provider_pool(
+    provider_pool: list[dict],
+    *,
+    max_parallelism: int = PPT_PARALLEL_BENCHMARK_MAX_PARALLELISM,
+    request_func=generate_text,
+) -> dict:
+    return parallel_benchmark.benchmark_provider_pool(
+        provider_pool,
+        max_parallelism=max_parallelism,
+        request_func=request_func,
+    )
+
+
 def _provider_parallel_limit(provider: dict, model: str | None = None) -> int:
-    provider_type = str(provider.get("provider_type") or "").strip()
-    base_url = str(provider.get("base_url") or "").lower()
-    name = str(provider.get("name") or "").lower()
-    model_name = str(model or provider.get("model") or "").lower()
-    if any(marker in base_url for marker in ("localhost", "127.0.0.1", "0.0.0.0")) or "cliproxy" in name or "local" in name:
-        limit = 8
-    elif provider_type in {"openai_chat", "openai_responses"}:
-        limit = 6
-    elif provider_type in {"custom_http_json", "minimax_chat", "cohere_chat"}:
-        limit = 4
-    elif provider_type in {"gemini_generate_content", "anthropic_messages"}:
-        limit = 3
-    else:
-        limit = 2
-    if any(marker in model_name for marker in ("reason", "thinking", "deepseek-r1")):
-        limit = max(1, limit - 1)
-    return min(max(1, limit), PPT_GENERATION_MAX_PROVIDER_PARALLELISM)
+    del provider, model
+    return PPT_GENERATION_DEFAULT_PARALLELISM
 
 
 def _adaptive_generation_parallelism(provider_pool: list[dict], total: int) -> int:
@@ -1967,11 +2103,6 @@ def _normalize_generation_parallelism(value: object, total: int, *, max_parallel
     except (TypeError, ValueError):
         requested = 1
     try:
-        cap = int(max_parallelism if max_parallelism is not None else PPT_GENERATION_MAX_PARALLELISM)
-    except (TypeError, ValueError):
-        cap = PPT_GENERATION_MAX_PARALLELISM
-    cap = max(1, min(cap, PPT_GENERATION_MAX_PARALLELISM))
-    try:
         target_count = int(total)
     except (TypeError, ValueError):
         target_count = 0
@@ -1979,6 +2110,11 @@ def _normalize_generation_parallelism(value: object, total: int, *, max_parallel
         requested = 1
     if target_count <= 0:
         return 1
+    try:
+        cap = int(max_parallelism) if max_parallelism is not None else target_count
+    except (TypeError, ValueError):
+        cap = target_count
+    cap = max(1, cap)
     return min(requested, target_count, cap)
 
 
@@ -1988,6 +2124,7 @@ def _slide_generation_result(
     message: str = "",
     *,
     stop: bool = False,
+    error_category: str = "",
 ) -> dict:
     return {
         "slide_id": int(slide.get("id") or 0),
@@ -1995,6 +2132,7 @@ def _slide_generation_result(
         "status": status,
         "message": message,
         "stop": stop,
+        "error_category": error_category,
     }
 
 
@@ -2132,6 +2270,7 @@ def _generate_slide_explanation_from_task(
                     slide,
                     "failed",
                     f"第 {slide_number} 页：当前模型拒绝图片输入，准备换用其它 Provider 重试。",
+                    error_category=exc.category,
                 )
             if _is_text_empty(slide):
                 return _slide_generation_result(
@@ -2163,11 +2302,13 @@ def _generate_slide_explanation_from_task(
                     slide,
                     "failed",
                     _generation_error_message(slide, retry_exc),
+                    error_category=retry_exc.category,
                 )
         return _slide_generation_result(
             slide,
             "failed",
             _generation_error_message(slide, exc),
+            error_category=exc.category,
         )
 
 
@@ -2265,6 +2406,36 @@ def _skip_job_without_provider(
     return processed, skipped
 
 
+def _finalize_generation_parallel_benchmark(task: dict, stats: dict[str, dict]) -> None:
+    results = parallel_benchmark.finalize_generation_benchmark_stats(
+        stats,
+        min_samples=PPT_INLINE_BENCHMARK_MIN_SLIDES,
+    )
+    task["parallel_benchmark_results"] = results
+    if not task.get("benchmark_during_generation"):
+        return
+    for result in results:
+        parallel_benchmark.save_benchmark_result(result)
+    authoritative = [result for result in results if result.get("is_authoritative")]
+    if authoritative:
+        task["parallel_benchmark_status_text"] = "已根据本次真实生成样本更新 API 并行路数记录。"
+    else:
+        task["parallel_benchmark_status_text"] = "本次真实生成样本不足或成功率不足，已记录本地样本，但未绑定为最大并行路数。"
+
+
+def _parallel_degradation_warning_text(task: dict) -> str:
+    warnings = task.get("parallel_degradation_warnings") or []
+    if not warnings:
+        return ""
+    parts = []
+    for item in warnings:
+        name = item.get("provider_name") or item.get("provider_key") or "API"
+        old_limit = item.get("from") or "?"
+        new_limit = item.get("to") or "?"
+        parts.append(f"{name}：{old_limit} -> {new_limit}")
+    return f"检测到高错误率，已动态降低并行路数（{'；'.join(parts)}）。现有最大并行路数记录可能不适用，建议重新测速。"
+
+
 def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -> None:
     generated = 0
     skipped = 0
@@ -2291,7 +2462,7 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
                 "order": order,
                 "provider": provider,
                 "provider_key": str(provider.get("provider_key") or ""),
-                "parallel_limit": min(parallel_limit, PPT_GENERATION_MAX_PROVIDER_PARALLELISM),
+                "parallel_limit": parallel_limit,
                 "running": 0,
             }
         )
@@ -2312,6 +2483,8 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
         for slide in targets
     ]
     future_to_slide = {}
+    generation_benchmark_stats = parallel_benchmark.new_generation_benchmark_stats(provider_pool)
+    benchmark_during_generation = bool(task.get("benchmark_during_generation"))
 
     with ThreadPoolExecutor(max_workers=parallelism) as executor:
         while pending or future_to_slide:
@@ -2349,6 +2522,11 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
                         provider_state["provider"],
                     )
                     future_to_slide[future] = (job, provider_state)
+                    parallel_benchmark.record_generation_schedule(
+                        generation_benchmark_stats,
+                        provider_state["provider"],
+                        provider_state["running"],
+                    )
                     scheduled = True
                     break
                 if not scheduled:
@@ -2382,10 +2560,50 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
                         slide,
                         "failed",
                         f"第 {int(slide.get('slide_number') or 0)} 页生成失败：{exc}",
+                        error_category=parallel_benchmark.classify_error_category(exc),
                     )
 
                 status = result.get("status")
                 slide_number = int(result.get("slide_number") or 0)
+                parallel_benchmark.record_generation_outcome(
+                    generation_benchmark_stats,
+                    provider_state["provider"],
+                    status=str(status or ""),
+                    error_category=str(result.get("error_category") or ""),
+                )
+                if parallel_benchmark.maybe_degrade_provider_parallel_limit(provider_state, generation_benchmark_stats):
+                    task.setdefault("parallel_degradation_warnings", []).append(
+                        {
+                            "provider_key": provider_state["provider_key"],
+                            "provider_name": provider_state["provider"].get("provider_name") or provider_state["provider_key"],
+                            "from": generation_benchmark_stats[_parallel_benchmark_key(provider_state["provider"])].get("degraded_from"),
+                            "to": generation_benchmark_stats[_parallel_benchmark_key(provider_state["provider"])].get("degraded_to"),
+                        }
+                    )
+                    parallel_benchmark.mark_benchmark_invalidated(
+                        provider_state["provider"],
+                        "generation_high_error_rate",
+                    )
+                elif benchmark_during_generation and parallel_benchmark.maybe_raise_provider_parallel_limit(
+                    provider_state,
+                    generation_benchmark_stats,
+                    total_targets=total,
+                ):
+                    task.setdefault("parallel_raise_events", []).append(
+                        {
+                            "provider_key": provider_state["provider_key"],
+                            "provider_name": provider_state["provider"].get("provider_name") or provider_state["provider_key"],
+                            "to": provider_state["parallel_limit"],
+                        }
+                    )
+                if task.get("parallel_degradation_warnings") or task.get("parallel_raise_events"):
+                    group_parallel_cap = max(1, sum(max(1, int(state.get("parallel_limit") or 1)) for state in provider_states))
+                    parallelism = _normalize_generation_parallelism(parallelism, total, max_parallelism=group_parallel_cap)
+                    if benchmark_during_generation:
+                        parallelism = group_parallel_cap
+                        parallelism = _normalize_generation_parallelism(parallelism, total, max_parallelism=group_parallel_cap)
+                    task["parallelism"] = parallelism
+                    task["group_parallel_cap"] = group_parallel_cap
                 if status == "generated":
                     processed += 1
                     generated += 1
@@ -2440,15 +2658,23 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
     task["failed"] = failed
     task["retried"] = retried
     task["processed"] = processed
+    _finalize_generation_parallel_benchmark(task, generation_benchmark_stats)
+    parallel_warning_text = _parallel_degradation_warning_text(task)
+    benchmark_status_text = str(task.get("parallel_benchmark_status_text") or "")
     if task.get("stop_requested"):
         task["status"] = "stopped"
         task["progress"] = (processed / total) if total else 1.0
         task["status_text"] = f"已停止：完成 {processed} / {total} 页，生成 {generated} 页，跳过 {skipped} 页，失败 {failed} 页，重试 {retried} 次。"
+        if parallel_warning_text:
+            task["status_text"] += f" {parallel_warning_text}"
         return
 
     task["status"] = "completed"
     task["progress"] = 1.0
     task["status_text"] = f"生成完成：{generated} 页，跳过 {skipped} 页，失败 {failed} 页，重试 {retried} 次。"
+    extra_messages = [text for text in (parallel_warning_text, benchmark_status_text) if text]
+    if extra_messages:
+        task["status_text"] += " " + " ".join(extra_messages)
 
 
 def _build_reader_payload(
