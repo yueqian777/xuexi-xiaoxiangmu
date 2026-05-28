@@ -614,6 +614,7 @@ def generate_text(
     max_output_tokens: int = 1600,
     image_paths: list[str] | None = None,
     reasoning_depth: str | None = None,
+    request_timeout: int | float = 120,
 ) -> str:
     provider = get_api_provider(provider_key)
     model = (model_override or provider.model or DEFAULT_MODEL).strip()
@@ -626,8 +627,10 @@ def generate_text(
             url=request["url"],
             headers=request["headers"],
             json=request["json"],
-            timeout=120,
+            timeout=request_timeout,
         )
+    except requests.Timeout as exc:
+        raise AIServiceError(f"API 请求失败：{exc}", category="timeout") from exc
     except requests.RequestException as exc:
         raise AIServiceError(f"API 请求失败：{exc}") from exc
 

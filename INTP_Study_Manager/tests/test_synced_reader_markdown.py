@@ -11,7 +11,7 @@ READER_HTML = APP_ROOT / "components" / "synced_reader" / "index.html"
 
 
 def _extract_function(source, name):
-    marker = f"function {name}"
+    marker = f"function {name}("
     start = source.find(marker)
     if start < 0:
         return ""
@@ -77,6 +77,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "isLikelyEqualityOperator",
             "findHighlightDelimiter",
             "normalizeMathDelimiters",
+            "findMathSegmentAt",
             "protectMathSegments",
             "restoreMathSegments",
             "protectMarkdownCodeSegments",
@@ -87,7 +88,17 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "renderFallbackMarkdown",
             "renderMarkdown",
             "isGeneratedExplanationPreambleLine",
+            "displayExplanationSourceInfo",
             "displayExplanationSource",
+            "findMathSegmentBoundsForLocation",
+            "appendSearchableChar",
+            "appendSearchableRange",
+            "commonSuffixLength",
+            "commonPrefixLength",
+            "meaningfulContextLength",
+            "trustedMarkdownSelectionLocation",
+            "locateMarkdownSelectionInSource",
+            "displayAwareMarkdownSelectionLocation",
             "markdownSearchText",
             "collapsedSearchText",
             "locateMarkdownSelection",
@@ -186,6 +197,156 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             const result = wrapMarkdownSelection(source, payload);
             if (!result || result.action !== 'remove' || result.source !== '说明：pow == 128 时退出循环') {
               throw new Error(JSON.stringify(result));
+            }
+            """
+        )
+
+    def test_can_highlight_inline_math_by_visible_formula_text(self):
+        self.run_js(
+            r"""
+            const source = 'Formula $x = y + z$ after.';
+            const payload = {
+              selectedText: 'x = y + z',
+              selectedTextRaw: 'x = y + z',
+              contextBefore: 'Formula ',
+              contextAfter: ' after.',
+              selectionStartOffset: 'Formula '.length,
+            };
+            const result = wrapMarkdownSelection(source, payload);
+            if (!result || result.action !== 'add') {
+              throw new Error(JSON.stringify(result));
+            }
+            if (result.source !== 'Formula ==$x = y + z$== after.') {
+              throw new Error(result.source);
+            }
+            """
+        )
+
+    def test_repeated_inline_math_highlights_selected_occurrence(self):
+        self.run_js(
+            r"""
+            const source = 'First $x=1$ middle $x=1$ end.';
+            const payload = {
+              selectedText: 'x=1',
+              selectedTextRaw: 'x=1',
+              contextBefore: 'First x=1 middle ',
+              contextAfter: ' end.',
+              selectionStartOffset: 'First x=1 middle '.length,
+            };
+            const result = wrapMarkdownSelection(source, payload);
+            if (!result || result.action !== 'add') {
+              throw new Error(JSON.stringify(result));
+            }
+            if (result.source !== 'First $x=1$ middle ==$x=1$== end.') {
+              throw new Error(result.source);
+            }
+            """
+        )
+
+    def test_hidden_preamble_does_not_shift_repeated_highlight_target(self):
+        self.run_js(
+            r"""
+            const source = '[[\u7b2c 1 \u9875]] [[\u6807\u7b7e:\u8bb2\u89e3\u9875]]: repeat\n\nA repeat B repeat C';
+            const payload = {
+              selectedText: 'repeat',
+              selectedTextRaw: 'repeat',
+              contextBefore: 'A repeat B ',
+              contextAfter: ' C',
+              selectionStartOffset: 'A repeat B '.length,
+            };
+            const result = wrapMarkdownSelection(source, payload);
+            if (!result || result.action !== 'add') {
+              throw new Error(JSON.stringify(result));
+            }
+            const expected = '[[\u7b2c 1 \u9875]] [[\u6807\u7b7e:\u8bb2\u89e3\u9875]]: repeat\n\nA repeat B ==repeat== C';
+            if (result.source !== expected) {
+              throw new Error(result.source);
+            }
+            """
+        )
+
+    def test_repeated_text_after_math_uses_nearby_context_over_offset(self):
+        self.run_js(
+            r"""
+            const source = [
+              '\u5982\u679c f(t) \u662f\u5468\u671f\u4e3a T \u7684\u5468\u671f\u4fe1\u53f7\uff0c\u5219\u6ee1\u8db3\u57fa\u672c\u5b9a\u4e49\u3002',
+              '',
+              '$$',
+              '\\text{MathJax rendered text can differ from this very long TeX source }',
+              '\\quad a_1 + a_2 + a_3 + a_4 + a_5 + a_6 + a_7 + a_8 + a_9',
+              '$$',
+              '',
+              '- \u548c\u524d\u7f6e\u6982\u5ff5 \u5468\u671f\u4fe1\u53f7 \u76f4\u63a5\u76f8\u5173\uff0c\u7528\u4e8e\u5224\u65ad\u7cfb\u7edf\u7a33\u5b9a\u6027\u3002',
+            ].join('\n');
+            const payload = {
+              selectedText: '\u5468\u671f\u4fe1\u53f7',
+              selectedTextRaw: '\u5468\u671f\u4fe1\u53f7',
+              contextBefore: '\u5982\u679c f(t) \u662f\u5468\u671f\u4e3a T \u7684\u5468\u671f\u4fe1\u53f7\u3002 \u548c\u524d\u7f6e\u6982\u5ff5 ',
+              contextAfter: ' \u76f4\u63a5\u76f8\u5173\uff0c\u7528\u4e8e\u5224\u65ad\u7cfb\u7edf\u7a33\u5b9a\u6027\u3002',
+              selectionStartOffset: '\u5982\u679c f(t) \u662f\u5468\u671f\u4e3a T \u7684\u5468\u671f\u4fe1\u53f7\u3002 \u548c\u524d\u7f6e\u6982\u5ff5 '.length,
+            };
+            const result = wrapMarkdownSelection(source, payload);
+            if (!result || result.action !== 'add') {
+              throw new Error(JSON.stringify(result));
+            }
+            const expected = source.replace(
+              '- \u548c\u524d\u7f6e\u6982\u5ff5 \u5468\u671f\u4fe1\u53f7 \u76f4\u63a5\u76f8\u5173',
+              '- \u548c\u524d\u7f6e\u6982\u5ff5 ==\u5468\u671f\u4fe1\u53f7== \u76f4\u63a5\u76f8\u5173'
+            );
+            if (result.source !== expected) {
+              throw new Error(result.source);
+            }
+          """
+        )
+
+    def test_repeated_text_uses_source_range_when_context_is_weak(self):
+        self.run_js(
+            r"""
+            const source = [
+              '\u4e0a\u65b9\uff1a\u5468\u671f\u4fe1\u53f7',
+              '',
+              '$$ a_1 + a_2 + a_3 + a_4 + a_5 + a_6 + a_7 + a_8 $$',
+              '',
+              '\u4e0b\u65b9\uff1a\u5468\u671f\u4fe1\u53f7',
+            ].join('\n');
+            const lowerStart = source.lastIndexOf('\u5468\u671f\u4fe1\u53f7');
+            const payload = {
+              selectedText: '\u5468\u671f\u4fe1\u53f7',
+              selectedTextRaw: '\u5468\u671f\u4fe1\u53f7',
+              contextBefore: '',
+              contextAfter: '',
+              selectionStartOffset: 0,
+              sourceStart: lowerStart,
+              sourceEnd: lowerStart + '\u5468\u671f\u4fe1\u53f7'.length,
+            };
+            const result = wrapMarkdownSelection(source, payload);
+            if (!result || result.action !== 'add') {
+              throw new Error(JSON.stringify(result));
+            }
+            const expected = source.replace(
+              '\u4e0b\u65b9\uff1a\u5468\u671f\u4fe1\u53f7',
+              '\u4e0b\u65b9\uff1a==\u5468\u671f\u4fe1\u53f7=='
+            );
+            if (result.source !== expected) {
+              throw new Error(result.source);
+            }
+            """
+        )
+
+    def test_render_markdown_highlights_math_segment(self):
+        self.run_js(
+            r"""
+            global.window = {};
+
+            const rendered = renderMarkdown('Formula ==$x = y + z$== after.');
+            if (!rendered.includes('<mark class="reader-highlight">')) {
+              throw new Error(rendered);
+            }
+            if (!rendered.includes('\\(x = y + z\\)')) {
+              throw new Error(rendered);
+            }
+            if (rendered.includes('MATHJAXPLACEHOLDER')) {
+              throw new Error(rendered);
             }
             """
         )

@@ -594,6 +594,9 @@
       background: #fff09a;
       box-shadow: 0 0 0 1px rgba(219, 165, 0, 0.2);
     }
+    .reader-source-fragment {
+      display: contents;
+    }
     .note-body h1,
     .note-body h2,
     .note-body h3,
@@ -1103,6 +1106,7 @@
     const pendingTypesetTargets = new Set();
     const hydratingNotePromises = new Map();
     const pendingExplanationSaves = new Map();
+    const noteBodySourceMaps = new WeakMap();
     const PENDING_SAVE_TTL_MS = 30000;
     const VIEWPORT_ANCHOR_MS = 1400;
     const NOTE_HYDRATE_RADIUS = 1;
@@ -1160,6 +1164,59 @@
 
     function normalizeMathDelimiters(value) {
       return String(value ?? '').replace(/\\\\([()[\]])/g, '\\$1');
+    }
+
+    function findMathSegmentAt(source, index) {
+      const text = String(source ?? '');
+      if (text.startsWith('$$', index)) {
+        const end = findUnescaped(text, '$$', index + 2);
+        if (end >= 0) {
+          return {
+            start: index,
+            end: end + 2,
+            contentStart: index + 2,
+            contentEnd: end,
+            segment: `\\[${text.slice(index + 2, end)}\\]`,
+          };
+        }
+      }
+      if (text.startsWith('\\[', index)) {
+        const end = findUnescaped(text, '\\]', index + 2);
+        if (end >= 0) {
+          return {
+            start: index,
+            end: end + 2,
+            contentStart: index + 2,
+            contentEnd: end,
+            segment: text.slice(index, end + 2),
+          };
+        }
+      }
+      if (text.startsWith('\\(', index)) {
+        const end = findUnescaped(text, '\\)', index + 2);
+        if (end >= 0) {
+          return {
+            start: index,
+            end: end + 2,
+            contentStart: index + 2,
+            contentEnd: end,
+            segment: text.slice(index, end + 2),
+          };
+        }
+      }
+      if (text[index] === '$' && text[index + 1] !== '$') {
+        const end = findUnescaped(text, '$', index + 1);
+        if (end >= 0) {
+          return {
+            start: index,
+            end: end + 1,
+            contentStart: index + 1,
+            contentEnd: end,
+            segment: `\\(${text.slice(index + 1, end)}\\)`,
+          };
+        }
+      }
+      return null;
     }
 
     function protectMarkdownCodeSegments(value) {
@@ -1237,33 +1294,10 @@
       };
 
       while (index < source.length) {
-        if (source.startsWith('$$', index)) {
-          const end = findUnescaped(source, '$$', index + 2);
-          if (end >= 0) {
-            pushSegment(end + 2, `\\[${source.slice(index + 2, end)}\\]`);
-            continue;
-          }
-        }
-        if (source.startsWith('\\[', index)) {
-          const end = findUnescaped(source, '\\]', index + 2);
-          if (end >= 0) {
-            pushSegment(end + 2, source.slice(index, end + 2));
-            continue;
-          }
-        }
-        if (source.startsWith('\\(', index)) {
-          const end = findUnescaped(source, '\\)', index + 2);
-          if (end >= 0) {
-            pushSegment(end + 2, source.slice(index, end + 2));
-            continue;
-          }
-        }
-        if (source[index] === '$' && source[index + 1] !== '$') {
-          const end = findUnescaped(source, '$', index + 1);
-          if (end >= 0) {
-            pushSegment(end + 1, `\\(${source.slice(index + 1, end)}\\)`);
-            continue;
-          }
+        const math = findMathSegmentAt(source, index);
+        if (math) {
+          pushSegment(math.end, math.segment);
+          continue;
         }
         protectedSource += source[index];
         index += 1;
@@ -1381,16 +1415,74 @@
     }
 
     function displayExplanationSource(value) {
-      const source = String(value ?? '');
-      const lines = source.replace(/^\uFEFF/, '').split(/\r?\n/);
-      const firstContentIndex = lines.findIndex(line => line.trim());
-      if (firstContentIndex < 0) return source;
-      if (!isGeneratedExplanationPreambleLine(lines[firstContentIndex])) return source;
-      lines.splice(firstContentIndex, 1);
-      while (lines[firstContentIndex]?.trim() === '') {
-        lines.splice(firstContentIndex, 1);
+      return displayExplanationSourceInfo(value).displaySource;
+    }
+
+    function displayExplanationSourceInfo(value) {
+      const rawSource = String(value ?? '');
+      const source = rawSource.replace(/^\uFEFF/, '');
+      const baseOffset = rawSource.length - source.length;
+      const identityMap = Array.from({ length: source.length }, (_, index) => index + baseOffset);
+      const lines = [];
+      let offset = 0;
+      while (offset < source.length) {
+        let contentEnd = offset;
+        while (contentEnd < source.length && source[contentEnd] !== '\n' && source[contentEnd] !== '\r') {
+          contentEnd += 1;
+        }
+        let nextOffset = contentEnd;
+        if (source[nextOffset] === '\r' && source[nextOffset + 1] === '\n') {
+          nextOffset += 2;
+        } else if (source[nextOffset] === '\n' || source[nextOffset] === '\r') {
+          nextOffset += 1;
+        }
+        lines.push({
+          text: source.slice(offset, contentEnd),
+          start: offset,
+          contentEnd,
+          end: nextOffset,
+        });
+        offset = nextOffset;
       }
-      return lines.join('\n');
+      if (!lines.length) {
+        return {
+          displaySource: source,
+          displayToRaw: identityMap,
+          removedPreamble: false,
+        };
+      }
+      const firstContentIndex = lines.findIndex(line => line.text.trim());
+      if (firstContentIndex < 0 || !isGeneratedExplanationPreambleLine(lines[firstContentIndex].text)) {
+        return {
+          displaySource: source,
+          displayToRaw: identityMap,
+          removedPreamble: false,
+        };
+      }
+      const removed = new Set([firstContentIndex]);
+      let blankIndex = firstContentIndex + 1;
+      while (blankIndex < lines.length && !lines[blankIndex].text.trim()) {
+        removed.add(blankIndex);
+        blankIndex += 1;
+      }
+      const displayParts = [];
+      const displayToRaw = [];
+      lines.forEach((line, lineIndex) => {
+        if (removed.has(lineIndex)) return;
+        if (displayParts.length) {
+          displayParts.push('\n');
+          displayToRaw.push(baseOffset + Math.max(0, line.start - 1));
+        }
+        for (let charIndex = 0; charIndex < line.text.length; charIndex += 1) {
+          displayParts.push(line.text[charIndex]);
+          displayToRaw.push(baseOffset + line.start + charIndex);
+        }
+      });
+      return {
+        displaySource: displayParts.join(''),
+        displayToRaw,
+        removedPreamble: true,
+      };
     }
 
     function renderExplanationMarkdown(value) {
@@ -1451,7 +1543,10 @@
             console.error(error);
           }
           return window.MathJax.typesetPromise(freshTargets)
-            .then(() => true)
+            .then(() => {
+              applyMarkdownSourceMapsForBodies(freshTargets);
+              return true;
+            })
             .catch(error => {
               console.error(error);
               return false;
@@ -1878,7 +1973,10 @@
       body.dataset.hydrated = '1';
       if (editor) editor.value = String(page.explanation || '');
       const promise = typesetTargets([body])
-        .then(() => true)
+        .then(typesetDone => {
+          if (typesetDone !== false) applyMarkdownSourceMap(body, page.explanation);
+          return true;
+        })
         .finally(() => {
           const latest = hydratingNotePromises.get(hydrateKey);
           if (latest?.body === body) hydratingNotePromises.delete(hydrateKey);
@@ -2049,11 +2147,14 @@
       if (editor) editor.value = explanation;
       if (!options.keepEditing) note.classList.remove('editing');
 
-      return typesetTargets([body]).finally(() => {
+      return typesetTargets([body]).then(typesetDone => {
+        if (typesetDone !== false) applyMarkdownSourceMap(body, explanation);
+        return true;
+      }).finally(() => {
         noteRoot.scrollTop = previousNoteScroll;
         pageRoot.scrollTop = previousPageScroll;
         if (options.statusText) selectionHint.textContent = options.statusText;
-      }).then(() => true);
+      });
     }
 
     function sendExplanationSave(slideNumber, explanation) {
@@ -2273,9 +2374,11 @@
     }
 
     function markdownSearchText(source) {
-      let text = '';
-      const map = [];
-      let lastWasSpace = false;
+      const state = {
+        text: '',
+        map: [],
+        lastWasSpace: false,
+      };
       const markdownMarkers = new Set(['#', '*', '_', '`', '>', '|']);
       for (let index = 0; index < source.length; index += 1) {
         const char = source[index];
@@ -2283,20 +2386,36 @@
           index += 1;
           continue;
         }
-        if (markdownMarkers.has(char)) continue;
-        if (/\s/.test(char)) {
-          if (!lastWasSpace) {
-            text += ' ';
-            map.push(index);
-            lastWasSpace = true;
-          }
+        const math = findMathSegmentAt(source, index);
+        if (math) {
+          appendSearchableRange(source, math.contentStart, math.contentEnd, state);
+          index = math.end - 1;
           continue;
         }
-        text += char;
-        map.push(index);
-        lastWasSpace = false;
+        if (markdownMarkers.has(char)) continue;
+        appendSearchableChar(state, char, index);
       }
-      return { text, map };
+      return { text: state.text, map: state.map };
+    }
+
+    function appendSearchableChar(state, char, sourceIndex) {
+      if (/\s/.test(char)) {
+        if (!state.lastWasSpace) {
+          state.text += ' ';
+          state.map.push(sourceIndex);
+          state.lastWasSpace = true;
+        }
+        return;
+      }
+      state.text += char;
+      state.map.push(sourceIndex);
+      state.lastWasSpace = false;
+    }
+
+    function appendSearchableRange(source, start, end, state) {
+      for (let index = start; index < end; index += 1) {
+        appendSearchableChar(state, source[index], index);
+      }
     }
 
     function collapsedSearchText(source) {
@@ -2318,7 +2437,174 @@
       return text;
     }
 
-    function locateMarkdownSelection(source, payload) {
+    function commonSuffixLength(left, right, maxLength = Infinity) {
+      const limit = Math.min(left.length, right.length, maxLength);
+      let length = 0;
+      while (length < limit && left[left.length - 1 - length] === right[right.length - 1 - length]) {
+        length += 1;
+      }
+      return length;
+    }
+
+    function commonPrefixLength(left, right, maxLength = Infinity) {
+      const limit = Math.min(left.length, right.length, maxLength);
+      let length = 0;
+      while (length < limit && left[length] === right[length]) {
+        length += 1;
+      }
+      return length;
+    }
+
+    function meaningfulContextLength(value) {
+      return String(value || '').replace(/\s+/g, '').length;
+    }
+
+    function trustedMarkdownSelectionLocation(source, payload) {
+      const start = Number(payload?.sourceStart);
+      const end = Number(payload?.sourceEnd);
+      const sourceText = String(source ?? '');
+      if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+      if (start < 0 || end <= start || end > sourceText.length) return null;
+
+      const selectedSource = sourceText.slice(start, end);
+      const selectedText = String(payload?.selectedText || payload?.selectedTextRaw || '').replace(/\s+/g, ' ').trim();
+      if (!selectedText) return { start, end };
+
+      const normalizedSource = markdownSearchText(selectedSource).text.replace(/\s+/g, ' ').trim();
+      if (!normalizedSource) return null;
+      if (
+        normalizedSource === selectedText ||
+        normalizedSource.includes(selectedText) ||
+        selectedText.includes(normalizedSource)
+      ) {
+        return { start, end };
+      }
+      return null;
+    }
+
+    function markdownSourceMapKey(source) {
+      const text = String(source ?? '');
+      let hash = 0;
+      for (let index = 0; index < text.length; index += 1) {
+        hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+      }
+      return `${text.length}:${hash}`;
+    }
+
+    function textNodeSourceMapSkipReason(node) {
+      if (!node || node.nodeType !== Node.TEXT_NODE) return 'not-text';
+      if (!collapsedSearchText(node.nodeValue)) return 'blank';
+      const parent = node.parentElement;
+      if (!parent) return 'detached';
+      if (parent.closest('.reader-source-fragment')) return 'mapped';
+      if (parent.closest('mjx-container')) return 'mathjax';
+      if (parent.closest('script, style, textarea, .note-editor')) return 'non-content';
+      return '';
+    }
+
+    function bodyContainsPendingMathTypeset(body) {
+      if (!body || body.querySelector?.('mjx-container')) return false;
+      return /\\[([]/.test(String(body.textContent || ''));
+    }
+
+    function applyMarkdownSourceMap(body, source) {
+      if (!body || typeof document === 'undefined') return false;
+      if (bodyContainsPendingMathTypeset(body)) return false;
+      const sourceText = String(source ?? '');
+      const key = markdownSourceMapKey(sourceText);
+      const cached = noteBodySourceMaps.get(body);
+      if (cached?.key === key) return true;
+
+      const info = displayExplanationSourceInfo(sourceText);
+      const searchable = markdownSearchText(info.displaySource);
+      const textNodes = [];
+      const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          return textNodeSourceMapSkipReason(node)
+            ? NodeFilter.FILTER_REJECT
+            : NodeFilter.FILTER_ACCEPT;
+        },
+      });
+      let current = walker.nextNode();
+      while (current) {
+        textNodes.push(current);
+        current = walker.nextNode();
+      }
+
+      let cursor = 0;
+      let mappedCount = 0;
+      textNodes.forEach(node => {
+        const text = String(node.nodeValue || '');
+        const normalized = collapsedSearchText(text);
+        if (!normalized) return;
+        const found = searchable.text.indexOf(normalized, cursor);
+        if (found < 0) return;
+        const span = document.createElement('span');
+        span.className = 'reader-source-fragment';
+        span.dataset.searchStart = String(found);
+        span.dataset.searchEnd = String(found + normalized.length);
+        node.parentNode.insertBefore(span, node);
+        span.appendChild(node);
+        cursor = found + normalized.length;
+        mappedCount += 1;
+      });
+
+      noteBodySourceMaps.set(body, {
+        key,
+        searchable,
+        displayToRaw: info.displayToRaw,
+      });
+      body.dataset.sourceMapped = mappedCount ? '1' : '0';
+      return mappedCount > 0;
+    }
+
+    function applyMarkdownSourceMapForBody(body) {
+      const note = body?.closest?.('.note');
+      const slideNumber = Number(note?.dataset?.page);
+      const page = pageForSlide(slideNumber);
+      if (!body || !page) return false;
+      return applyMarkdownSourceMap(body, page.explanation);
+    }
+
+    function applyMarkdownSourceMapsForBodies(bodies) {
+      (Array.isArray(bodies) ? bodies : [bodies]).forEach(body => {
+        if (body?.isConnected) applyMarkdownSourceMapForBody(body);
+      });
+    }
+
+    function sourceIndexFromMappedBoundary(body, container, offset, mode) {
+      const map = noteBodySourceMaps.get(body);
+      if (!map) return null;
+      if (!container) return null;
+      if (container.nodeType !== Node.TEXT_NODE) return null;
+      const fragment = container.parentElement?.closest?.('.reader-source-fragment');
+      if (!fragment) return null;
+      const searchStart = Number(fragment.dataset.searchStart);
+      const searchEnd = Number(fragment.dataset.searchEnd);
+      if (!Number.isInteger(searchStart) || !Number.isInteger(searchEnd) || searchEnd <= searchStart) return null;
+
+      const text = String(container.nodeValue || '');
+      const boundedOffset = Math.min(Math.max(Number(offset) || 0, 0), text.length);
+      const prefixLength = collapsedSearchText(text.slice(0, boundedOffset)).length;
+      const searchIndex = mode === 'end'
+        ? Math.min(Math.max(searchStart + prefixLength - 1, searchStart), searchEnd - 1)
+        : Math.min(searchStart + prefixLength, searchEnd - 1);
+      const displayIndex = map.searchable.map[searchIndex];
+      if (!Number.isInteger(displayIndex)) return null;
+      const rawIndex = map.displayToRaw[displayIndex];
+      if (!Number.isInteger(rawIndex)) return null;
+      return mode === 'end' ? rawIndex + 1 : rawIndex;
+    }
+
+    function sourceLocationFromSelectionRange(body, range) {
+      if (!body || !range) return null;
+      const start = sourceIndexFromMappedBoundary(body, range.startContainer, range.startOffset, 'start');
+      const end = sourceIndexFromMappedBoundary(body, range.endContainer, range.endOffset, 'end');
+      if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start) return null;
+      return { start, end };
+    }
+
+    function locateMarkdownSelectionInSource(source, payload) {
       const candidates = [
         payload.selectedTextRaw,
         payload.selectedText,
@@ -2336,28 +2622,42 @@
           : null;
         let bestIndex = -1;
         let bestScore = Number.NEGATIVE_INFINITY;
+        let bestContextSignal = 0;
+        let matchCount = 0;
         let searchFrom = 0;
         while (searchFrom <= searchable.text.length) {
           const found = searchable.text.indexOf(normalizedTarget, searchFrom);
           if (found < 0) break;
-          let score = 0;
+          matchCount += 1;
+          const beforeWindow = searchable.text.slice(Math.max(0, found - beforeAnchor.length - 240), found);
+          const afterStart = found + normalizedTarget.length;
+          const afterWindow = searchable.text.slice(afterStart, afterStart + afterAnchor.length + 240);
+          const beforeMatchWindow = beforeWindow.replace(/\s+$/g, '');
+          const beforeMatchAnchor = beforeAnchor.replace(/\s+$/g, '');
+          const afterMatchWindow = afterWindow.replace(/^\s+/g, '');
+          const afterMatchAnchor = afterAnchor.replace(/^\s+/g, '');
+          const beforeOverlapLength = beforeMatchAnchor
+            ? commonSuffixLength(beforeMatchWindow, beforeMatchAnchor, beforeMatchAnchor.length)
+            : 0;
+          const afterOverlapLength = afterMatchAnchor
+            ? commonPrefixLength(afterMatchWindow, afterMatchAnchor, afterMatchAnchor.length)
+            : 0;
+          const beforeOverlap = beforeMatchAnchor.slice(beforeMatchAnchor.length - beforeOverlapLength);
+          const afterOverlap = afterMatchAnchor.slice(0, afterOverlapLength);
+          const contextSignal = meaningfulContextLength(beforeOverlap) + meaningfulContextLength(afterOverlap);
+          let score = contextSignal * 1000 + beforeOverlapLength + afterOverlapLength;
           if (expectedStart !== null) {
-            score -= Math.abs(found - expectedStart) * 4;
-          }
-          if (beforeAnchor) {
-            const beforeWindow = searchable.text.slice(Math.max(0, found - beforeAnchor.length - 20), found);
-            if (beforeWindow.endsWith(beforeAnchor)) score += beforeAnchor.length;
-          }
-          if (afterAnchor) {
-            const afterStart = found + normalizedTarget.length;
-            const afterWindow = searchable.text.slice(afterStart, afterStart + afterAnchor.length + 20);
-            if (afterWindow.startsWith(afterAnchor)) score += afterAnchor.length;
+            score -= Math.min(Math.abs(found - expectedStart), 1000);
           }
           if (score > bestScore) {
             bestScore = score;
             bestIndex = found;
+            bestContextSignal = contextSignal;
           }
           searchFrom = found + Math.max(1, normalizedTarget.length);
+        }
+        if (matchCount > 1 && bestContextSignal === 0 && expectedStart === null) {
+          return null;
         }
         if (bestIndex >= 0) {
           const start = searchable.map[bestIndex];
@@ -2372,6 +2672,42 @@
         if (index >= 0) return { start: index, end: index + candidate.length };
       }
 
+      return null;
+    }
+
+    function displayAwareMarkdownSelectionLocation(source, payload) {
+      const info = displayExplanationSourceInfo(source);
+      if (info.removedPreamble) {
+        const displayLocation = locateMarkdownSelectionInSource(info.displaySource, payload);
+        if (displayLocation) {
+          const rawStart = info.displayToRaw[displayLocation.start];
+          const rawEndBase = info.displayToRaw[displayLocation.end - 1];
+          if (Number.isFinite(rawStart) && Number.isFinite(rawEndBase)) {
+            return { start: rawStart, end: rawEndBase + 1 };
+          }
+        }
+      }
+      return locateMarkdownSelectionInSource(source, payload);
+    }
+
+    function locateMarkdownSelection(source, payload) {
+      return displayAwareMarkdownSelectionLocation(source, payload);
+    }
+
+    function findMathSegmentBoundsForLocation(source, location) {
+      if (!location) return null;
+      let index = 0;
+      while (index < source.length) {
+        const math = findMathSegmentAt(source, index);
+        if (math) {
+          if (math.start <= location.start && location.end <= math.end) {
+            return { start: math.start, end: math.end };
+          }
+          index = math.end;
+          continue;
+        }
+        index += 1;
+      }
       return null;
     }
 
@@ -2394,7 +2730,9 @@
     }
 
     function markdownSelectionHighlightState(source, payload) {
-      const location = locateMarkdownSelection(source, payload);
+      const rawLocation = trustedMarkdownSelectionLocation(source, payload)
+        || displayAwareMarkdownSelectionLocation(source, payload);
+      const location = findMathSegmentBoundsForLocation(source, rawLocation) || rawLocation;
       const bounds = markdownHighlightBounds(source, location);
       return {
         location,
@@ -2469,7 +2807,9 @@
         button.disabled = true;
         button.textContent = '刷新中';
       }
-      typesetTargets([body]).finally(() => {
+      typesetTargets([body]).then(typesetDone => {
+        if (typesetDone !== false) applyMarkdownSourceMap(body, page.explanation);
+      }).finally(() => {
         noteRoot.scrollTop = previousScrollTop;
         if (!button) return;
         button.textContent = '已刷新';
@@ -2584,7 +2924,9 @@
         pageRoot.scrollTop = previousPageScroll;
         restoreNoteAnchor(previousNoteAnchor);
         if (typesetQueue.length) {
-          typesetTargets(typesetQueue).finally(() => {
+          typesetTargets(typesetQueue).then(typesetDone => {
+            if (typesetDone !== false) applyMarkdownSourceMapsForBodies(typesetQueue);
+          }).finally(() => {
             pageRoot.scrollTop = previousPageScroll;
             restoreNoteAnchor(previousNoteAnchor);
           });
@@ -2676,7 +3018,9 @@
         renderChatForPage(currentSlideNumber);
       }, 80);
       const hydratedBodies = Array.from(noteRoot.querySelectorAll('.note-body[data-hydrated="1"]'));
-      typesetTargets([...hydratedBodies, canvasMessages]);
+      typesetTargets([...hydratedBodies, canvasMessages]).then(typesetDone => {
+        if (typesetDone !== false) applyMarkdownSourceMapsForBodies(hydratedBodies);
+      });
       if (!hasCenteredOnEntry && pages.length) {
         hasCenteredOnEntry = true;
         scheduleParentReaderCenter({
@@ -2736,6 +3080,10 @@
       const selectionStartOffset = before.length;
       const slideNumber = Number(note.dataset.page);
       const page = pages.find(item => Number(item.slideNumber) === slideNumber) || {};
+      if (!noteBodySourceMaps.get(noteBody)) {
+        applyMarkdownSourceMap(noteBody, page.explanation);
+      }
+      const sourceLocation = sourceLocationFromSelectionRange(noteBody, range);
       const startHighlight = startElement?.closest?.('.reader-highlight');
       const endHighlight = endElement?.closest?.('.reader-highlight');
       const payload = {
@@ -2750,6 +3098,10 @@
         contextAfter: clipText(after.slice(0, 700), 700),
         selectionStartOffset,
       };
+      if (sourceLocation) {
+        payload.sourceStart = sourceLocation.start;
+        payload.sourceEnd = sourceLocation.end;
+      }
       const markdownState = markdownSelectionHighlightState(String(page.explanation || ''), payload);
       payload.isHighlighted = Boolean(
         markdownState.isHighlighted || (startHighlight && startHighlight === endHighlight)

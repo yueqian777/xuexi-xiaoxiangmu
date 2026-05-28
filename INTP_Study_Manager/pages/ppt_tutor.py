@@ -79,6 +79,10 @@ PPT_PARALLEL_BENCHMARK_STATE_KEY = "ppt_parallel_benchmark_results"
 PPT_GENERATION_REFRESH_SECONDS = 1.5
 PPT_GENERATION_REFRESH_STATE_KEY = "ppt_generation_last_refresh"
 PPT_STRUCTURE_REFRESH_STATE_KEY = "ppt_structure_last_refresh"
+PPT_STUDY_ASSET_REFRESH_STATE_KEY = "ppt_study_asset_last_refresh"
+PPT_STUDY_ASSET_REQUEST_TIMEOUT_SECONDS = 300
+PPT_STUDY_ASSET_MAX_ATTEMPTS = 3
+PPT_STUDY_ASSET_RETRY_DELAY_SECONDS = 2.0
 
 
 def _get_synced_reader_component():
@@ -792,7 +796,7 @@ def _handle_synced_reader_action(
                 model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
             )
-        add_slide_question(require_login().id, slide["id"], full_question, answer, _active_model_label())
+        add_slide_question(require_login().id, slide["id"], question, answer, _active_model_label())
     except AIServiceError as exc:
         st.error(str(exc))
         st.caption("侧边插问调用失败，当前阅读位置不会被修改。")
@@ -1028,59 +1032,31 @@ def _render_study_asset_generator_inner(
     draft_key = f"study_asset_draft_{deck['id']}"
     raw_key = f"study_asset_raw_{deck['id']}"
     meta_key = f"study_asset_meta_{deck['id']}"
+    task_key = f"study_asset_task_{deck['id']}"
+
+    task = st.session_state.get(task_key)
+    _render_study_asset_task_status(task, task_key, draft_key, raw_key, meta_key)
+    is_running = bool(task and task.get("status") == "running")
+
     if st.button("调用 API 生成学习登记 / 知识卡片草稿", type="primary", key=f"generate_assets_{deck['id']}"):
         usable_batches = [batch for batch in batches if str(batch["reading_content"]).strip()]
         if not usable_batches:
             st.error("没有可发送给 API 的阅读内容。")
             return
-        batch_results = []
-        raw_outputs = []
-        try:
-            for index, batch in enumerate(usable_batches, start=1):
-                prompt = render_template(
-                    "ppt_to_study_assets.md",
-                    {
-                        "today": date.today().isoformat(),
-                        "subject": deck.get("subject") or "未分类",
-                        "deck_title": deck.get("title") or "未命名资料",
-                        "range_label": batch["range_label"],
-                        "reading_content": batch["reading_content"],
-                    },
-                )
-                with st.spinner(f"正在生成第 {index}/{len(usable_batches)} 批：{batch['range_label']}"):
-                    output = generate_text(
-                        prompt,
-                        provider_key=st.session_state.get("active_api_provider_key"),
-                        api_key=_active_api_key(),
-                        model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
-                        max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
-                    )
-                assets = parse_study_assets(output)
-                batch_results.append({"batch": batch, "assets": assets})
-                raw_outputs.append({"range_label": batch["range_label"], "output": output})
-            assets = _merge_study_asset_batches(
-                batch_results,
-                deck=deck,
-                range_label=range_label,
-            )
-            coverage_report = _build_study_asset_coverage_report(batch_results, batches)
-            st.session_state[draft_key] = assets
-            st.session_state[raw_key] = raw_outputs
-            st.session_state[meta_key] = {
-                "range_label": range_label,
-                "used_pages": total_used_pages,
-                "batch_count": len(usable_batches),
-                "coverage_report": coverage_report,
-            }
-            st.success("草稿已生成，请先预览再写入数据库。")
-        except (AIServiceError, ValueError, json.JSONDecodeError) as exc:
-            st.error(f"生成或解析失败：{exc}")
-            if raw_outputs:
-                st.caption("已完成批次的 API 原始返回：")
-                st.json(raw_outputs)
-            elif "output" in locals():
-                st.caption("API 原始返回：")
-                st.code(output, language="json")
+        if is_running:
+            st.info("学习沉淀草稿正在后台生成，不会重复启动。")
+            return
+        st.session_state.pop(draft_key, None)
+        st.session_state.pop(raw_key, None)
+        st.session_state.pop(meta_key, None)
+        _start_study_asset_generation_task(
+            task_key,
+            deck=deck,
+            batches=usable_batches,
+            all_batches=batches,
+            range_label=range_label,
+            total_used_pages=total_used_pages,
+        )
 
     draft = st.session_state.get(draft_key)
     if not draft:
@@ -1116,7 +1092,209 @@ def _render_study_asset_generator_inner(
             del st.session_state[draft_key]
             st.session_state.pop(raw_key, None)
             st.session_state.pop(meta_key, None)
+            st.session_state.pop(task_key, None)
             st.rerun()
+
+
+def _start_study_asset_generation_task(
+    task_key: str,
+    *,
+    deck: dict,
+    batches: list[dict],
+    all_batches: list[dict],
+    range_label: str,
+    total_used_pages: int,
+) -> None:
+    task = {
+        "status": "running",
+        "progress": 0.0,
+        "status_text": "正在后台生成学习沉淀草稿...",
+        "deck_id": int(deck["id"]),
+        "range_label": range_label,
+        "used_pages": int(total_used_pages),
+        "batch_count": len(batches),
+        "completed_batches": 0,
+        "batches": batches,
+        "all_batches": all_batches,
+        "provider_key": st.session_state.get("active_api_provider_key"),
+        "api_key": _active_api_key(),
+        "active_model": st.session_state.get("active_api_model", DEFAULT_MODEL),
+        "max_tokens": int(st.session_state.get("active_api_max_tokens", 4096)),
+        "reasoning_depth": st.session_state.get("active_api_reasoning_depth"),
+        "raw_outputs": [],
+        "retried": 0,
+        "stop_requested": False,
+    }
+    st.session_state[task_key] = task
+    thread = threading.Thread(
+        target=_background_study_asset_worker,
+        args=(task, deck),
+        daemon=True,
+    )
+    thread.start()
+    st.success("已开始后台生成学习沉淀草稿；切换页面后会继续执行。")
+    st.rerun()
+
+
+def _render_study_asset_task_status(
+    task: dict | None,
+    task_key: str,
+    draft_key: str,
+    raw_key: str,
+    meta_key: str,
+) -> None:
+    if not task:
+        return
+
+    status = str(task.get("status") or "")
+    if status == "completed":
+        if task.get("draft") and not task.get("_adopted"):
+            st.session_state[draft_key] = task["draft"]
+            st.session_state[raw_key] = task.get("raw_outputs") or []
+            st.session_state[meta_key] = task.get("meta") or {}
+            task["_adopted"] = True
+        st.success("后台学习沉淀草稿已生成，请在下方预览后写入数据库。")
+        return
+    if status == "failed":
+        st.error(f"后台生成学习沉淀草稿失败：{task.get('error') or task.get('status_text') or '未知错误'}")
+        raw_outputs = task.get("raw_outputs") or []
+        if raw_outputs:
+            with st.expander("已完成批次的 API 原始返回", expanded=False):
+                st.json(raw_outputs)
+        if st.button("清除失败任务", key=f"clear_failed_{task_key}"):
+            st.session_state.pop(task_key, None)
+            st.rerun()
+        return
+    if status == "stopped":
+        st.warning(f"后台学习沉淀草稿已停止：{task.get('status_text', '已中断')}")
+        if st.button("清除已停止任务", key=f"clear_stopped_{task_key}"):
+            st.session_state.pop(task_key, None)
+            st.rerun()
+        return
+    if status != "running":
+        return
+
+    col1, col2 = st.columns([1, 0.15])
+    with col1:
+        st.info("学习沉淀草稿正在后台生成，可继续阅读或切换页面。")
+        st.progress(float(task.get("progress") or 0.0), text=task.get("status_text", "生成中..."))
+        retry_text = f"，已重试 {int(task.get('retried') or 0)} 次" if int(task.get("retried") or 0) else ""
+        st.caption(f"已完成 {int(task.get('completed_batches') or 0)} / {int(task.get('batch_count') or 0)} 批{retry_text}。")
+    with col2:
+        if st.button("停止", key=f"stop_{task_key}"):
+            task["stop_requested"] = True
+            st.rerun()
+            return
+
+    if _should_refresh_task(task, PPT_STUDY_ASSET_REFRESH_STATE_KEY, interval=1.5):
+        time.sleep(0.3)
+        st.rerun()
+
+
+def _background_study_asset_worker(task: dict, deck: dict) -> None:
+    batch_results = []
+    raw_outputs = []
+    batches = list(task.get("batches") or [])
+    total = len(batches)
+    try:
+        if not batches:
+            raise ValueError("没有可发送给 API 的阅读内容。")
+
+        for index, batch in enumerate(batches, start=1):
+            if task.get("stop_requested"):
+                task["status"] = "stopped"
+                task["status_text"] = "学习沉淀草稿生成已停止"
+                return
+
+            task["progress"] = (index - 1) / total
+            task["status_text"] = f"正在生成第 {index}/{total} 批：{batch['range_label']}"
+            prompt = render_template(
+                "ppt_to_study_assets.md",
+                {
+                    "today": date.today().isoformat(),
+                    "subject": deck.get("subject") or "未分类",
+                    "deck_title": deck.get("title") or "未命名资料",
+                    "range_label": batch["range_label"],
+                    "reading_content": batch["reading_content"],
+                },
+            )
+            output = _generate_study_asset_batch_output(task, batch, index, total, prompt)
+            raw_outputs.append({"range_label": batch["range_label"], "output": output})
+            task["raw_outputs"] = list(raw_outputs)
+            assets = parse_study_assets(output)
+            batch_results.append({"batch": batch, "assets": assets})
+            task["completed_batches"] = index
+            task["progress"] = index / total
+
+        if task.get("stop_requested"):
+            task["status"] = "stopped"
+            task["status_text"] = "学习沉淀草稿生成已停止"
+            return
+
+        draft = _merge_study_asset_batches(
+            batch_results,
+            deck=deck,
+            range_label=str(task.get("range_label") or "学习范围"),
+        )
+        coverage_report = _build_study_asset_coverage_report(
+            batch_results,
+            list(task.get("all_batches") or batches),
+        )
+        task["draft"] = draft
+        task["meta"] = {
+            "range_label": task.get("range_label"),
+            "used_pages": int(task.get("used_pages") or 0),
+            "batch_count": total,
+            "coverage_report": coverage_report,
+        }
+        task["status"] = "completed"
+        task["progress"] = 1.0
+        task["status_text"] = f"学习沉淀草稿生成完成：{total} 批"
+    except Exception as exc:
+        task["status"] = "failed"
+        task["progress"] = 1.0
+        task["raw_outputs"] = list(raw_outputs)
+        task["error"] = str(exc)
+        task["status_text"] = f"学习沉淀草稿生成失败：{exc}"
+
+
+def _generate_study_asset_batch_output(task: dict, batch: dict, index: int, total: int, prompt: str) -> str:
+    max_attempts = max(1, int(task.get("max_attempts") or PPT_STUDY_ASSET_MAX_ATTEMPTS))
+    for attempt in range(1, max_attempts + 1):
+        if task.get("stop_requested"):
+            raise AIServiceError("学习沉淀草稿生成已停止")
+        try:
+            task["status_text"] = f"正在生成第 {index}/{total} 批：{batch['range_label']}"
+            if attempt > 1:
+                task["status_text"] += f"（第 {attempt}/{max_attempts} 次尝试）"
+            return generate_text(
+                prompt,
+                provider_key=task.get("provider_key"),
+                api_key=task.get("api_key"),
+                model_override=task.get("active_model") or DEFAULT_MODEL,
+                max_output_tokens=int(task.get("max_tokens") or 4096),
+                reasoning_depth=task.get("reasoning_depth"),
+                request_timeout=PPT_STUDY_ASSET_REQUEST_TIMEOUT_SECONDS,
+            )
+        except AIServiceError as exc:
+            category = parallel_benchmark.classify_error_category(exc)
+            if category not in {"timeout", "rate_limit"} or attempt >= max_attempts:
+                raise
+            task["retried"] = int(task.get("retried") or 0) + 1
+            task["status_text"] = (
+                f"第 {index}/{total} 批：{batch['range_label']} 请求{_study_asset_retry_reason(category)}，"
+                f"准备第 {attempt + 1}/{max_attempts} 次尝试。"
+            )
+            time.sleep(PPT_STUDY_ASSET_RETRY_DELAY_SECONDS)
+    raise AIServiceError("学习沉淀草稿生成失败：重试次数已用尽。")
+
+
+def _study_asset_retry_reason(category: str) -> str:
+    if category == "timeout":
+        return "超时"
+    if category == "rate_limit":
+        return "触发频率限制"
+    return "失败"
 
 
 def _slides_with_latest_explanations(slides: list[dict], latest_by_slide_id: dict[int, dict]) -> list[dict]:
@@ -1605,7 +1783,8 @@ def _render_branch_question_form(
         st.error("插问不能为空。")
         return
 
-    full_question = _compose_quoted_branch_question(quote, question.strip()) if quote else question.strip()
+    typed_question = question.strip()
+    full_question = _compose_quoted_branch_question(quote, typed_question) if quote else typed_question
     prompt = _build_branch_prompt(deck, slide, latest, full_question)
     try:
         with st.spinner("GPT 正在回答插问..."):
@@ -1617,7 +1796,7 @@ def _render_branch_question_form(
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
                 reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
             )
-        add_slide_question(require_login().id, slide["id"], full_question, answer, _active_model_label())
+        add_slide_question(require_login().id, slide["id"], typed_question, answer, _active_model_label())
         if quote:
             st.session_state.pop(_branch_quote_state_key(quote["deck_id"]), None)
         st.success(f"插问已保存。现在回到第 {slide['slide_number']} 页主线。")
@@ -1648,6 +1827,17 @@ def _compose_quoted_branch_question(quote: dict, question: str) -> str:
     )
 
 
+def _display_branch_question(question: str) -> str:
+    text = str(question or "").strip()
+    if not all(marker in text for marker in ("引用内容", "前文上下文", "后文上下文")):
+        return text
+    match = re.search(r"(?:^|\n)我的问题[：:]\s*(?P<question>[\s\S]+)$", text)
+    if not match:
+        return text
+    display_question = match.group("question").strip()
+    return display_question or text
+
+
 def _render_question_history(slide_id: int) -> None:
     questions = fetch_all(
         """
@@ -1664,7 +1854,7 @@ def _render_question_history(slide_id: int) -> None:
         return
     for item in questions:
         with st.container(border=True):
-            st.markdown(f"**问：** {item['question']}")
+            st.markdown(f"**问：** {_display_branch_question(item['question'])}")
             st.markdown(item["answer"])
             st.caption(
                 f"分类：{item.get('category') or '未分类'} · 状态：{item.get('status') or '未整理'} · "
@@ -3354,7 +3544,7 @@ def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
     return {
         slide_id: [
             {
-                "question": row["question"],
+                "question": _display_branch_question(row["question"]),
                 "answer": row["answer"],
                 "model": row["model"],
                 "category": row["category"],

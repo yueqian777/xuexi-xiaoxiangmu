@@ -3,6 +3,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 from requests import Response
 
@@ -19,6 +20,7 @@ from services.ai_service import (
     _extract_text_output,
     _parse_response_json,
     _repair_utf8_mojibake,
+    generate_text,
     list_available_models,
 )
 
@@ -128,6 +130,32 @@ class AIServiceEncodingTest(unittest.TestCase):
         }
 
         self.assertEqual(list_available_models(provider, api_key=""), MIMO_TOKEN_PLAN_MODELS)
+
+    def test_generate_text_allows_long_running_request_timeout_override(self):
+        provider = AIProvider(
+            provider_key="local",
+            name="Local",
+            provider_type="openai_chat",
+            base_url="http://localhost:8317/v1",
+            model="model-a",
+            api_key_env="",
+            auth_type="none",
+            extra_headers_json="{}",
+            request_template_json="",
+            response_path="choices.0.message.content",
+        )
+        response = Response()
+        response.status_code = 200
+        response._content = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+
+        with (
+            patch("services.ai_service.get_api_provider", return_value=provider),
+            patch("services.ai_service.requests.request", return_value=response) as request,
+        ):
+            output = generate_text("ping", request_timeout=300)
+
+        self.assertEqual(output, "ok")
+        self.assertEqual(request.call_args.kwargs["timeout"], 300)
 
 
 if __name__ == "__main__":

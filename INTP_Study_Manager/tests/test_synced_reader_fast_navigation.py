@@ -11,7 +11,7 @@ READER_HTML = APP_ROOT / "components" / "synced_reader" / "index.html"
 
 
 def _extract_function(source, name):
-    marker = f"function {name}"
+    marker = f"function {name}("
     start = source.find(marker)
     if start < 0:
         return ""
