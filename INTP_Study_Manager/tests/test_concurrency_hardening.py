@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import db
-from services import auth_service, ppt_service, review_service
+from services import auth_service, ppt_context_service, ppt_service, review_service
 
 
 class _SessionState(dict):
@@ -101,6 +101,100 @@ class ConcurrencyHardeningTest(unittest.TestCase):
             (user_id, knowledge_id),
         )
         self.assertEqual(count["count"], 4)
+
+    def test_deck_sections_are_user_scoped(self):
+        alice_id = auth_service.create_user("alice", "pw")
+        bob_id = auth_service.create_user("bob", "pw")
+        deck_id = db.insert_and_get_id(
+            """
+            INSERT INTO ppt_decks (user_id, filename, title, file_path)
+            VALUES (?, 'alice.pdf', 'Alice Deck', ?)
+            """,
+            (alice_id, str(self.data_dir / "uploads" / "user_1" / "alice.pdf")),
+        )
+        db.insert_and_get_id(
+            """
+            INSERT INTO ppt_slides (user_id, deck_id, slide_number, title)
+            VALUES (?, ?, 1, '第一页')
+            """,
+            (alice_id, deck_id),
+        )
+        structure = {
+            "outline": "大纲",
+            "sections": [
+                {
+                    "section_index": 1,
+                    "title": "第一章",
+                    "start_slide": 1,
+                    "end_slide": 1,
+                }
+            ],
+            "pages": [{"slide_number": 1, "section_index": 1, "page_type": "正文页"}],
+        }
+
+        with self.assertRaises(PermissionError):
+            ppt_context_service.save_deck_structure(deck_id, structure, user_id=bob_id)
+
+        ppt_context_service.save_deck_structure(deck_id, structure, user_id=alice_id)
+
+        self.assertEqual(len(ppt_context_service.fetch_deck_sections(deck_id, user_id=alice_id)), 1)
+        self.assertEqual(ppt_context_service.fetch_deck_sections(deck_id, user_id=bob_id), [])
+        section = db.fetch_one("SELECT user_id FROM ppt_sections WHERE deck_id = ?", (deck_id,))
+        self.assertEqual(section["user_id"], alice_id)
+
+    def test_delete_user_removes_database_rows_atomically_and_only_unlinks_data_files(self):
+        user_id = auth_service.create_user("alice", "pw")
+        upload_dir = self.data_dir / "uploads" / f"user_{user_id}"
+        image_dir = self.data_dir / "page_images" / f"user_{user_id}" / "deck"
+        upload_dir.mkdir(parents=True)
+        image_dir.mkdir(parents=True)
+        deck_file = upload_dir / "deck.pdf"
+        image_file = image_dir / "page_001.png"
+        outside_file = Path(self.tmp.name).parent / "outside_should_survive.txt"
+        deck_file.write_bytes(b"deck")
+        image_file.write_bytes(b"image")
+        outside_file.write_text("keep", encoding="utf-8")
+        self.addCleanup(lambda: outside_file.exists() and outside_file.unlink())
+
+        deck_id = db.insert_and_get_id(
+            """
+            INSERT INTO ppt_decks (user_id, filename, title, file_path)
+            VALUES (?, 'deck.pdf', 'Deck', ?)
+            """,
+            (user_id, str(deck_file)),
+        )
+        db.insert_and_get_id(
+            """
+            INSERT INTO ppt_slides (user_id, deck_id, slide_number, image_path)
+            VALUES (?, ?, 1, ?)
+            """,
+            (user_id, deck_id, str(image_file)),
+        )
+        db.insert_and_get_id(
+            """
+            INSERT INTO ppt_sections (user_id, deck_id, section_index, title, start_slide, end_slide)
+            VALUES (?, ?, 1, '章节', 1, 1)
+            """,
+            (user_id, deck_id),
+        )
+        db.insert_and_get_id(
+            """
+            INSERT INTO ppt_decks (user_id, filename, title, file_path)
+            VALUES (?, 'bad.pdf', 'Bad Path', ?)
+            """,
+            (user_id, str(outside_file)),
+        )
+        secret_path = self.data_dir / f"api_keys_user_{user_id}.enc.json"
+        secret_path.write_text("{}", encoding="utf-8")
+
+        auth_service.delete_user_and_data(user_id)
+
+        self.assertIsNone(db.fetch_one("SELECT id FROM users WHERE id = ?", (user_id,)))
+        self.assertIsNone(db.fetch_one("SELECT id FROM ppt_sections WHERE user_id = ?", (user_id,)))
+        self.assertFalse(deck_file.exists())
+        self.assertFalse(image_file.exists())
+        self.assertFalse(secret_path.exists())
+        self.assertTrue(outside_file.exists())
 
 
 if __name__ == "__main__":

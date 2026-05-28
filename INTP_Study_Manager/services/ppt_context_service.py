@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from db import fetch_all, managed_connection
+from db import fetch_all, write_transaction
 
 PAGE_TYPES = ("讲解页", "正文页", "公式页", "例题页", "过渡页", "目录页", "总结页")
 LIGHTWEIGHT_PAGE_TYPES = {"过渡页", "目录页", "章节标题页", "标题页"}
@@ -108,30 +108,43 @@ def normalize_document_structure(payload: dict[str, Any], slides: list[int] | li
     }
 
 
-def save_deck_structure(deck_id: int, structure: dict[str, Any]) -> None:
+def save_deck_structure(deck_id: int, structure: dict[str, Any], *, user_id: int | None = None) -> None:
     deck_id = int(deck_id)
+    expected_user_id = int(user_id) if user_id is not None else None
     sections = structure.get("sections") if isinstance(structure.get("sections"), list) else []
     pages = structure.get("pages") if isinstance(structure.get("pages"), list) else []
-    with managed_connection() as conn:
-        conn.execute("DELETE FROM ppt_sections WHERE deck_id = ?", (deck_id,))
+    with write_transaction() as conn:
+        if expected_user_id is None:
+            deck = conn.execute("SELECT id, user_id FROM ppt_decks WHERE id = ?", (deck_id,)).fetchone()
+        else:
+            deck = conn.execute(
+                "SELECT id, user_id FROM ppt_decks WHERE id = ? AND user_id = ?",
+                (deck_id, expected_user_id),
+            ).fetchone()
+        if not deck:
+            raise PermissionError("无权更新这份 PPT 资料。") if expected_user_id is not None else ValueError("PPT 资料不存在。")
+        owner_id = int(deck["user_id"])
+
+        conn.execute("DELETE FROM ppt_sections WHERE deck_id = ? AND user_id = ?", (deck_id, owner_id))
         conn.execute(
             """
             UPDATE ppt_decks
             SET outline = ?, outline_generated_at = datetime('now', 'localtime')
-            WHERE id = ?
+            WHERE id = ? AND user_id = ?
             """,
-            (_text(structure.get("outline")), deck_id),
+            (_text(structure.get("outline")), deck_id, owner_id),
         )
         conn.executemany(
             """
             INSERT INTO ppt_sections (
-                deck_id, section_index, title, topic, core_question, summary,
+                user_id, deck_id, section_index, title, topic, core_question, summary,
                 key_terms_json, prerequisite_concepts_json, start_slide, end_slide
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 (
+                    owner_id,
                     deck_id,
                     int(section["section_index"]),
                     section["title"],
@@ -154,7 +167,7 @@ def save_deck_structure(deck_id: int, structure: dict[str, Any]) -> None:
                 one_sentence_summary = ?,
                 slide_role = ?,
                 key_points = ?
-            WHERE deck_id = ? AND slide_number = ?
+            WHERE user_id = ? AND deck_id = ? AND slide_number = ?
             """,
             (
                 (
@@ -163,6 +176,7 @@ def save_deck_structure(deck_id: int, structure: dict[str, Any]) -> None:
                     _text(page.get("one_sentence_summary")),
                     _text(page.get("slide_role")),
                     _text(page.get("key_points")),
+                    owner_id,
                     deck_id,
                     int(page["slide_number"]),
                 )
@@ -171,15 +185,23 @@ def save_deck_structure(deck_id: int, structure: dict[str, Any]) -> None:
         )
 
 
-def fetch_deck_sections(deck_id: int) -> list[dict[str, Any]]:
+def fetch_deck_sections(deck_id: int, *, user_id: int | None = None) -> list[dict[str, Any]]:
+    params: tuple[Any, ...]
+    user_clause = ""
+    if user_id is not None:
+        user_clause = "AND user_id = ?"
+        params = (int(deck_id), int(user_id))
+    else:
+        params = (int(deck_id),)
     rows = fetch_all(
-        """
+        f"""
         SELECT *
         FROM ppt_sections
         WHERE deck_id = ?
+        {user_clause}
         ORDER BY section_index ASC
         """,
-        (int(deck_id),),
+        params,
     )
     sections = []
     for row in rows:

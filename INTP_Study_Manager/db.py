@@ -210,6 +210,7 @@ def _run_init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS ppt_sections (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 deck_id INTEGER NOT NULL,
                 section_index INTEGER NOT NULL,
                 title TEXT NOT NULL,
@@ -343,6 +344,7 @@ def _run_init_db() -> None:
         _ensure_column(conn, "ppt_slides", "one_sentence_summary", "TEXT DEFAULT ''")
         _ensure_column(conn, "ppt_slides", "slide_role", "TEXT DEFAULT ''")
         _ensure_column(conn, "ppt_slides", "key_points", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_sections", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_explanations", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_questions", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "api_providers", "user_id", "INTEGER NOT NULL DEFAULT 0")
@@ -411,6 +413,10 @@ def _run_init_db() -> None:
                 ON ppt_slides(user_id, deck_id, slide_number ASC);
             CREATE INDEX IF NOT EXISTS idx_ppt_slides_deck
                 ON ppt_slides(deck_id);
+            CREATE INDEX IF NOT EXISTS idx_ppt_sections_user_deck_index
+                ON ppt_sections(user_id, deck_id, section_index ASC);
+            CREATE INDEX IF NOT EXISTS idx_ppt_sections_deck
+                ON ppt_sections(deck_id);
             CREATE INDEX IF NOT EXISTS idx_slide_explanations_user_slide_created
                 ON slide_explanations(user_id, slide_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_slide_explanations_slide
@@ -429,6 +435,7 @@ def _run_init_db() -> None:
         )
         _migrate_api_provider_identity(conn)
         _migrate_daily_ai_review_plan_user_scope(conn)
+        _migrate_ppt_sections_user_scope(conn)
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_ppt_decks_manage
@@ -514,6 +521,7 @@ def _migrate_default_users(conn: sqlite3.Connection) -> None:
         "parking_lot",
         "ppt_decks",
         "ppt_slides",
+        "ppt_sections",
         "slide_explanations",
         "slide_questions",
         "api_providers",
@@ -522,6 +530,21 @@ def _migrate_default_users(conn: sqlite3.Connection) -> None:
         "daily_ai_review_plans",
     ):
         conn.execute(f"UPDATE {table} SET user_id = COALESCE(NULLIF(user_id, 0), ?)", (default_user_id,))
+
+
+def _migrate_ppt_sections_user_scope(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE ppt_sections
+        SET user_id = COALESCE(
+            (SELECT d.user_id FROM ppt_decks d WHERE d.id = ppt_sections.deck_id),
+            NULLIF(user_id, 0),
+            (SELECT id FROM users ORDER BY id ASC LIMIT 1),
+            0
+        )
+        WHERE COALESCE(user_id, 0) = 0
+        """
+    )
 
 
 def _migrate_api_provider_identity(conn: sqlite3.Connection) -> None:
@@ -565,16 +588,17 @@ def _migrate_api_provider_identity(conn: sqlite3.Connection) -> None:
     conn.executemany(
         """
         INSERT INTO api_providers (
-            provider_key, name, provider_type, base_url, model, api_key_env,
+            provider_key, user_id, name, provider_type, base_url, model, api_key_env,
             auth_type, extra_headers_json, request_template_json, response_path,
             balance_query_enabled, balance_query_type, balance_query_config_json,
             enabled, sort_order, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
                 item["provider_key"],
+                int(item.get("user_id") or 0),
                 item.get("name") or "",
                 item.get("provider_type") or "openai_chat",
                 item.get("base_url") or "",
@@ -652,6 +676,7 @@ def _migrate_daily_ai_provider_identity(conn: sqlite3.Connection, old_id_to_key:
     columns = _table_columns(conn, "daily_ai_review_plans")
     if not columns or "provider_id" not in columns:
         return
+    has_user_id = "user_id" in columns
     rows = conn.execute("SELECT * FROM daily_ai_review_plans ORDER BY id ASC").fetchall()
     conn.execute("DROP INDEX IF EXISTS idx_daily_ai_review_plans_date")
     conn.execute("ALTER TABLE daily_ai_review_plans RENAME TO daily_ai_review_plans_old_provider_identity")
@@ -659,14 +684,15 @@ def _migrate_daily_ai_provider_identity(conn: sqlite3.Connection, old_id_to_key:
     conn.executemany(
         """
         INSERT INTO daily_ai_review_plans (
-            id, review_date, provider_key, model, plan_json, source_snapshot_json,
+            id, user_id, review_date, provider_key, model, plan_json, source_snapshot_json,
             answers_json, evaluation_json, status, created_at, evaluated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
                 row["id"],
+                int(row["user_id"] or 0) if has_user_id else 0,
                 row["review_date"],
                 old_id_to_key.get(int(row["provider_id"])) if row["provider_id"] is not None else None,
                 row["model"] or "",
@@ -722,6 +748,7 @@ def _api_providers_schema_sql() -> str:
     return """
     CREATE TABLE api_providers (
         provider_key TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL DEFAULT 0,
         name TEXT NOT NULL UNIQUE,
         provider_type TEXT NOT NULL,
         base_url TEXT DEFAULT '',

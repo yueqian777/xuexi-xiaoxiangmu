@@ -229,7 +229,7 @@ def render() -> None:
         return
     slide_by_id = {slide["id"]: slide for slide in slides}
     latest_by_slide_id = _latest_explanations_by_slide_ids(list(slide_by_id))
-    sections = fetch_deck_sections(int(deck["id"]))
+    sections = fetch_deck_sections(int(deck["id"]), user_id=user.id)
 
     st.divider()
     _render_deck_actions(deck, slides, latest_by_slide_id, sections)
@@ -673,7 +673,8 @@ def _generate_document_structure(
         reasoning_depth=reasoning_depth if reasoning_depth is not None else st.session_state.get("active_api_reasoning_depth"),
     )
     structure = parse_document_structure_response(response, slides)
-    save_deck_structure(int(deck["id"]), structure)
+    deck_user_id = int(deck["user_id"]) if deck.get("user_id") is not None else None
+    save_deck_structure(int(deck["id"]), structure, user_id=deck_user_id)
     return structure
 
 

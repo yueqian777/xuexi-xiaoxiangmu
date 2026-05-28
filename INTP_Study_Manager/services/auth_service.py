@@ -11,6 +11,7 @@ from typing import Any
 
 import streamlit as st
 
+import db
 from db import execute, fetch_all, fetch_one, write_transaction
 
 CURRENT_USER_SESSION_KEY = "current_user"
@@ -254,44 +255,50 @@ def set_user_upload_quota(user_id: int, upload_quota_bytes: int) -> None:
 
 def delete_user_and_data(user_id: int) -> None:
     ensure_auth_tables()
-    if fetch_one("SELECT role FROM users WHERE id = ?", (int(user_id),)).get("role") == "admin":
-        raise ValueError("不能删除管理员账户。")
+    target_user_id = int(user_id)
+    file_paths: list[str] = []
+    with write_transaction() as conn:
+        user_row = conn.execute("SELECT role FROM users WHERE id = ?", (target_user_id,)).fetchone()
+        if not user_row:
+            return
+        if str(user_row["role"] or "") == "admin":
+            raise ValueError("不能删除管理员账户。")
 
-    deck_rows = fetch_all("SELECT file_path FROM ppt_decks WHERE user_id = ?", (int(user_id),))
-    image_rows = fetch_all("SELECT image_path FROM ppt_slides WHERE user_id = ?", (int(user_id),))
+        deck_rows = conn.execute("SELECT file_path FROM ppt_decks WHERE user_id = ?", (target_user_id,)).fetchall()
+        image_rows = conn.execute("SELECT image_path FROM ppt_slides WHERE user_id = ?", (target_user_id,)).fetchall()
+        file_paths = [
+            str(row[column] or "").strip()
+            for rows, column in ((deck_rows, "file_path"), (image_rows, "image_path"))
+            for row in rows
+            if str(row[column] or "").strip()
+        ]
 
-    for table in (
-        "branch_questions",
-        "mainline_anchors",
-        "review_tasks",
-        "mistakes",
-        "knowledge_links",
-        "knowledge_cards",
-        "parking_lot",
-        "slide_questions",
-        "slide_explanations",
-        "ppt_slides",
-        "ppt_decks",
-        "study_sessions",
-        "daily_review_logs",
-        "daily_ai_review_plans",
-    ):
-        execute(f"DELETE FROM {table} WHERE user_id = ?", (int(user_id),))
+        for table in (
+            "branch_questions",
+            "mainline_anchors",
+            "review_tasks",
+            "mistakes",
+            "knowledge_links",
+            "knowledge_cards",
+            "parking_lot",
+            "slide_questions",
+            "slide_explanations",
+            "ppt_sections",
+            "ppt_slides",
+            "ppt_decks",
+            "study_sessions",
+            "daily_review_logs",
+            "daily_ai_review_plans",
+        ):
+            conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (target_user_id,))
 
-    execute("DELETE FROM invites WHERE created_by = ?", (int(user_id),))
-    execute("DELETE FROM users WHERE id = ?", (int(user_id),))
+        conn.execute("DELETE FROM invites WHERE created_by = ?", (target_user_id,))
+        conn.execute("DELETE FROM users WHERE id = ?", (target_user_id,))
 
-    secret_path = Path(__import__('services.secret_store', fromlist=['_secret_store_path'])._secret_store_path(int(user_id)))
-    if secret_path.exists():
-        secret_path.unlink()
-
-    for row in deck_rows + image_rows:
-        path_text = str(row.get("file_path") or row.get("image_path") or "").strip()
-        if not path_text:
-            continue
-        path = Path(path_text)
-        if path.exists() and path.is_file():
-            path.unlink()
+    secret_path = db.DATA_DIR / f"api_keys_user_{target_user_id}.enc.json"
+    _safe_unlink_data_file(secret_path)
+    for path_text in file_paths:
+        _safe_unlink_data_file(path_text)
 
 
 def get_user_upload_usage(user_id: int) -> dict[str, int]:
@@ -308,6 +315,35 @@ def get_user_upload_usage(user_id: int) -> dict[str, int]:
         if path.exists() and path.is_file():
             total += path.stat().st_size
     return {"used_bytes": total, "quota_bytes": quota}
+
+
+def _safe_unlink_data_file(path_value: str | Path) -> bool:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return False
+    path = Path(path_text)
+    try:
+        resolved_path = path.resolve(strict=False)
+        data_root = db.DATA_DIR.resolve(strict=False)
+    except OSError:
+        return False
+    if not _is_relative_to(resolved_path, data_root):
+        return False
+    if not resolved_path.exists() or not resolved_path.is_file():
+        return False
+    try:
+        resolved_path.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def _is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return False
+    return True
 
 
 def format_bytes(value: int) -> str:
