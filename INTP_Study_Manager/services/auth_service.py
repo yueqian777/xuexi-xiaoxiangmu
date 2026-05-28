@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import secrets
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -15,6 +16,10 @@ import db
 from db import execute, fetch_all, fetch_one, write_transaction
 
 CURRENT_USER_SESSION_KEY = "current_user"
+AUTH_SESSION_COOKIE_NAME = "intp_study_auth"
+AUTH_SESSION_TOKEN_KEY = "auth_session_token"
+AUTH_SESSION_EXPIRES_AT_KEY = "auth_session_expires_at"
+AUTH_SESSION_IDLE_SECONDS = 5 * 60
 PASSWORD_SALT_PREFIX = "pbkdf2_sha256"
 
 
@@ -35,6 +40,8 @@ SENSITIVE_SESSION_PREFIXES = (
 
 SENSITIVE_SESSION_KEYS = {
     CURRENT_USER_SESSION_KEY,
+    AUTH_SESSION_TOKEN_KEY,
+    AUTH_SESSION_EXPIRES_AT_KEY,
     "secret_vault_unlocked",
     "secret_vault_data",
     "secret_vault_master_password",
@@ -92,6 +99,24 @@ def ensure_auth_tables() -> None:
             updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
         )
+        """
+    )
+    execute(
+        """
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            token_hash TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            last_seen_at INTEGER NOT NULL,
+            revoked_at INTEGER,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_seen
+        ON auth_sessions(user_id, last_seen_at DESC)
         """
     )
     _ensure_auth_column("users", "upload_quota_bytes", "INTEGER NOT NULL DEFAULT 536870912")
@@ -409,6 +434,15 @@ def _clear_sensitive_session_state() -> None:
             st.session_state.pop(key, None)
 
 
+def _set_current_user_session(user: CurrentUser) -> None:
+    st.session_state[CURRENT_USER_SESSION_KEY] = {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "role": user.role,
+    }
+
+
 def login(username: str, password: str) -> CurrentUser:
     ensure_auth_tables()
     _clear_sensitive_session_state()
@@ -430,12 +464,8 @@ def login(username: str, password: str) -> CurrentUser:
         display_name=str(row["display_name"] or row["username"]),
         role=str(row["role"] or "user"),
     )
-    st.session_state[CURRENT_USER_SESSION_KEY] = {
-        "id": user.id,
-        "username": user.username,
-        "display_name": user.display_name,
-        "role": user.role,
-    }
+    _set_current_user_session(user)
+    _issue_device_session(user.id)
     return user
 
 
@@ -485,13 +515,101 @@ def register_by_invite(username: str, password: str, invite_code: str, *, displa
             display_name=display_name or username,
             role=str(invite["role"] or "user"),
         )
-    st.session_state[CURRENT_USER_SESSION_KEY] = {
-        "id": user.id,
-        "username": user.username,
-        "display_name": user.display_name,
-        "role": user.role,
-    }
+    _set_current_user_session(user)
+    _issue_device_session(user.id)
     return user
+
+
+def restore_current_user_from_device_session(*, now: int | None = None) -> CurrentUser | None:
+    ensure_auth_tables()
+    if get_current_user():
+        return get_current_user()
+    token = _browser_auth_token()
+    if not token:
+        return None
+    user = _validate_device_session(token, now=now)
+    if not user:
+        _expire_browser_device_session()
+        return None
+    _set_current_user_session(user)
+    _remember_browser_device_session(token, _unix_now(now) + AUTH_SESSION_IDLE_SECONDS)
+    return user
+
+
+def refresh_device_session_activity(*, now: int | None = None) -> CurrentUser | None:
+    user = get_current_user()
+    token = _browser_auth_token()
+    if not user:
+        return user
+    if not token:
+        _clear_sensitive_session_state()
+        _expire_browser_device_session()
+        return None
+    now_value = _unix_now(now)
+    token_hash = _auth_token_hash(token)
+    with write_transaction() as conn:
+        row = conn.execute(
+            """
+            SELECT s.token_hash, s.user_id, s.last_seen_at, s.revoked_at, u.username, u.display_name, u.role, u.is_active
+            FROM auth_sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.token_hash = ?
+            """,
+            (token_hash,),
+        ).fetchone()
+        if (
+            not row
+            or int(row["user_id"]) != int(user.id)
+            or int(row["is_active"]) != 1
+            or row["revoked_at"] is not None
+            or now_value - int(row["last_seen_at"]) > AUTH_SESSION_IDLE_SECONDS
+        ):
+            if row:
+                conn.execute(
+                    "UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE token_hash = ?",
+                    (now_value, token_hash),
+                )
+            _clear_sensitive_session_state()
+            _expire_browser_device_session()
+            return None
+        conn.execute(
+            "UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?",
+            (now_value, token_hash),
+        )
+    _remember_browser_device_session(token, now_value + AUTH_SESSION_IDLE_SECONDS)
+    return user
+
+
+def record_browser_activity_ping(token: str, *, activity_at: int | None = None, now: int | None = None) -> bool:
+    if not token:
+        return False
+    now_value = _unix_now(now)
+    activity_value = _normalize_client_activity_time(activity_at, now_value)
+    token_hash = _auth_token_hash(token)
+    with write_transaction() as conn:
+        row = conn.execute(
+            """
+            SELECT s.last_seen_at, s.revoked_at, u.is_active
+            FROM auth_sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.token_hash = ?
+            """,
+            (token_hash,),
+        ).fetchone()
+        if not row or int(row["is_active"]) != 1 or row["revoked_at"] is not None:
+            return False
+        last_seen_at = int(row["last_seen_at"])
+        if activity_value - last_seen_at > AUTH_SESSION_IDLE_SECONDS and now_value - activity_value > AUTH_SESSION_IDLE_SECONDS:
+            conn.execute(
+                "UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE token_hash = ?",
+                (now_value, token_hash),
+            )
+            return False
+        conn.execute(
+            "UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?",
+            (max(last_seen_at, min(activity_value, now_value)), token_hash),
+        )
+    return True
 
 
 def get_current_user() -> CurrentUser | None:
@@ -524,7 +642,113 @@ def require_admin() -> CurrentUser:
 
 
 def logout() -> None:
+    token = _browser_auth_token()
+    if token:
+        revoke_device_session(token)
     _clear_sensitive_session_state()
+    _expire_browser_device_session()
+
+
+def revoke_device_session(token: str) -> None:
+    if not token:
+        return
+    execute(
+        """
+        UPDATE auth_sessions
+        SET revoked_at = COALESCE(revoked_at, ?)
+        WHERE token_hash = ?
+        """,
+        (_unix_now(), _auth_token_hash(token)),
+    )
+
+
+def _issue_device_session(user_id: int, *, now: int | None = None) -> str:
+    now_value = _unix_now(now)
+    token = secrets.token_urlsafe(32)
+    execute(
+        """
+        INSERT INTO auth_sessions (token_hash, user_id, created_at, last_seen_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (_auth_token_hash(token), int(user_id), now_value, now_value),
+    )
+    _remember_browser_device_session(token, now_value + AUTH_SESSION_IDLE_SECONDS)
+    return token
+
+
+def _validate_device_session(token: str, *, now: int | None = None) -> CurrentUser | None:
+    now_value = _unix_now(now)
+    token_hash = _auth_token_hash(token)
+    with write_transaction() as conn:
+        row = conn.execute(
+            """
+            SELECT s.token_hash, s.user_id, s.last_seen_at, s.revoked_at, u.username, u.display_name, u.role, u.is_active
+            FROM auth_sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.token_hash = ?
+            """,
+            (token_hash,),
+        ).fetchone()
+        if not row or int(row["is_active"]) != 1 or row["revoked_at"] is not None:
+            return None
+        if now_value - int(row["last_seen_at"]) > AUTH_SESSION_IDLE_SECONDS:
+            conn.execute(
+                "UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE token_hash = ?",
+                (now_value, token_hash),
+            )
+            return None
+        conn.execute(
+            "UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?",
+            (now_value, token_hash),
+        )
+    return CurrentUser(
+        id=int(row["user_id"]),
+        username=str(row["username"]),
+        display_name=str(row["display_name"] or row["username"]),
+        role=str(row["role"] or "user"),
+    )
+
+
+def _remember_browser_device_session(token: str, expires_at: int) -> None:
+    st.session_state[AUTH_SESSION_TOKEN_KEY] = token
+    st.session_state[AUTH_SESSION_EXPIRES_AT_KEY] = int(expires_at)
+
+
+def _expire_browser_device_session() -> None:
+    st.session_state.pop(AUTH_SESSION_TOKEN_KEY, None)
+    st.session_state[AUTH_SESSION_EXPIRES_AT_KEY] = 0
+
+
+def _browser_auth_token() -> str:
+    token = str(st.session_state.get(AUTH_SESSION_TOKEN_KEY) or "").strip()
+    if token:
+        return token
+    try:
+        return str(st.context.cookies.get(AUTH_SESSION_COOKIE_NAME) or "").strip()
+    except Exception:
+        return ""
+
+
+def _auth_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _unix_now(now: int | None = None) -> int:
+    return int(time.time() if now is None else now)
+
+
+def _normalize_client_activity_time(activity_at: int | None, now_value: int) -> int:
+    if activity_at is None:
+        return now_value
+    try:
+        value = int(activity_at)
+    except (TypeError, ValueError):
+        return now_value
+    if value > 10_000_000_000:
+        value //= 1000
+    if value > now_value + 30:
+        return now_value
+    return max(0, value)
 
 
 def _validate_invite(invite: dict[str, Any]) -> None:

@@ -15,6 +15,7 @@ class _SessionState(dict):
 class _FakeStreamlit:
     def __init__(self):
         self.session_state = _SessionState()
+        self.context = type("Context", (), {"cookies": {}})()
 
 
 class ConcurrencyHardeningTest(unittest.TestCase):
@@ -52,6 +53,8 @@ class ConcurrencyHardeningTest(unittest.TestCase):
     def test_sensitive_session_cleanup_removes_background_tasks(self):
         state = auth_service.st.session_state
         state["current_user"] = {"id": 1}
+        state["auth_session_token"] = "token"
+        state["auth_session_expires_at"] = 123
         state["ppt_generation_task"] = {"status": "running", "api_key": "secret"}
         state["ppt_structure_task"] = {"status": "running", "api_key": "secret"}
         state["study_asset_task_9"] = {"status": "running", "api_key": "secret"}
@@ -61,6 +64,8 @@ class ConcurrencyHardeningTest(unittest.TestCase):
         auth_service.logout()
 
         self.assertNotIn("current_user", state)
+        self.assertNotIn("auth_session_token", state)
+        self.assertEqual(state["auth_session_expires_at"], 0)
         self.assertNotIn("ppt_generation_task", state)
         self.assertNotIn("ppt_structure_task", state)
         self.assertNotIn("study_asset_task_9", state)
@@ -195,6 +200,46 @@ class ConcurrencyHardeningTest(unittest.TestCase):
         self.assertFalse(image_file.exists())
         self.assertFalse(secret_path.exists())
         self.assertTrue(outside_file.exists())
+
+    def test_device_session_restores_new_streamlit_session_before_idle_timeout(self):
+        auth_service.create_user("alice", "pw")
+        auth_service.login("alice", "pw")
+        token = auth_service.st.session_state["auth_session_token"]
+
+        auth_service.st.session_state.clear()
+        auth_service.st.context.cookies = {auth_service.AUTH_SESSION_COOKIE_NAME: token}
+
+        user = auth_service.restore_current_user_from_device_session(now=100)
+
+        self.assertIsNotNone(user)
+        self.assertEqual(user.username, "alice")
+        self.assertEqual(auth_service.st.session_state["current_user"]["username"], "alice")
+
+    def test_device_session_expires_after_five_minutes_without_activity(self):
+        auth_service.create_user("alice", "pw")
+        token = auth_service._issue_device_session(1, now=100)
+        auth_service.st.session_state.clear()
+        auth_service.st.context.cookies = {auth_service.AUTH_SESSION_COOKIE_NAME: token}
+
+        user = auth_service.restore_current_user_from_device_session(now=401)
+
+        self.assertIsNone(user)
+        self.assertNotIn("current_user", auth_service.st.session_state)
+        row = db.fetch_one("SELECT revoked_at FROM auth_sessions WHERE token_hash = ?", (auth_service._auth_token_hash(token),))
+        self.assertEqual(row["revoked_at"], 401)
+
+    def test_browser_activity_ping_extends_device_session(self):
+        auth_service.create_user("alice", "pw")
+        token = auth_service._issue_device_session(1, now=100)
+
+        self.assertTrue(auth_service.record_browser_activity_ping(token, activity_at=350, now=360))
+        auth_service.st.session_state.clear()
+        auth_service.st.context.cookies = {auth_service.AUTH_SESSION_COOKIE_NAME: token}
+
+        user = auth_service.restore_current_user_from_device_session(now=500)
+
+        self.assertIsNotNone(user)
+        self.assertEqual(user.username, "alice")
 
 
 if __name__ == "__main__":
