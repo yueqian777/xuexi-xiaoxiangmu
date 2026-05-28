@@ -229,6 +229,7 @@ def render() -> None:
     st.divider()
     _render_deck_actions(deck, slides, latest_by_slide_id, sections)
     _render_synced_reader(deck, slides, latest_by_slide_id, last_position, sections)
+    _auto_refresh_structure_generation(st.session_state.get("ppt_structure_task"))
     _auto_refresh_running_generation(generation_task)
 
     st.divider()
@@ -571,12 +572,15 @@ def _resume_interrupted_structure_generation() -> None:
     status = apply_stop_request(task, default_status_text="文档目录分块已停止")
 
     if status == "completed":
+        task["_post_render_refreshed_status"] = status
         st.success(f"AI 文档目录分块完成：{task.get('sections', 0)} 个目录块。")
         return
     if status == "failed":
+        task["_post_render_refreshed_status"] = status
         st.error(f"AI 文档目录分块失败：{task.get('error') or task.get('status_text') or '未知错误'}")
         return
     if status == "stopped":
+        task["_post_render_refreshed_status"] = status
         st.warning(f"AI 文档目录分块已停止：{task.get('status_text', '已中断')}")
         return
     if status != "running":
@@ -1727,6 +1731,24 @@ def _auto_refresh_running_generation(task: dict | None) -> None:
         return
     time.sleep(min(PPT_GENERATION_REFRESH_SECONDS, 0.5))
     st.rerun()
+
+
+def _auto_refresh_structure_generation(task: dict | None) -> None:
+    if not task:
+        return
+
+    status = str(task.get("status") or "")
+    if status == "running":
+        # 目录生成的进度文本可能长时间不变，但后台线程仍可能随后完成。
+        # 保持一次后渲染轮询，避免页面停在旧的“生成中”DOM。
+        time.sleep(0.5)
+        st.rerun()
+        return
+
+    if status in {"completed", "failed", "stopped"} and task.get("_post_render_refreshed_status") != status:
+        task["_post_render_refreshed_status"] = status
+        st.session_state.pop(PPT_STRUCTURE_REFRESH_STATE_KEY, None)
+        st.rerun()
 
 
 def _should_refresh_task(task: dict, state_key: str, *, interval: float) -> bool:

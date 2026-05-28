@@ -71,10 +71,13 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             raise unittest.SkipTest("Node.js is not available for synced-reader JS tests")
         cls.source = READER_HTML.read_text(encoding="utf-8")
         helper_names = [
+            "storageKey",
             "connectedTypesetTargets",
             "scheduleMathJaxRetry",
             "flushTypesetQueue",
             "typesetTargets",
+            "readScrollState",
+            "buildReaderStructureSignature",
             "requestImageWindowIfNeeded",
         ]
         cls.js_helpers = "\n\n".join(
@@ -168,6 +171,53 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
     def test_nearby_content_hydration_is_scheduled_for_fast_navigation(self):
         self.assertIn("function scheduleNearbyContent", self.source)
         self.assertIn("scheduleNearbyContent(currentSlideNumber)", self.source)
+
+    def test_empty_scroll_state_does_not_override_initial_slide(self):
+        self.run_js(
+            r"""
+            let deckId = 9;
+            let currentSlideNumber = 1;
+            global.localStorage = {
+              getItem: () => null,
+            };
+
+            const state = readScrollState();
+            if (state !== null) {
+              throw new Error(JSON.stringify(state));
+            }
+            """
+        )
+
+    def test_patchable_note_metadata_does_not_change_reader_structure_signature(self):
+        self.run_js(
+            r"""
+            const before = buildReaderStructureSignature(9, [
+              {
+                slideNumber: 1,
+                title: '旧标题',
+                pageType: '',
+                sectionIndex: 0,
+                summary: '',
+                slideRole: '',
+                keyPoints: '',
+              },
+            ], []);
+            const after = buildReaderStructureSignature(9, [
+              {
+                slideNumber: 1,
+                title: '新标题',
+                pageType: '正文页',
+                sectionIndex: 3,
+                summary: '新摘要',
+                slideRole: '承接',
+                keyPoints: '重点',
+              },
+            ], []);
+            if (before !== after) {
+              throw new Error(`${before}\n${after}`);
+            }
+            """
+        )
 
     def test_image_window_request_rechecks_page_state_before_notify(self):
         self.run_js(

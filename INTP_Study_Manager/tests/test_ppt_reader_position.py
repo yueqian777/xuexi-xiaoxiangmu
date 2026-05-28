@@ -145,6 +145,59 @@ class PptReaderPositionTest(unittest.TestCase):
 
         rerun.assert_not_called()
 
+    def test_structure_running_refresh_continues_when_progress_recently_unchanged(self):
+        session_state = {
+            ppt_tutor.PPT_STRUCTURE_REFRESH_STATE_KEY: {
+                "task_key": (3, "running", 0, 0, 0, 0, 0, "处理中"),
+                "time": 100.0,
+            }
+        }
+        task = {
+            "status": "running",
+            "deck_id": 3,
+            "processed": 0,
+            "generated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "sections": 0,
+            "status_text": "处理中",
+        }
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor.time, "monotonic", return_value=100.4),
+            patch.object(ppt_tutor.time, "sleep") as sleep,
+            patch.object(ppt_tutor.st, "rerun") as rerun,
+        ):
+            ppt_tutor._auto_refresh_structure_generation(task)
+
+        sleep.assert_called_once()
+        rerun.assert_called_once()
+
+    def test_structure_terminal_refreshes_once_when_completion_happens_after_top_check(self):
+        task = {
+            "status": "completed",
+            "deck_id": 3,
+            "sections": 4,
+            "status_text": "目录分块完成",
+        }
+        session_state = {"ppt_structure_task": task}
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor.st, "rerun") as rerun,
+        ):
+            ppt_tutor._auto_refresh_structure_generation(task)
+
+        rerun.assert_called_once()
+        self.assertEqual(task.get("_post_render_refreshed_status"), "completed")
+
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor.st, "rerun") as rerun,
+        ):
+            ppt_tutor._auto_refresh_structure_generation(task)
+
+        rerun.assert_not_called()
+
     def test_should_refresh_task_allows_changed_progress(self):
         session_state = {
             "refresh_key": {

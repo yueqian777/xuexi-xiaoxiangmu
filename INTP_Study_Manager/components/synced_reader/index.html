@@ -273,6 +273,7 @@
       overflow-y: auto;
       scroll-behavior: smooth;
       overscroll-behavior: contain;
+      overflow-anchor: none;
       touch-action: pan-y;
     }
     .pages {
@@ -1764,10 +1765,17 @@
 
     function readScrollState() {
       if (!deckId) return null;
+      const pageScrollRaw = localStorage.getItem(storageKey('pageScroll'));
+      const noteScrollRaw = localStorage.getItem(storageKey('noteScroll'));
+      const currentSlideRaw = localStorage.getItem(storageKey('currentSlide'));
+      if (pageScrollRaw === null && noteScrollRaw === null && currentSlideRaw === null) {
+        return null;
+      }
+      const currentSlide = Number(currentSlideRaw || 0);
       return {
-        pageScroll: Number(localStorage.getItem(storageKey('pageScroll')) || 0),
-        noteScroll: Number(localStorage.getItem(storageKey('noteScroll')) || 0),
-        currentSlide: Number(localStorage.getItem(storageKey('currentSlide')) || currentSlideNumber || 1),
+        pageScroll: Number(pageScrollRaw || 0),
+        noteScroll: Number(noteScrollRaw || 0),
+        currentSlide: currentSlide > 0 ? currentSlide : null,
       };
     }
 
@@ -1972,12 +1980,6 @@
         deckId: Number(nextDeckId || 0),
         pages: nextPages.map(page => [
           Number(page.slideNumber || 0),
-          String(page.title || ''),
-          String(page.pageType || ''),
-          Number(page.sectionIndex || 0),
-          String(page.summary || ''),
-          String(page.slideRole || ''),
-          String(page.keyPoints || ''),
         ]),
         sections: nextSections.map(section => [
           Number(section.sectionIndex || 0),
@@ -2045,6 +2047,21 @@
           const visual = pageArticle?.querySelector?.('.page-visual');
           if (visual) visual.innerHTML = renderPageVisual(page);
         }
+        if (pageArticle) {
+          const section = sectionForSlide(page.slideNumber);
+          const pageMeta = [
+            page.pageType || '',
+            section ? section.title || '' : '',
+          ].filter(Boolean).join(' · ');
+          const label = pageArticle.querySelector('.page-label');
+          if (label) {
+            label.innerHTML = `
+              <span>第 ${page.slideNumber} 页</span>
+              <span>${escapeHtml(page.title)}</span>
+              ${pageMeta ? `<span>${escapeHtml(pageMeta)}</span>` : ''}
+            `;
+          }
+        }
 
         if (!note) return;
 
@@ -2060,6 +2077,17 @@
         const meta = note.querySelector('.note-meta');
         if (meta && meta.textContent !== noteMetaText(page)) {
           meta.textContent = noteMetaText(page);
+        }
+        const context = note.querySelector('.note-context');
+        const contextHtml = renderPageContext(page).trim();
+        if (contextHtml) {
+          if (context) {
+            context.outerHTML = contextHtml;
+          } else {
+            meta?.insertAdjacentHTML?.('afterend', contextHtml);
+          }
+        } else if (context) {
+          context.remove();
         }
 
         if (String(previous.explanation || '') === String(page.explanation || '')) return;
@@ -2437,14 +2465,19 @@
 
     function renderReader(args) {
       const previousPages = pages;
+      const previousDeckId = deckId;
+      const hadRenderedReader = Boolean(pageRoot.children.length && noteRoot.children.length);
+      const noteAnchorBeforeRender = noteAnchorForSlide(currentSlideNumber);
       restoreScrollAfterRender = {
         pageScroll: pageRoot.scrollTop,
         noteScroll: noteRoot.scrollTop,
         currentSlide: currentSlideNumber,
+        noteAnchor: noteAnchorBeforeRender,
       };
       const incomingPages = Array.isArray(args.pages) ? args.pages : [];
       const incomingSections = Array.isArray(args.sections) ? args.sections : [];
       const nextDeckId = Number(args.deck_id || 0);
+      const isSameDeckRefresh = Boolean(nextDeckId && nextDeckId === previousDeckId && hadRenderedReader);
       if (nextDeckId && nextDeckId !== deckId) {
         hasCenteredOnEntry = false;
         pendingExplanationSaves.clear();
@@ -2474,7 +2507,12 @@
       loadReadingMode();
       const stored = readScrollState();
       const requestedSlide = Number(
-        stored?.currentSlide || args.initial_slide_number || restoreScrollAfterRender?.currentSlide || pages[0]?.slideNumber || 1
+        (isSameDeckRefresh ? restoreScrollAfterRender?.currentSlide : args.initial_slide_number)
+        || args.initial_slide_number
+        || stored?.currentSlide
+        || restoreScrollAfterRender?.currentSlide
+        || pages[0]?.slideNumber
+        || 1
       );
       const targetSlide = pageForSlide(requestedSlide) ? requestedSlide : Number(pages[0]?.slideNumber || 1);
 
@@ -2497,7 +2535,7 @@
 
       if (canPatchRenderedReader) {
         const previousPageScroll = restoreScrollAfterRender.pageScroll;
-        const previousNoteScroll = restoreScrollAfterRender.noteScroll;
+        const previousNoteAnchor = restoreScrollAfterRender.noteAnchor;
         const typesetQueue = patchRenderedReader(previousPages);
         currentSlideNumber = pageForSlide(currentSlideNumber)
           ? currentSlideNumber
@@ -2507,11 +2545,11 @@
         renderChatForPage(currentSlideNumber);
         ensureNearbyContent(currentSlideNumber);
         pageRoot.scrollTop = previousPageScroll;
-        noteRoot.scrollTop = previousNoteScroll;
+        restoreNoteAnchor(previousNoteAnchor);
         if (typesetQueue.length) {
           typesetTargets(typesetQueue).finally(() => {
             pageRoot.scrollTop = previousPageScroll;
-            noteRoot.scrollTop = previousNoteScroll;
+            restoreNoteAnchor(previousNoteAnchor);
           });
         }
         return;
@@ -2579,16 +2617,26 @@
       });
 
       document.querySelectorAll('.page').forEach(page => observer.observe(page));
-      if (pages.length) setActive(targetSlide);
+      if (pages.length) {
+        setActive(targetSlide, {
+          behavior: 'auto',
+          noteBehavior: 'auto',
+          scrollNote: !isSameDeckRefresh,
+          immediateNearbyContent: true,
+        });
+      }
       window.setTimeout(() => {
-        const state = stored || restoreScrollAfterRender;
-        if (!state) return;
-        if (readingMode === 'paged' || !stored) {
+        const storedMatchesTarget = Boolean(stored && Number(stored.currentSlide || 0) === Number(targetSlide));
+        if (readingMode === 'paged' || !storedMatchesTarget) {
           centerPage(targetSlide, 'auto');
         } else {
-          pageRoot.scrollTop = state.pageScroll || 0;
+          pageRoot.scrollTop = stored.pageScroll || 0;
         }
-        noteRoot.scrollTop = state.noteScroll || 0;
+        if (isSameDeckRefresh) {
+          restoreNoteAnchor(restoreScrollAfterRender.noteAnchor);
+        } else if (storedMatchesTarget) {
+          noteRoot.scrollTop = stored.noteScroll || 0;
+        }
         renderChatForPage(currentSlideNumber);
       }, 80);
       const hydratedBodies = Array.from(noteRoot.querySelectorAll('.note-body[data-hydrated="1"]'));
