@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -134,6 +135,12 @@ def _config_value(name: str, default: str = "") -> str:
     value = os.getenv(name)
     if value is not None:
         return value
+    secrets_paths = (
+        Path.home() / ".streamlit" / "secrets.toml",
+        Path(__file__).resolve().parent / ".streamlit" / "secrets.toml",
+    )
+    if not any(path.exists() for path in secrets_paths):
+        return default
     try:
         return str(st.secrets.get(name, default))
     except Exception:
