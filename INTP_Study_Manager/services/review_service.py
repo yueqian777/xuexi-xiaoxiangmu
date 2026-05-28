@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from db import execute_many, fetch_all, fetch_one, insert_and_get_id, managed_connection
+from db import fetch_all, fetch_one, write_transaction
 from models import REVIEW_INTERVALS
 from services.auth_service import require_login
 from services.mastery_service import apply_review_result
@@ -23,13 +23,7 @@ def create_initial_review_tasks(knowledge_id: int, start_date: str | date | None
         (user_id, knowledge_id, (base_date + timedelta(days=days)).isoformat(), stage)
         for days, stage in REVIEW_INTERVALS
     ]
-    execute_many(
-        """
-        INSERT INTO review_tasks (user_id, knowledge_id, review_date, review_stage)
-        VALUES (?, ?, ?, ?)
-        """,
-        rows,
-    )
+    _insert_review_tasks_if_missing(rows)
 
 
 def ensure_initial_review_tasks(knowledge_id: int, start_date: str | date | None = None, *, user_id: int | None = None) -> None:
@@ -96,41 +90,75 @@ def get_all_pending_review_tasks(*, user_id: int | None = None) -> list[dict]:
 
 def mark_review_result(task_id: int, result: str) -> None:
     user = require_login()
-    task = fetch_one(
-        """
-        SELECT rt.*, kc.mastery
-        FROM review_tasks rt
-        JOIN knowledge_cards kc ON kc.id = rt.knowledge_id AND kc.user_id = rt.user_id
-        WHERE rt.id = ? AND rt.user_id = ?
-        """,
-        (task_id, user.id),
-    )
-    if not task:
-        return
+    extra_review: tuple[int, int, str] | None = None
+    with write_transaction() as conn:
+        task = conn.execute(
+            """
+            SELECT rt.*, kc.mastery
+            FROM review_tasks rt
+            JOIN knowledge_cards kc ON kc.id = rt.knowledge_id AND kc.user_id = rt.user_id
+            WHERE rt.id = ? AND rt.user_id = ? AND rt.status = '待复习'
+            """,
+            (task_id, user.id),
+        ).fetchone()
+        if not task:
+            return
 
-    new_mastery = apply_review_result(int(task["mastery"]), result)
-    with managed_connection() as conn:
-        conn.execute(
-            "UPDATE review_tasks SET status = '已完成', result = ? WHERE id = ? AND user_id = ?",
+        new_mastery = apply_review_result(int(task["mastery"]), result)
+        updated = conn.execute(
+            """
+            UPDATE review_tasks
+            SET status = '已完成', result = ?
+            WHERE id = ? AND user_id = ? AND status = '待复习'
+            """,
             (result, task_id, user.id),
         )
+        if updated.rowcount != 1:
+            return
         conn.execute(
             "UPDATE knowledge_cards SET mastery = ? WHERE id = ? AND user_id = ?",
             (new_mastery, task["knowledge_id"], user.id),
         )
-
-    if result == "仍然模糊":
-        _create_extra_review(task["knowledge_id"], 2, "追加复习：2 天后", user_id=user.id)
-    elif result == "完全不会":
-        _create_extra_review(task["knowledge_id"], 1, "重点突破：1 天后", user_id=user.id)
+        if result == "仍然模糊":
+            extra_review = (int(task["knowledge_id"]), 2, "追加复习：2 天后")
+        elif result == "完全不会":
+            extra_review = (int(task["knowledge_id"]), 1, "重点突破：1 天后")
+        if extra_review:
+            knowledge_id, days, stage = extra_review
+            review_date = (date.today() + timedelta(days=days)).isoformat()
+            _insert_review_task_if_missing(conn, (user.id, knowledge_id, review_date, stage))
 
 
 def _create_extra_review(knowledge_id: int, days: int, stage: str, *, user_id: int) -> None:
     review_date = (date.today() + timedelta(days=days)).isoformat()
-    insert_and_get_id(
+    _insert_review_tasks_if_missing([(user_id, knowledge_id, review_date, stage)])
+
+
+def _insert_review_tasks_if_missing(rows: list[tuple[int, int, str, str]]) -> None:
+    if not rows:
+        return
+    with write_transaction() as conn:
+        for row in rows:
+            _insert_review_task_if_missing(conn, row)
+
+
+def _insert_review_task_if_missing(conn, row: tuple[int, int, str, str]) -> None:
+    user_id, knowledge_id, review_date, review_stage = row
+    exists = conn.execute(
+        """
+        SELECT 1
+        FROM review_tasks
+        WHERE user_id = ? AND knowledge_id = ? AND review_date = ? AND review_stage = ?
+        LIMIT 1
+        """,
+        (int(user_id), int(knowledge_id), review_date, review_stage),
+    ).fetchone()
+    if exists:
+        return
+    conn.execute(
         """
         INSERT INTO review_tasks (user_id, knowledge_id, review_date, review_stage)
         VALUES (?, ?, ?, ?)
         """,
-        (user_id, knowledge_id, review_date, stage),
+        (int(user_id), int(knowledge_id), review_date, review_stage),
     )

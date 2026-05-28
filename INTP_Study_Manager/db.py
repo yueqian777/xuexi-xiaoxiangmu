@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -9,22 +11,30 @@ from typing import Any, Iterable, Iterator
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DATABASE_PATH = DATA_DIR / "study_manager.db"
+SQLITE_TIMEOUT_SECONDS = 30
+SQLITE_BUSY_TIMEOUT_MS = SQLITE_TIMEOUT_SECONDS * 1000
+WRITE_RETRY_ATTEMPTS = 4
+_INIT_LOCK = threading.Lock()
+_INITIALIZED_DATABASE_PATH: Path | None = None
 
 
 def get_connection() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DATABASE_PATH, timeout=30)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=SQLITE_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA temp_store = MEMORY")
     return conn
 
 
 @contextmanager
-def managed_connection() -> Iterator[sqlite3.Connection]:
+def managed_connection(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
     conn = get_connection()
     try:
+        if immediate:
+            conn.execute("BEGIN IMMEDIATE")
         yield conn
         conn.commit()
     except Exception:
@@ -35,6 +45,17 @@ def managed_connection() -> Iterator[sqlite3.Connection]:
 
 
 def init_db() -> None:
+    global _INITIALIZED_DATABASE_PATH
+    if _INITIALIZED_DATABASE_PATH == DATABASE_PATH and DATABASE_PATH.exists():
+        return
+    with _INIT_LOCK:
+        if _INITIALIZED_DATABASE_PATH == DATABASE_PATH and DATABASE_PATH.exists():
+            return
+        _run_init_db()
+        _INITIALIZED_DATABASE_PATH = DATABASE_PATH
+
+
+def _run_init_db() -> None:
     with managed_connection() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         _ensure_auth_tables(conn)
@@ -336,38 +357,70 @@ def init_db() -> None:
                 ON study_sessions(user_id, subject, date DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_mainline_anchors_user_session_order
                 ON mainline_anchors(user_id, session_id, order_index ASC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_mainline_anchors_session
+                ON mainline_anchors(session_id);
             CREATE INDEX IF NOT EXISTS idx_branch_questions_user_anchor_created
                 ON branch_questions(user_id, anchor_id, created_at ASC, id ASC);
             CREATE INDEX IF NOT EXISTS idx_branch_questions_user_session_anchor
                 ON branch_questions(user_id, session_id, anchor_id);
+            CREATE INDEX IF NOT EXISTS idx_branch_questions_session
+                ON branch_questions(session_id);
+            CREATE INDEX IF NOT EXISTS idx_branch_questions_anchor
+                ON branch_questions(anchor_id);
             CREATE INDEX IF NOT EXISTS idx_knowledge_cards_user_mastery_created
                 ON knowledge_cards(user_id, mastery ASC, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_knowledge_cards_user_subject_created
                 ON knowledge_cards(user_id, subject, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_cards_user_created
+                ON knowledge_cards(user_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_knowledge_cards_user_source_session
                 ON knowledge_cards(user_id, source_session_id);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_cards_source_session
+                ON knowledge_cards(source_session_id);
             CREATE INDEX IF NOT EXISTS idx_knowledge_links_user_source_created
                 ON knowledge_links(user_id, source_knowledge_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_knowledge_links_user_target_created
                 ON knowledge_links(user_id, target_knowledge_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_links_source
+                ON knowledge_links(source_knowledge_id);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_links_target
+                ON knowledge_links(target_knowledge_id);
             CREATE INDEX IF NOT EXISTS idx_mistakes_user_knowledge_created
                 ON mistakes(user_id, knowledge_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_mistakes_knowledge
+                ON mistakes(knowledge_id);
             CREATE INDEX IF NOT EXISTS idx_mistakes_user_subject_topic_created
                 ON mistakes(user_id, subject, topic, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_mistakes_user_created
+                ON mistakes(user_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_mistakes_user_subject_cause
                 ON mistakes(user_id, subject, cause_category);
             CREATE INDEX IF NOT EXISTS idx_review_tasks_user_status_date_id
                 ON review_tasks(user_id, status, review_date ASC, id ASC);
             CREATE INDEX IF NOT EXISTS idx_review_tasks_user_knowledge_date
                 ON review_tasks(user_id, knowledge_id, review_date ASC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_review_tasks_knowledge_status_date
+                ON review_tasks(knowledge_id, status, review_date ASC, id ASC);
             CREATE INDEX IF NOT EXISTS idx_parking_lot_user_status_created
                 ON parking_lot(user_id, status, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_parking_lot_user_created
+                ON parking_lot(user_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_ppt_decks_user_created
                 ON ppt_decks(user_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_ppt_slides_user_deck_number
+                ON ppt_slides(user_id, deck_id, slide_number ASC);
+            CREATE INDEX IF NOT EXISTS idx_ppt_slides_deck
+                ON ppt_slides(deck_id);
             CREATE INDEX IF NOT EXISTS idx_slide_explanations_user_slide_created
                 ON slide_explanations(user_id, slide_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_slide_explanations_slide
+                ON slide_explanations(slide_id);
             CREATE INDEX IF NOT EXISTS idx_slide_questions_user_slide_created
                 ON slide_questions(user_id, slide_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_slide_questions_slide
+                ON slide_questions(slide_id);
+            CREATE INDEX IF NOT EXISTS idx_invites_created_by
+                ON invites(created_by);
             CREATE INDEX IF NOT EXISTS idx_daily_ai_review_plans_user_date
                 ON daily_ai_review_plans(user_id, review_date DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_api_parallel_benchmarks_provider
@@ -765,3 +818,29 @@ def insert_and_get_id(query: str, params: Iterable[Any] = ()) -> int:
     with managed_connection() as conn:
         cursor = conn.execute(query, tuple(params))
         return int(cursor.lastrowid)
+
+
+@contextmanager
+def write_transaction(*, attempts: int = WRITE_RETRY_ATTEMPTS) -> Iterator[sqlite3.Connection]:
+    conn = get_connection()
+    delay = 0.05
+    try:
+        for attempt in range(max(1, attempts)):
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                break
+            except sqlite3.OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" not in message and "busy" not in message:
+                    raise
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(delay)
+                delay *= 2
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()

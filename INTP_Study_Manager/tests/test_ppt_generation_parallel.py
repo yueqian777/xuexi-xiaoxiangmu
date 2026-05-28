@@ -468,7 +468,7 @@ class PptGenerationParallelTest(unittest.TestCase):
         self.assertEqual(task["failed"], 0)
         self.assertEqual(task["retried"], 1)
 
-    def test_failed_slide_keeps_retrying_until_success_without_user_retry_limits(self):
+    def test_failed_slide_retries_until_success_within_default_limit(self):
         task = {
             "status": "running",
             "progress": 0.0,
@@ -496,8 +496,6 @@ class PptGenerationParallelTest(unittest.TestCase):
             "related_knowledge": "",
             "user_id": 7,
             "stop_requested": False,
-            "retry_failed_pages": False,
-            "max_retries": 0,
         }
         slide = {"id": 1, "slide_number": 1, "title": "A", "slide_text": "text"}
         attempts = 0
@@ -524,6 +522,61 @@ class PptGenerationParallelTest(unittest.TestCase):
         self.assertEqual(task["status"], "completed")
         self.assertEqual(task["generated"], 1)
         self.assertEqual(task["failed"], 0)
+        self.assertEqual(task["retried"], 2)
+
+    def test_failed_slide_stops_after_max_retry_limit(self):
+        task = {
+            "status": "running",
+            "progress": 0.0,
+            "status_text": "",
+            "generated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "parallelism": 1,
+            "send_image_when_no_text": False,
+            "force_image_input": False,
+            "provider_pool": [
+                {
+                    "provider_key": "flaky",
+                    "provider_name": "Flaky Provider",
+                    "api_key": "flaky-key",
+                    "active_model": "flaky-model",
+                    "active_model_label": "Flaky Provider / flaky-model",
+                    "supports_image_input": False,
+                    "parallel_limit": 1,
+                },
+            ],
+            "max_tokens": 100,
+            "reasoning_depth": "关闭",
+            "context_by_slide": {},
+            "related_knowledge": "",
+            "user_id": 7,
+            "stop_requested": False,
+            "max_retries": 2,
+        }
+        slide = {"id": 1, "slide_number": 1, "title": "A", "slide_text": "text"}
+        attempts = 0
+
+        def fake_generate_text(prompt, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise AIServiceError("temporary failure")
+
+        with (
+            patch.object(ppt_tutor, "generate_text", side_effect=fake_generate_text),
+            patch.object(ppt_tutor, "add_slide_explanation", return_value=1) as add_slide_explanation,
+            patch.object(ppt_tutor, "_build_slide_prompt", return_value="slide-1"),
+            patch.object(ppt_tutor, "_image_paths_for_generation", return_value=[]),
+            patch.object(ppt_tutor, "_is_text_empty", return_value=False),
+            patch.object(ppt_tutor, "should_use_lightweight_explanation", return_value=False),
+        ):
+            ppt_tutor._background_generation_worker(task, {"id": 9, "title": "Deck"}, [slide])
+
+        self.assertEqual(attempts, 3)
+        self.assertEqual(add_slide_explanation.call_count, 0)
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["generated"], 0)
+        self.assertEqual(task["failed"], 1)
         self.assertEqual(task["retried"], 2)
 
 

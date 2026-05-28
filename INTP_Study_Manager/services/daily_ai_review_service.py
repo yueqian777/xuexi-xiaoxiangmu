@@ -5,13 +5,12 @@ import re
 from datetime import date, timedelta
 from typing import Any
 
-from db import execute, fetch_all, fetch_one, insert_and_get_id
+from db import execute, fetch_all, fetch_one, write_transaction
 from models import ERROR_CAUSE_CATEGORIES, REVIEW_RESULTS
 from services.ai_service import generate_text
 from services.auth_service import require_login
 from services.mastery_service import apply_review_result, clamp_mastery
 from services.prompt_service import render_template
-from services.review_service import mark_review_result
 
 MAX_DAILY_REVIEW_QUESTIONS = 6
 DEFAULT_DAILY_REVIEW_QUESTIONS = 5
@@ -156,6 +155,17 @@ def evaluate_today_ai_review(
     model: str,
     max_output_tokens: int = 2200,
 ) -> dict[str, Any]:
+    user_id = int(plan_row.get("user_id") or require_login().id)
+    if str(plan_row.get("status") or "") == "已批改":
+        stored = evaluation_payload(plan_row)
+        if stored is not None:
+            return stored
+    latest_plan = fetch_one("SELECT status, evaluation_json FROM daily_ai_review_plans WHERE id = ? AND user_id = ?", (plan_row["id"], user_id))
+    if latest_plan and str(latest_plan.get("status") or "") == "已批改":
+        stored = evaluation_payload(latest_plan)
+        if stored is not None:
+            return stored
+
     plan = json.loads(plan_row["plan_json"])
     normalized_answers = {
         question_id: answer.strip()
@@ -178,24 +188,20 @@ def evaluate_today_ai_review(
         max_output_tokens=max_output_tokens,
     )
     evaluation = _normalize_evaluation_payload(_load_json_payload(raw), plan, normalized_answers)
-    updates = _apply_evaluation_results(plan, evaluation)
-    evaluation["mastery_updates"] = updates
-    execute(
-        """
-        UPDATE daily_ai_review_plans
-        SET answers_json = ?,
-            evaluation_json = ?,
-            status = '已批改',
-            evaluated_at = datetime('now', 'localtime')
-        WHERE id = ? AND user_id = ?
-        """,
-        (
-            json.dumps(normalized_answers, ensure_ascii=False),
-            json.dumps(evaluation, ensure_ascii=False),
-            plan_row["id"],
-            plan_row.get("user_id", require_login().id),
-        ),
+    updates = _apply_evaluation_results(
+        plan,
+        evaluation,
+        answers=normalized_answers,
+        plan_id=int(plan_row["id"]),
+        user_id=user_id,
     )
+    if updates is None:
+        stored = fetch_one("SELECT evaluation_json FROM daily_ai_review_plans WHERE id = ? AND user_id = ?", (plan_row["id"], user_id))
+        stored_evaluation = evaluation_payload(stored or {})
+        if stored_evaluation is not None:
+            return stored_evaluation
+        raise RuntimeError("本次自测已经被其他会话批改，请刷新页面查看结果。")
+    evaluation["mastery_updates"] = updates
     return evaluation
 
 
@@ -381,64 +387,163 @@ def _normalize_evaluation_payload(
     }
 
 
-def _apply_evaluation_results(plan: dict[str, Any], evaluation: dict[str, Any]) -> list[dict[str, Any]]:
-    from services.auth_service import require_login
-
-    user = require_login()
-    plan_row = fetch_one(
-        "SELECT source_snapshot_json FROM daily_ai_review_plans WHERE user_id = ? AND review_date = ?",
-        (user.id, date.today().isoformat()),
-    )
-    source_items = json.loads((plan_row or {}).get("source_snapshot_json") or "[]")
-    source_by_knowledge_id = {int(item["knowledge_id"]): item for item in source_items}
+def _apply_evaluation_results(
+    plan: dict[str, Any],
+    evaluation: dict[str, Any],
+    *,
+    answers: dict[str, str] | None = None,
+    plan_id: int | None = None,
+    user_id: int | None = None,
+) -> list[dict[str, Any]] | None:
+    user_id = user_id if user_id is not None else require_login().id
+    answers = answers or {}
     grouped: dict[int, list[dict[str, Any]]] = {}
     for item in evaluation.get("evaluations", []):
         grouped.setdefault(int(item["knowledge_id"]), []).append(item)
 
     updates: list[dict[str, Any]] = []
-    for knowledge_id, items in grouped.items():
-        avg_score = round(sum(int(item["score"]) for item in items) / len(items))
-        result = _normalize_result(None, avg_score)
-        source = source_by_knowledge_id.get(knowledge_id, {})
-        before_row = fetch_one("SELECT mastery FROM knowledge_cards WHERE id = ? AND user_id = ?", (knowledge_id, user.id))
-        if not before_row:
-            continue
-        before = int(before_row["mastery"])
-        task_id = source.get("task_id")
-        if task_id:
-            mark_review_result(int(task_id), result)
+    with write_transaction() as conn:
+        if plan_id is None:
+            plan_row = conn.execute(
+                "SELECT id, status, source_snapshot_json FROM daily_ai_review_plans WHERE user_id = ? AND review_date = ?",
+                (user_id, date.today().isoformat()),
+            ).fetchone()
         else:
-            after = apply_review_result(before, result)
-            execute(
-                "UPDATE knowledge_cards SET mastery = ?, need_review = ? WHERE id = ? AND user_id = ?",
-                (after, int(after < 70 or result in {"仍然模糊", "完全不会"}), knowledge_id, user.id),
+            plan_row = conn.execute(
+                "SELECT id, status, source_snapshot_json FROM daily_ai_review_plans WHERE id = ? AND user_id = ?",
+                (int(plan_id), user_id),
+            ).fetchone()
+        if not plan_row or str(plan_row["status"] or "") == "已批改":
+            return None
+
+        source_items = json.loads((dict(plan_row).get("source_snapshot_json") or "[]"))
+        source_by_knowledge_id = {int(item["knowledge_id"]): item for item in source_items}
+
+        for knowledge_id, items in grouped.items():
+            avg_score = round(sum(int(item["score"]) for item in items) / len(items))
+            result = _normalize_result(None, avg_score)
+            source = source_by_knowledge_id.get(knowledge_id, {})
+            before_row = conn.execute(
+                "SELECT mastery FROM knowledge_cards WHERE id = ? AND user_id = ?",
+                (knowledge_id, user_id),
+            ).fetchone()
+            if not before_row:
+                continue
+            before = int(before_row["mastery"])
+            task_id = source.get("task_id")
+            if task_id:
+                after = _mark_review_result_in_transaction(conn, int(task_id), result, user_id=user_id)
+                if after is None:
+                    after_row = conn.execute(
+                        "SELECT mastery FROM knowledge_cards WHERE id = ? AND user_id = ?",
+                        (knowledge_id, user_id),
+                    ).fetchone()
+                    after = int(after_row["mastery"]) if after_row else before
+            else:
+                after = apply_review_result(before, result)
+                conn.execute(
+                    "UPDATE knowledge_cards SET mastery = ?, need_review = ? WHERE id = ? AND user_id = ?",
+                    (after, int(after < 70 or result in {"仍然模糊", "完全不会"}), knowledge_id, user_id),
+                )
+                if result == "仍然模糊":
+                    _create_extra_review_in_transaction(conn, knowledge_id, 2, "AI 追加复习：2 天后", user_id=user_id)
+                elif result == "完全不会":
+                    _create_extra_review_in_transaction(conn, knowledge_id, 1, "AI 重点突破：1 天后", user_id=user_id)
+            after_row = conn.execute(
+                "SELECT mastery FROM knowledge_cards WHERE id = ? AND user_id = ?",
+                (knowledge_id, user_id),
+            ).fetchone()
+            after = int(after_row["mastery"]) if after_row else before
+            updates.append(
+                {
+                    "knowledge_id": knowledge_id,
+                    "topic": source.get("topic") or _topic_for_plan(plan, knowledge_id),
+                    "score": avg_score,
+                    "result": result,
+                    "mastery_before": before,
+                    "mastery_after": after,
+                }
             )
-            if result == "仍然模糊":
-                _create_extra_review(knowledge_id, 2, "AI 追加复习：2 天后", user_id=user.id)
-            elif result == "完全不会":
-                _create_extra_review(knowledge_id, 1, "AI 重点突破：1 天后", user_id=user.id)
-        after_row = fetch_one("SELECT mastery FROM knowledge_cards WHERE id = ? AND user_id = ?", (knowledge_id, user.id))
-        after = int(after_row["mastery"]) if after_row else before
-        updates.append(
-            {
-                "knowledge_id": knowledge_id,
-                "topic": source.get("topic") or _topic_for_plan(plan, knowledge_id),
-                "score": avg_score,
-                "result": result,
-                "mastery_before": before,
-                "mastery_after": after,
-            }
+        evaluation["mastery_updates"] = updates
+        updated = conn.execute(
+            """
+            UPDATE daily_ai_review_plans
+            SET answers_json = ?,
+                evaluation_json = ?,
+                status = '已批改',
+                evaluated_at = datetime('now', 'localtime')
+            WHERE id = ? AND user_id = ? AND status != '已批改'
+            """,
+            (
+                json.dumps(answers, ensure_ascii=False),
+                json.dumps(evaluation, ensure_ascii=False),
+                int(plan_row["id"]),
+                user_id,
+            ),
         )
+        if updated.rowcount != 1:
+            return None
     return updates
 
 
 def _create_extra_review(knowledge_id: int, days: int, stage: str, *, user_id: int) -> None:
-    insert_and_get_id(
+    with write_transaction() as conn:
+        _create_extra_review_in_transaction(conn, knowledge_id, days, stage, user_id=user_id)
+
+
+def _mark_review_result_in_transaction(conn, task_id: int, result: str, *, user_id: int) -> int | None:
+    task = conn.execute(
+        """
+        SELECT rt.*, kc.mastery
+        FROM review_tasks rt
+        JOIN knowledge_cards kc ON kc.id = rt.knowledge_id AND kc.user_id = rt.user_id
+        WHERE rt.id = ? AND rt.user_id = ? AND rt.status = '待复习'
+        """,
+        (task_id, user_id),
+    ).fetchone()
+    if not task:
+        return None
+    after = apply_review_result(int(task["mastery"]), result)
+    updated = conn.execute(
+        """
+        UPDATE review_tasks
+        SET status = '已完成', result = ?
+        WHERE id = ? AND user_id = ? AND status = '待复习'
+        """,
+        (result, task_id, user_id),
+    )
+    if updated.rowcount != 1:
+        return None
+    conn.execute(
+        "UPDATE knowledge_cards SET mastery = ? WHERE id = ? AND user_id = ?",
+        (after, task["knowledge_id"], user_id),
+    )
+    if result == "仍然模糊":
+        _create_extra_review_in_transaction(conn, int(task["knowledge_id"]), 2, "追加复习：2 天后", user_id=user_id)
+    elif result == "完全不会":
+        _create_extra_review_in_transaction(conn, int(task["knowledge_id"]), 1, "重点突破：1 天后", user_id=user_id)
+    return after
+
+
+def _create_extra_review_in_transaction(conn, knowledge_id: int, days: int, stage: str, *, user_id: int) -> None:
+    review_date = (date.today() + timedelta(days=days)).isoformat()
+    exists = conn.execute(
+        """
+        SELECT 1
+        FROM review_tasks
+        WHERE user_id = ? AND knowledge_id = ? AND review_date = ? AND review_stage = ?
+        LIMIT 1
+        """,
+        (user_id, knowledge_id, review_date, stage),
+    ).fetchone()
+    if exists:
+        return
+    conn.execute(
         """
         INSERT INTO review_tasks (user_id, knowledge_id, review_date, review_stage)
         VALUES (?, ?, ?, ?)
         """,
-        (user_id, knowledge_id, (date.today() + timedelta(days=days)).isoformat(), stage),
+        (user_id, knowledge_id, review_date, stage),
     )
 
 

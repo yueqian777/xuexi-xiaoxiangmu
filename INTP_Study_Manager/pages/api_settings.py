@@ -92,21 +92,25 @@ def render() -> None:
     else:
         st.info("暂无 Provider。应用启动时会自动创建默认模板。")
 
-    tab_manage, tab_balance, tab_edit, tab_custom, tab_vault, tab_test, tab_help = st.tabs(
-        ["编号 / 删除", "余额查询", "编辑 Provider", "新增自定义 API", "加密 API Key", "测试调用", "填写参考"]
-    )
+    if user.role == "admin":
+        tab_manage, tab_balance, tab_edit, tab_custom, tab_vault, tab_test, tab_help = st.tabs(
+            ["编号 / 删除", "余额查询", "编辑 Provider", "新增自定义 API", "加密 API Key", "测试调用", "填写参考"]
+        )
 
-    with tab_manage:
-        _render_provider_management(providers)
+        with tab_manage:
+            _render_provider_management(providers)
 
-    with tab_balance:
-        _render_balance_query(providers)
+        with tab_balance:
+            _render_balance_query(providers)
 
-    with tab_edit:
-        _render_edit_provider(providers)
+        with tab_edit:
+            _render_edit_provider(providers)
 
-    with tab_custom:
-        _render_create_provider()
+        with tab_custom:
+            _render_create_provider()
+    else:
+        tab_vault, tab_test, tab_help = st.tabs(["加密 API Key", "测试调用", "填写参考"])
+        st.info("Provider 模板由管理员统一维护。普通用户可以在这里保存自己的加密 API Key 并测试调用。")
 
     with tab_vault:
         _render_secret_vault(providers)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Any
 
 import streamlit as st
 
-from db import execute, fetch_all, fetch_one, insert_and_get_id
+from db import execute, fetch_all, fetch_one, write_transaction
 
 CURRENT_USER_SESSION_KEY = "current_user"
 PASSWORD_SALT_PREFIX = "pbkdf2_sha256"
@@ -23,6 +24,12 @@ SENSITIVE_SESSION_PREFIXES = (
     "balance_credential_",
     "ppt_provider_",
     "test_provider_",
+    "ppt_reader_active_slide_",
+    "ppt_reader_position_last_token_",
+    "study_asset_task_",
+    "study_asset_draft_",
+    "study_asset_raw_",
+    "study_asset_meta_",
 )
 
 SENSITIVE_SESSION_KEYS = {
@@ -32,6 +39,16 @@ SENSITIVE_SESSION_KEYS = {
     "secret_vault_master_password",
     "active_api_provider_key",
     "active_api_model",
+    "active_api_max_tokens",
+    "active_api_reasoning_depth",
+    "last_provider_balance_result",
+    "ppt_reader_deck_id",
+    "ppt_generation_task",
+    "ppt_generation_last_refresh",
+    "ppt_structure_task",
+    "ppt_structure_last_refresh",
+    "ppt_study_asset_last_refresh",
+    "ppt_parallel_benchmark_results",
 }
 
 
@@ -102,36 +119,66 @@ def has_initialized_admin() -> bool:
 
 def bootstrap_admin(*, username: str, password: str, display_name: str | None = None) -> int:
     ensure_auth_tables()
-    existing = fetch_one("SELECT id FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1")
-    if existing:
-        return int(existing["id"])
+    username = username.strip()
     if not username.strip() or not password:
         raise ValueError("初始管理员账号和密码不能为空。")
-    return create_user(username.strip(), password, display_name=display_name or username.strip(), role="admin")
+    password_hash = hash_password(password)
+    with write_transaction() as conn:
+        existing = conn.execute("SELECT id FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1").fetchone()
+        if existing:
+            return int(existing["id"])
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO users (username, display_name, password_hash, role)
+                VALUES (?, ?, ?, 'admin')
+                """,
+                (username, display_name or username, password_hash),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("用户名已存在。") from exc
+        return int(cursor.lastrowid)
 
 
 def initialize_first_admin(username: str, password: str, *, display_name: str | None = None) -> int:
     ensure_auth_tables()
-    if has_initialized_admin():
-        raise ValueError("系统已经存在可用管理员，无需再次初始化。")
     username = username.strip()
     if not username:
         raise ValueError("管理员用户名不能为空。")
     if not password:
         raise ValueError("管理员密码不能为空。")
-    row = fetch_one("SELECT id FROM users WHERE username = ?", (username,))
     password_hash = hash_password(password)
-    if row:
-        execute(
+    with write_transaction() as conn:
+        existing_admin = conn.execute(
             """
-            UPDATE users
-            SET display_name = ?, password_hash = ?, role = 'admin', is_active = 1, updated_at = datetime('now', 'localtime')
-            WHERE id = ?
+            SELECT id
+            FROM users
+            WHERE role = 'admin' AND is_active = 1 AND TRIM(COALESCE(password_hash, '')) != ''
+            ORDER BY id ASC LIMIT 1
+            """
+        ).fetchone()
+        if existing_admin:
+            raise ValueError("系统已经存在可用管理员，无需再次初始化。")
+
+        row = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        if row:
+            conn.execute(
+                """
+                UPDATE users
+                SET display_name = ?, password_hash = ?, role = 'admin', is_active = 1, updated_at = datetime('now', 'localtime')
+                WHERE id = ?
+                """,
+                (display_name or username, password_hash, int(row["id"])),
+            )
+            return int(row["id"])
+        cursor = conn.execute(
+            """
+            INSERT INTO users (username, display_name, password_hash, role)
+            VALUES (?, ?, ?, 'admin')
             """,
-            (display_name or username, password_hash, int(row["id"])),
+            (username, display_name or username, password_hash),
         )
-        return int(row["id"])
-    return create_user(username, password, display_name=display_name or username, role="admin")
+        return int(cursor.lastrowid)
 
 
 def create_user(username: str, password: str, *, display_name: str | None = None, role: str = "user", upload_quota_bytes: int = 536870912) -> int:
@@ -141,16 +188,19 @@ def create_user(username: str, password: str, *, display_name: str | None = None
         raise ValueError("用户名不能为空。")
     if not password:
         raise ValueError("密码不能为空。")
-    if fetch_one("SELECT id FROM users WHERE username = ?", (username,)):
-        raise ValueError("用户名已存在。")
     password_hash = hash_password(password)
-    return insert_and_get_id(
-        """
-        INSERT INTO users (username, display_name, password_hash, role, upload_quota_bytes)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (username, display_name or username, password_hash, role, int(upload_quota_bytes)),
-    )
+    with write_transaction() as conn:
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO users (username, display_name, password_hash, role, upload_quota_bytes)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (username, display_name or username, password_hash, role, int(upload_quota_bytes)),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("用户名已存在。") from exc
+        return int(cursor.lastrowid)
 
 
 def create_invite(*, role: str = "user", created_by: int | None = None, max_uses: int = 1, expires_in_days: int = 7, upload_quota_bytes: int = 536870912) -> str:
@@ -297,25 +347,21 @@ def set_invite_active(code: str, is_active: bool) -> None:
 
 def use_invite(code: str) -> dict[str, Any]:
     ensure_auth_tables()
-    invite = fetch_one("SELECT * FROM invites WHERE code = ?", (code.strip(),))
-    if not invite:
-        raise ValueError("邀请码不存在。")
-    if not int(invite["is_active"]):
-        raise ValueError("邀请码已停用。")
-    if invite["expires_at"] and datetime.fromisoformat(str(invite["expires_at"])) < datetime.now():
-        raise ValueError("邀请码已过期。")
-    if int(invite["used_count"] or 0) >= int(invite["max_uses"] or 1):
-        raise ValueError("邀请码使用次数已满。")
-    execute(
-        """
-        UPDATE invites
-        SET used_count = used_count + 1,
-            updated_at = datetime('now', 'localtime')
-        WHERE code = ?
-        """,
-        (invite["code"],),
-    )
-    return invite
+    with write_transaction() as conn:
+        invite = conn.execute("SELECT * FROM invites WHERE code = ?", (code.strip(),)).fetchone()
+        if not invite:
+            raise ValueError("邀请码不存在。")
+        _validate_invite(dict(invite))
+        conn.execute(
+            """
+            UPDATE invites
+            SET used_count = used_count + 1,
+                updated_at = datetime('now', 'localtime')
+            WHERE code = ?
+            """,
+            (invite["code"],),
+        )
+        return dict(invite)
 
 
 def _clear_sensitive_session_state() -> None:
@@ -359,17 +405,50 @@ def login(username: str, password: str) -> CurrentUser:
 
 def register_by_invite(username: str, password: str, invite_code: str, *, display_name: str | None = None) -> CurrentUser:
     _clear_sensitive_session_state()
-    invite = use_invite(invite_code)
-    user_id = create_user(
-        username,
-        password,
-        display_name=display_name or username.strip(),
-        role=str(invite["role"] or "user"),
-        upload_quota_bytes=int(invite.get("upload_quota_bytes") or 536870912),
-    )
-    user = get_user(user_id)
-    if not user:
-        raise ValueError("用户创建失败。")
+    ensure_auth_tables()
+    username = username.strip()
+    if not username:
+        raise ValueError("用户名不能为空。")
+    if not password:
+        raise ValueError("密码不能为空。")
+    password_hash = hash_password(password)
+    with write_transaction() as conn:
+        invite_row = conn.execute("SELECT * FROM invites WHERE code = ?", (invite_code.strip(),)).fetchone()
+        if not invite_row:
+            raise ValueError("邀请码不存在。")
+        invite = dict(invite_row)
+        _validate_invite(invite)
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO users (username, display_name, password_hash, role, upload_quota_bytes)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    username,
+                    display_name or username,
+                    password_hash,
+                    str(invite["role"] or "user"),
+                    int(invite.get("upload_quota_bytes") or 536870912),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("用户名已存在。") from exc
+        conn.execute(
+            """
+            UPDATE invites
+            SET used_count = used_count + 1,
+                updated_at = datetime('now', 'localtime')
+            WHERE code = ?
+            """,
+            (invite["code"],),
+        )
+        user = CurrentUser(
+            id=int(cursor.lastrowid),
+            username=username,
+            display_name=display_name or username,
+            role=str(invite["role"] or "user"),
+        )
     st.session_state[CURRENT_USER_SESSION_KEY] = {
         "id": user.id,
         "username": user.username,
@@ -410,6 +489,15 @@ def require_admin() -> CurrentUser:
 
 def logout() -> None:
     _clear_sensitive_session_state()
+
+
+def _validate_invite(invite: dict[str, Any]) -> None:
+    if not int(invite["is_active"]):
+        raise ValueError("邀请码已停用。")
+    if invite["expires_at"] and datetime.fromisoformat(str(invite["expires_at"])) < datetime.now():
+        raise ValueError("邀请码已过期。")
+    if int(invite["used_count"] or 0) >= int(invite["max_uses"] or 1):
+        raise ValueError("邀请码使用次数已满。")
 
 
 def get_user(user_id: int) -> CurrentUser | None:
