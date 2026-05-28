@@ -14,6 +14,24 @@ from services.auth_service import require_login
 
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_PROVIDERS_SEEDED_KEY = "default_api_providers_seeded"
+MIMO_TOKEN_PLAN_PROVIDER_KEY = "mimo-token-plan"
+MIMO_TOKEN_PLAN_PROVIDER = {
+    "name": "MIMO Token Plan",
+    "provider_type": "openai_chat",
+    "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+    "model": "mimo-v2.5-pro",
+    "api_key_env": "MIMO_TOKEN_PLAN_API_KEY",
+    "auth_type": "api-key",
+    "extra_headers_json": "{}",
+    "request_template_json": "",
+    "response_path": "choices.0.message.content",
+}
+MIMO_TOKEN_PLAN_MODELS = [
+    "mimo-v2.5-pro",
+    "mimo-v2.5",
+    "mimo-v2-pro",
+    "mimo-v2-omni",
+]
 
 
 def _user_setting_key(key: str, user_id: int) -> str:
@@ -119,6 +137,7 @@ DEFAULT_PROVIDERS = [
         "request_template_json": "",
         "response_path": "choices.0.message.content",
     },
+    MIMO_TOKEN_PLAN_PROVIDER,
     # === 2026年新增主流 Provider ===
     {
         "name": "智谱 AI (GLM)",
@@ -270,10 +289,12 @@ def ensure_default_api_providers() -> None:
     seeded = fetch_one("SELECT value FROM app_settings WHERE key = ?", (DEFAULT_PROVIDERS_SEEDED_KEY,))
     existing = fetch_one("SELECT COUNT(*) AS count FROM api_providers")
     if seeded and seeded["value"] == "1":
+        _ensure_default_provider_backfills()
         normalize_api_provider_sort_orders()
         return
 
     if existing and int(existing["count"] or 0) > 0:
+        _ensure_default_provider_backfills()
         _mark_default_api_providers_seeded()
         normalize_api_provider_sort_orders()
         return
@@ -549,6 +570,41 @@ def _mark_default_api_providers_seeded() -> None:
     )
 
 
+def _ensure_default_provider_backfills() -> None:
+    _ensure_default_provider_row(MIMO_TOKEN_PLAN_PROVIDER_KEY, MIMO_TOKEN_PLAN_PROVIDER)
+
+
+def _ensure_default_provider_row(provider_key: str, provider: dict[str, str]) -> None:
+    existing = fetch_one("SELECT provider_key FROM api_providers WHERE provider_key = ?", (provider_key,))
+    if existing:
+        return
+
+    max_order_row = fetch_one("SELECT COALESCE(MAX(sort_order), 0) AS max_order FROM api_providers")
+    sort_order = int((max_order_row or {}).get("max_order") or 0) + 1
+    execute(
+        """
+        INSERT INTO api_providers (
+            provider_key, name, provider_type, base_url, model, api_key_env, auth_type,
+            extra_headers_json, request_template_json, response_path, enabled, sort_order
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        """,
+        (
+            provider_key,
+            provider["name"],
+            provider["provider_type"],
+            provider["base_url"],
+            provider["model"],
+            provider["api_key_env"],
+            provider["auth_type"],
+            provider["extra_headers_json"],
+            provider["request_template_json"],
+            provider["response_path"],
+            sort_order,
+        ),
+    )
+
+
 def generate_text(
     prompt: str,
     *,
@@ -558,6 +614,7 @@ def generate_text(
     max_output_tokens: int = 1600,
     image_paths: list[str] | None = None,
     reasoning_depth: str | None = None,
+    request_timeout: int | float = 120,
 ) -> str:
     provider = get_api_provider(provider_key)
     model = (model_override or provider.model or DEFAULT_MODEL).strip()
@@ -570,8 +627,10 @@ def generate_text(
             url=request["url"],
             headers=request["headers"],
             json=request["json"],
-            timeout=120,
+            timeout=request_timeout,
         )
+    except requests.Timeout as exc:
+        raise AIServiceError(f"API 请求失败：{exc}", category="timeout") from exc
     except requests.RequestException as exc:
         raise AIServiceError(f"API 请求失败：{exc}") from exc
 
@@ -849,6 +908,9 @@ def _build_request(
             "temperature": 0.2,
             "max_tokens": max_output_tokens,
         }
+        if provider.provider_key == MIMO_TOKEN_PLAN_PROVIDER_KEY:
+            body.pop("max_tokens", None)
+            body["max_completion_tokens"] = max_output_tokens
         if reasoning_depth and reasoning_depth != "关闭":
             body["reasoning_effort"] = _reasoning_effort_value(reasoning_depth)
     elif provider.provider_type == "anthropic_messages":
@@ -999,6 +1061,8 @@ def _list_models_impl(provider: dict[str, Any], api_key: str | None) -> list[str
     base_url = (provider.get("base_url") or "").strip().rstrip("/")
     key = _resolve_api_key_for_list(provider, api_key)
 
+    if provider.get("provider_key") == MIMO_TOKEN_PLAN_PROVIDER_KEY:
+        return MIMO_TOKEN_PLAN_MODELS
     if provider_type in ("openai_responses", "openai_chat"):
         return _list_openai_models(base_url, key)
     if provider_type == "anthropic_messages":

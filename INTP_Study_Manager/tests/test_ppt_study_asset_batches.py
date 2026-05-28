@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import patch
 
 from pages import ppt_tutor
+from services.ai_service import AIServiceError
 
 
 class PptStudyAssetBatchTest(unittest.TestCase):
@@ -86,6 +88,111 @@ class PptStudyAssetBatchTest(unittest.TestCase):
         self.assertEqual(report[0]["状态"], "已覆盖")
         self.assertEqual(report[1]["状态"], "需补充")
         self.assertEqual(report[1]["截断"], "是")
+
+    def test_background_study_asset_worker_generates_draft(self):
+        task = {
+            "status": "running",
+            "progress": 0.0,
+            "range_label": "全部目录块",
+            "batches": [
+                {
+                    "range_label": "目录块 1",
+                    "reading_content": "内容 A",
+                    "used_pages": 2,
+                    "truncated": False,
+                },
+                {
+                    "range_label": "目录块 2",
+                    "reading_content": "内容 B",
+                    "used_pages": 1,
+                    "truncated": False,
+                },
+            ],
+            "provider_key": "provider-a",
+            "api_key": "sk-test",
+            "active_model": "model-a",
+            "max_tokens": 2048,
+            "reasoning_depth": "low",
+        }
+        deck = {"title": "讲义", "subject": "数学"}
+        outputs = [
+            """
+            {
+              "study_session": {"summary": "第一块", "mastery": 70},
+              "knowledge_cards": [{"subject": "数学", "topic": "A", "one_sentence": "A"}]
+            }
+            """,
+            """
+            {
+              "study_session": {"summary": "第二块", "mastery": 65},
+              "knowledge_cards": [{"subject": "数学", "topic": "B", "one_sentence": "B"}]
+            }
+            """,
+        ]
+
+        with (
+            patch.object(ppt_tutor, "generate_text", side_effect=outputs) as generate_text,
+            patch.object(ppt_tutor, "render_template", side_effect=lambda _name, context: context["reading_content"]),
+        ):
+            ppt_tutor._background_study_asset_worker(task, deck)
+
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["progress"], 1.0)
+        self.assertEqual(task["completed_batches"], 2)
+        self.assertEqual(len(task["raw_outputs"]), 2)
+        self.assertEqual(len(task["draft"]["knowledge_cards"]), 2)
+        self.assertEqual(task["draft"]["study_session"]["mastery"], 65)
+        self.assertEqual(generate_text.call_count, 2)
+
+    def test_background_study_asset_worker_retries_timeout_batch(self):
+        task = {
+            "status": "running",
+            "progress": 0.0,
+            "range_label": "全部目录块",
+            "batches": [
+                {
+                    "range_label": "目录块 1",
+                    "reading_content": "内容 A",
+                    "used_pages": 2,
+                    "truncated": False,
+                }
+            ],
+            "provider_key": "provider-a",
+            "api_key": "sk-test",
+            "active_model": "model-a",
+            "max_tokens": 2048,
+            "reasoning_depth": "low",
+        }
+        deck = {"title": "讲义", "subject": "数学"}
+        calls = []
+
+        def fake_generate_text(*_args, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise AIServiceError(
+                    "API 请求失败：HTTPConnectionPool(host='localhost', port=8317): Read timed out. (read timeout=120)",
+                    category="timeout",
+                )
+            return """
+            {
+              "study_session": {"summary": "重试成功", "mastery": 72},
+              "knowledge_cards": [{"subject": "数学", "topic": "A", "one_sentence": "A"}]
+            }
+            """
+
+        with (
+            patch.object(ppt_tutor, "generate_text", side_effect=fake_generate_text),
+            patch.object(ppt_tutor, "render_template", side_effect=lambda _name, context: context["reading_content"]),
+            patch.object(ppt_tutor.time, "sleep") as sleep,
+        ):
+            ppt_tutor._background_study_asset_worker(task, deck)
+
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["completed_batches"], 1)
+        self.assertEqual(task["retried"], 1)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(call["request_timeout"] == ppt_tutor.PPT_STUDY_ASSET_REQUEST_TIMEOUT_SECONDS for call in calls))
+        sleep.assert_called_once()
 
 
 if __name__ == "__main__":

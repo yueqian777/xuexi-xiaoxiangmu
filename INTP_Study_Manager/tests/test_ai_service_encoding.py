@@ -3,6 +3,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 from requests import Response
 
@@ -11,7 +12,17 @@ if "streamlit" not in sys.modules and importlib.util.find_spec("streamlit") is N
     streamlit_stub.session_state = {}
     sys.modules["streamlit"] = streamlit_stub
 
-from services.ai_service import _extract_text_output, _parse_response_json, _repair_utf8_mojibake
+from services.ai_service import (
+    AIProvider,
+    MIMO_TOKEN_PLAN_PROVIDER_KEY,
+    MIMO_TOKEN_PLAN_MODELS,
+    _build_request,
+    _extract_text_output,
+    _parse_response_json,
+    _repair_utf8_mojibake,
+    generate_text,
+    list_available_models,
+)
 
 
 class AIServiceEncodingTest(unittest.TestCase):
@@ -86,6 +97,65 @@ class AIServiceEncodingTest(unittest.TestCase):
 
         self.assertEqual(output, "目录 JSON")
         self.assertEqual(path, "output")
+
+    def test_mimo_token_plan_request_uses_api_key_header(self):
+        provider = AIProvider(
+            provider_key=MIMO_TOKEN_PLAN_PROVIDER_KEY,
+            name="MIMO Token Plan",
+            provider_type="openai_chat",
+            base_url="https://token-plan-cn.xiaomimimo.com/v1",
+            model="mimo-v2.5-pro",
+            api_key_env="MIMO_TOKEN_PLAN_API_KEY",
+            auth_type="api-key",
+            extra_headers_json="{}",
+            request_template_json="",
+            response_path="choices.0.message.content",
+        )
+
+        request = _build_request(provider, "ping", "tp-test", "mimo-v2.5-pro", 64, [])
+
+        self.assertEqual(request["url"], "https://token-plan-cn.xiaomimimo.com/v1/chat/completions")
+        self.assertEqual(request["headers"].get("api-key"), "tp-test")
+        self.assertNotIn("Authorization", request["headers"])
+        self.assertEqual(request["json"]["model"], "mimo-v2.5-pro")
+        self.assertEqual(request["json"]["max_completion_tokens"], 64)
+        self.assertNotIn("max_tokens", request["json"])
+
+    def test_mimo_token_plan_models_are_local_known_models(self):
+        provider = {
+            "provider_key": MIMO_TOKEN_PLAN_PROVIDER_KEY,
+            "provider_type": "openai_chat",
+            "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+            "api_key_env": "MIMO_TOKEN_PLAN_API_KEY",
+        }
+
+        self.assertEqual(list_available_models(provider, api_key=""), MIMO_TOKEN_PLAN_MODELS)
+
+    def test_generate_text_allows_long_running_request_timeout_override(self):
+        provider = AIProvider(
+            provider_key="local",
+            name="Local",
+            provider_type="openai_chat",
+            base_url="http://localhost:8317/v1",
+            model="model-a",
+            api_key_env="",
+            auth_type="none",
+            extra_headers_json="{}",
+            request_template_json="",
+            response_path="choices.0.message.content",
+        )
+        response = Response()
+        response.status_code = 200
+        response._content = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+
+        with (
+            patch("services.ai_service.get_api_provider", return_value=provider),
+            patch("services.ai_service.requests.request", return_value=response) as request,
+        ):
+            output = generate_text("ping", request_timeout=300)
+
+        self.assertEqual(output, "ok")
+        self.assertEqual(request.call_args.kwargs["timeout"], 300)
 
 
 if __name__ == "__main__":

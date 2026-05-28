@@ -32,6 +32,7 @@
       --soft-green: #e9f9f2;
       --soft-blue: #edf8ff;
       --shadow: rgba(17, 89, 105, 0.13);
+      --resize-handle-width: 14px;
     }
     * { box-sizing: border-box; }
     html {
@@ -265,8 +266,46 @@
     .grid {
       height: calc(100% - 58px);
       display: grid;
-      grid-template-columns: minmax(260px, 1.15fr) 8px minmax(300px, 0.85fr) 8px minmax(330px, 0.55fr);
+      grid-template-columns: minmax(260px, 1.15fr) var(--resize-handle-width) minmax(300px, 0.85fr) var(--resize-handle-width) minmax(330px, 0.55fr);
       transition: grid-template-columns .14s ease;
+    }
+    .resize-handle {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: var(--resize-handle-width);
+      height: 100%;
+      background: linear-gradient(180deg, rgba(233, 249, 242, 0.55), rgba(237, 248, 255, 0.72));
+      cursor: col-resize;
+      cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 16 24'%3E%3Cpath d='M6 3v18M10 3v18' stroke='%23087b70' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E") 8 12, col-resize;
+      touch-action: none;
+      user-select: none;
+      z-index: 2;
+    }
+    body.reader-resizing,
+    body.reader-resizing * {
+      cursor: col-resize !important;
+      cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 16 24'%3E%3Cpath d='M6 3v18M10 3v18' stroke='%23087b70' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E") 8 12, col-resize !important;
+    }
+    .resize-handle::before {
+      content: "";
+      width: 7px;
+      height: 46px;
+      border-left: 2px solid rgba(24, 165, 143, 0.42);
+      border-right: 2px solid rgba(24, 165, 143, 0.42);
+      border-radius: 4px;
+      transition: border-color .15s, height .15s, background .15s;
+    }
+    .resize-handle:hover::before,
+    .resize-handle.dragging::before {
+      height: 58px;
+      border-color: var(--accent);
+      background: rgba(24, 165, 143, 0.08);
+    }
+    .resize-handle:hover,
+    .resize-handle.dragging {
+      background: linear-gradient(180deg, rgba(226, 250, 241, 0.92), rgba(232, 247, 255, 0.94));
     }
     .pages, .notes {
       height: 100%;
@@ -391,10 +430,12 @@
     }
     .note-header {
       display: flex;
-      align-items: flex-start;
+      align-items: center;
       justify-content: space-between;
-      gap: 12px;
-      margin: 0 0 10px;
+      gap: 14px;
+      margin: 0 0 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(203, 229, 234, 0.72);
     }
     .note h3 {
       margin: 0 0 10px;
@@ -402,45 +443,26 @@
       font-size: 18px;
     }
     .note-header h3 {
+      flex: 1 1 auto;
+      min-width: 0;
       margin: 0;
+      line-height: 1.38;
+      overflow-wrap: anywhere;
     }
     .note-actions,
     .note-edit-actions {
       display: flex;
-      flex-wrap: wrap;
       align-items: center;
-      justify-content: flex-end;
       gap: 7px;
     }
-    .note-links {
-      display: inline-flex;
-      flex-wrap: wrap;
-      align-items: center;
+    .note-actions {
+      flex: 0 0 auto;
       justify-content: flex-end;
-      gap: 6px;
-    }
-    .note-bilink {
-      display: inline-flex;
-      align-items: center;
-      min-height: 25px;
-      padding: 4px 8px;
-      border: 1px solid #b9dde6;
-      border-radius: 999px;
-      background: #eef8ff;
-      color: #1f6b86;
-      font-size: 12px;
-      font-weight: 900;
-      line-height: 1.2;
-      text-decoration: none;
       white-space: nowrap;
     }
-    .note-bilink.tag {
-      background: #f3fffb;
-      color: #087b70;
-    }
-    .note-bilink:hover {
-      border-color: var(--accent);
-      background: var(--soft-green);
+    .note-edit-actions {
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
     .note-action-button,
     .note-refresh {
@@ -517,6 +539,12 @@
     .note-body {
       overflow-wrap: anywhere;
     }
+    .note-body > :first-child {
+      margin-top: 0;
+    }
+    .note-body > :last-child {
+      margin-bottom: 0;
+    }
     .note-body.lazy {
       min-height: 120px;
       display: flex;
@@ -565,6 +593,9 @@
       border-radius: 3px;
       background: #fff09a;
       box-shadow: 0 0 0 1px rgba(219, 165, 0, 0.2);
+    }
+    .reader-source-fragment {
+      display: contents;
     }
     .note-body h1,
     .note-body h2,
@@ -1075,6 +1106,7 @@
     const pendingTypesetTargets = new Set();
     const hydratingNotePromises = new Map();
     const pendingExplanationSaves = new Map();
+    const noteBodySourceMaps = new WeakMap();
     const PENDING_SAVE_TTL_MS = 30000;
     const VIEWPORT_ANCHOR_MS = 1400;
     const NOTE_HYDRATE_RADIUS = 1;
@@ -1132,6 +1164,59 @@
 
     function normalizeMathDelimiters(value) {
       return String(value ?? '').replace(/\\\\([()[\]])/g, '\\$1');
+    }
+
+    function findMathSegmentAt(source, index) {
+      const text = String(source ?? '');
+      if (text.startsWith('$$', index)) {
+        const end = findUnescaped(text, '$$', index + 2);
+        if (end >= 0) {
+          return {
+            start: index,
+            end: end + 2,
+            contentStart: index + 2,
+            contentEnd: end,
+            segment: `\\[${text.slice(index + 2, end)}\\]`,
+          };
+        }
+      }
+      if (text.startsWith('\\[', index)) {
+        const end = findUnescaped(text, '\\]', index + 2);
+        if (end >= 0) {
+          return {
+            start: index,
+            end: end + 2,
+            contentStart: index + 2,
+            contentEnd: end,
+            segment: text.slice(index, end + 2),
+          };
+        }
+      }
+      if (text.startsWith('\\(', index)) {
+        const end = findUnescaped(text, '\\)', index + 2);
+        if (end >= 0) {
+          return {
+            start: index,
+            end: end + 2,
+            contentStart: index + 2,
+            contentEnd: end,
+            segment: text.slice(index, end + 2),
+          };
+        }
+      }
+      if (text[index] === '$' && text[index + 1] !== '$') {
+        const end = findUnescaped(text, '$', index + 1);
+        if (end >= 0) {
+          return {
+            start: index,
+            end: end + 1,
+            contentStart: index + 1,
+            contentEnd: end,
+            segment: `\\(${text.slice(index + 1, end)}\\)`,
+          };
+        }
+      }
+      return null;
     }
 
     function protectMarkdownCodeSegments(value) {
@@ -1209,33 +1294,10 @@
       };
 
       while (index < source.length) {
-        if (source.startsWith('$$', index)) {
-          const end = findUnescaped(source, '$$', index + 2);
-          if (end >= 0) {
-            pushSegment(end + 2, `\\[${source.slice(index + 2, end)}\\]`);
-            continue;
-          }
-        }
-        if (source.startsWith('\\[', index)) {
-          const end = findUnescaped(source, '\\]', index + 2);
-          if (end >= 0) {
-            pushSegment(end + 2, source.slice(index, end + 2));
-            continue;
-          }
-        }
-        if (source.startsWith('\\(', index)) {
-          const end = findUnescaped(source, '\\)', index + 2);
-          if (end >= 0) {
-            pushSegment(end + 2, source.slice(index, end + 2));
-            continue;
-          }
-        }
-        if (source[index] === '$' && source[index + 1] !== '$') {
-          const end = findUnescaped(source, '$', index + 1);
-          if (end >= 0) {
-            pushSegment(end + 1, `\\(${source.slice(index + 1, end)}\\)`);
-            continue;
-          }
+        const math = findMathSegmentAt(source, index);
+        if (math) {
+          pushSegment(math.end, math.segment);
+          continue;
         }
         protectedSource += source[index];
         index += 1;
@@ -1346,6 +1408,87 @@
       );
     }
 
+    function isGeneratedExplanationPreambleLine(line) {
+      const text = String(line ?? '').trim();
+      if (!text.startsWith('[[')) return false;
+      return /^\[\[\s*第\s*\d+\s*页\s*\]\](?:\s+\[\[\s*标签\s*:[^\]]+\]\])?\s*[：:]\s*\S+/.test(text);
+    }
+
+    function displayExplanationSource(value) {
+      return displayExplanationSourceInfo(value).displaySource;
+    }
+
+    function displayExplanationSourceInfo(value) {
+      const rawSource = String(value ?? '');
+      const source = rawSource.replace(/^\uFEFF/, '');
+      const baseOffset = rawSource.length - source.length;
+      const identityMap = Array.from({ length: source.length }, (_, index) => index + baseOffset);
+      const lines = [];
+      let offset = 0;
+      while (offset < source.length) {
+        let contentEnd = offset;
+        while (contentEnd < source.length && source[contentEnd] !== '\n' && source[contentEnd] !== '\r') {
+          contentEnd += 1;
+        }
+        let nextOffset = contentEnd;
+        if (source[nextOffset] === '\r' && source[nextOffset + 1] === '\n') {
+          nextOffset += 2;
+        } else if (source[nextOffset] === '\n' || source[nextOffset] === '\r') {
+          nextOffset += 1;
+        }
+        lines.push({
+          text: source.slice(offset, contentEnd),
+          start: offset,
+          contentEnd,
+          end: nextOffset,
+        });
+        offset = nextOffset;
+      }
+      if (!lines.length) {
+        return {
+          displaySource: source,
+          displayToRaw: identityMap,
+          removedPreamble: false,
+        };
+      }
+      const firstContentIndex = lines.findIndex(line => line.text.trim());
+      if (firstContentIndex < 0 || !isGeneratedExplanationPreambleLine(lines[firstContentIndex].text)) {
+        return {
+          displaySource: source,
+          displayToRaw: identityMap,
+          removedPreamble: false,
+        };
+      }
+      const removed = new Set([firstContentIndex]);
+      let blankIndex = firstContentIndex + 1;
+      while (blankIndex < lines.length && !lines[blankIndex].text.trim()) {
+        removed.add(blankIndex);
+        blankIndex += 1;
+      }
+      const displayParts = [];
+      const displayToRaw = [];
+      lines.forEach((line, lineIndex) => {
+        if (removed.has(lineIndex)) return;
+        if (displayParts.length) {
+          displayParts.push('\n');
+          displayToRaw.push(baseOffset + Math.max(0, line.start - 1));
+        }
+        for (let charIndex = 0; charIndex < line.text.length; charIndex += 1) {
+          displayParts.push(line.text[charIndex]);
+          displayToRaw.push(baseOffset + line.start + charIndex);
+        }
+      });
+      return {
+        displaySource: displayParts.join(''),
+        displayToRaw,
+        removedPreamble: true,
+      };
+    }
+
+    function renderExplanationMarkdown(value) {
+      return renderMarkdown(displayExplanationSource(value));
+    }
+
     function connectedTypesetTargets(targets) {
       const seen = new Set();
       return (Array.isArray(targets) ? targets : [targets])
@@ -1400,7 +1543,10 @@
             console.error(error);
           }
           return window.MathJax.typesetPromise(freshTargets)
-            .then(() => true)
+            .then(() => {
+              applyMarkdownSourceMapsForBodies(freshTargets);
+              return true;
+            })
             .catch(error => {
               console.error(error);
               return false;
@@ -1581,7 +1727,7 @@
     function applyLayoutState() {
       if (!readerGrid) return;
       const chatColumn = chatCollapsed ? '48px' : `minmax(330px, ${layoutState.chat}fr)`;
-      readerGrid.style.gridTemplateColumns = `minmax(260px, ${layoutState.pages}fr) 8px minmax(300px, ${layoutState.notes}fr) 8px ${chatColumn}`;
+      readerGrid.style.gridTemplateColumns = `minmax(260px, ${layoutState.pages}fr) var(--resize-handle-width) minmax(300px, ${layoutState.notes}fr) var(--resize-handle-width) ${chatColumn}`;
       canvasChat.classList.toggle('collapsed', chatCollapsed);
       if (toggleCanvasButton) toggleCanvasButton.textContent = chatCollapsed ? '展开' : '收起';
     }
@@ -1721,7 +1867,7 @@
         start: { ...layoutState },
       };
       handle.classList.add('dragging');
-      document.body.style.cursor = 'col-resize';
+      document.body.classList.add('reader-resizing');
       document.body.style.userSelect = 'none';
     }
 
@@ -1745,7 +1891,7 @@
       if (!activeResize) return;
       activeResize.handle.classList.remove('dragging');
       activeResize = null;
-      document.body.style.cursor = '';
+      document.body.classList.remove('reader-resizing');
       document.body.style.userSelect = '';
       saveLayoutState();
     }
@@ -1808,7 +1954,7 @@
 
     function renderNoteBody(page, hydrate = false) {
       if (hydrate) {
-        return `<div class="note-body" data-hydrated="1">${renderMarkdown(page.explanation)}</div>`;
+        return `<div class="note-body" data-hydrated="1">${renderExplanationMarkdown(page.explanation)}</div>`;
       }
       return '<div class="note-body lazy" data-hydrated="0">讲解按需渲染</div>';
     }
@@ -1822,12 +1968,15 @@
       const hydrateKey = Number(slideNumber);
       const pending = hydratingNotePromises.get(hydrateKey);
       if (pending?.body === body) return pending.promise;
-      body.innerHTML = renderMarkdown(page.explanation);
+      body.innerHTML = renderExplanationMarkdown(page.explanation);
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (editor) editor.value = String(page.explanation || '');
       const promise = typesetTargets([body])
-        .then(() => true)
+        .then(typesetDone => {
+          if (typesetDone !== false) applyMarkdownSourceMap(body, page.explanation);
+          return true;
+        })
         .finally(() => {
           const latest = hydratingNotePromises.get(hydrateKey);
           if (latest?.body === body) hydratingNotePromises.delete(hydrateKey);
@@ -1948,15 +2097,6 @@
       return title ? `第 ${page.slideNumber} 页：${title}` : `第 ${page.slideNumber} 页讲解`;
     }
 
-    function renderNoteBiLinks(page) {
-      const pageLabel = `第 ${Number(page.slideNumber)} 页`;
-      const tag = String(page.pageType || '未标注').trim() || '未标注';
-      return `
-        <a class="note-bilink page" href="#page-${Number(page.slideNumber)}" data-page-link="${Number(page.slideNumber)}">[[${escapeHtml(pageLabel)}]]</a>
-        <a class="note-bilink tag" href="#tag-${encodeURIComponent(tag)}" data-tag-link="${escapeHtml(tag)}">[[标签:${escapeHtml(tag)}]]</a>
-      `;
-    }
-
     function applyPendingExplanationOverrides(nextPages) {
       const now = Date.now();
       return nextPages.map(page => {
@@ -2001,17 +2141,20 @@
       const previousNoteScroll = noteRoot.scrollTop;
       const previousPageScroll = pageRoot.scrollTop;
       page.explanation = explanation;
-      body.innerHTML = renderMarkdown(explanation);
+      body.innerHTML = renderExplanationMarkdown(explanation);
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (editor) editor.value = explanation;
       if (!options.keepEditing) note.classList.remove('editing');
 
-      return typesetTargets([body]).finally(() => {
+      return typesetTargets([body]).then(typesetDone => {
+        if (typesetDone !== false) applyMarkdownSourceMap(body, explanation);
+        return true;
+      }).finally(() => {
         noteRoot.scrollTop = previousNoteScroll;
         pageRoot.scrollTop = previousPageScroll;
         if (options.statusText) selectionHint.textContent = options.statusText;
-      }).then(() => true);
+      });
     }
 
     function sendExplanationSave(slideNumber, explanation) {
@@ -2069,11 +2212,6 @@
         if (title && title.textContent !== noteTitleText(page)) {
           title.textContent = noteTitleText(page);
         }
-        const links = note.querySelector('.note-links');
-        if (links) {
-          links.innerHTML = renderNoteBiLinks(page);
-        }
-
         const meta = note.querySelector('.note-meta');
         if (meta && meta.textContent !== noteMetaText(page)) {
           meta.textContent = noteMetaText(page);
@@ -2096,7 +2234,7 @@
         const body = note.querySelector('.note-body');
         const editor = note.querySelector('.note-editor');
         if (!body) return;
-        body.innerHTML = renderMarkdown(page.explanation);
+        body.innerHTML = renderExplanationMarkdown(page.explanation);
         body.classList.remove('lazy');
         body.dataset.hydrated = '1';
         if (editor) editor.value = String(page.explanation || '');
@@ -2236,9 +2374,11 @@
     }
 
     function markdownSearchText(source) {
-      let text = '';
-      const map = [];
-      let lastWasSpace = false;
+      const state = {
+        text: '',
+        map: [],
+        lastWasSpace: false,
+      };
       const markdownMarkers = new Set(['#', '*', '_', '`', '>', '|']);
       for (let index = 0; index < source.length; index += 1) {
         const char = source[index];
@@ -2246,20 +2386,36 @@
           index += 1;
           continue;
         }
-        if (markdownMarkers.has(char)) continue;
-        if (/\s/.test(char)) {
-          if (!lastWasSpace) {
-            text += ' ';
-            map.push(index);
-            lastWasSpace = true;
-          }
+        const math = findMathSegmentAt(source, index);
+        if (math) {
+          appendSearchableRange(source, math.contentStart, math.contentEnd, state);
+          index = math.end - 1;
           continue;
         }
-        text += char;
-        map.push(index);
-        lastWasSpace = false;
+        if (markdownMarkers.has(char)) continue;
+        appendSearchableChar(state, char, index);
       }
-      return { text, map };
+      return { text: state.text, map: state.map };
+    }
+
+    function appendSearchableChar(state, char, sourceIndex) {
+      if (/\s/.test(char)) {
+        if (!state.lastWasSpace) {
+          state.text += ' ';
+          state.map.push(sourceIndex);
+          state.lastWasSpace = true;
+        }
+        return;
+      }
+      state.text += char;
+      state.map.push(sourceIndex);
+      state.lastWasSpace = false;
+    }
+
+    function appendSearchableRange(source, start, end, state) {
+      for (let index = start; index < end; index += 1) {
+        appendSearchableChar(state, source[index], index);
+      }
     }
 
     function collapsedSearchText(source) {
@@ -2281,7 +2437,174 @@
       return text;
     }
 
-    function locateMarkdownSelection(source, payload) {
+    function commonSuffixLength(left, right, maxLength = Infinity) {
+      const limit = Math.min(left.length, right.length, maxLength);
+      let length = 0;
+      while (length < limit && left[left.length - 1 - length] === right[right.length - 1 - length]) {
+        length += 1;
+      }
+      return length;
+    }
+
+    function commonPrefixLength(left, right, maxLength = Infinity) {
+      const limit = Math.min(left.length, right.length, maxLength);
+      let length = 0;
+      while (length < limit && left[length] === right[length]) {
+        length += 1;
+      }
+      return length;
+    }
+
+    function meaningfulContextLength(value) {
+      return String(value || '').replace(/\s+/g, '').length;
+    }
+
+    function trustedMarkdownSelectionLocation(source, payload) {
+      const start = Number(payload?.sourceStart);
+      const end = Number(payload?.sourceEnd);
+      const sourceText = String(source ?? '');
+      if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+      if (start < 0 || end <= start || end > sourceText.length) return null;
+
+      const selectedSource = sourceText.slice(start, end);
+      const selectedText = String(payload?.selectedText || payload?.selectedTextRaw || '').replace(/\s+/g, ' ').trim();
+      if (!selectedText) return { start, end };
+
+      const normalizedSource = markdownSearchText(selectedSource).text.replace(/\s+/g, ' ').trim();
+      if (!normalizedSource) return null;
+      if (
+        normalizedSource === selectedText ||
+        normalizedSource.includes(selectedText) ||
+        selectedText.includes(normalizedSource)
+      ) {
+        return { start, end };
+      }
+      return null;
+    }
+
+    function markdownSourceMapKey(source) {
+      const text = String(source ?? '');
+      let hash = 0;
+      for (let index = 0; index < text.length; index += 1) {
+        hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+      }
+      return `${text.length}:${hash}`;
+    }
+
+    function textNodeSourceMapSkipReason(node) {
+      if (!node || node.nodeType !== Node.TEXT_NODE) return 'not-text';
+      if (!collapsedSearchText(node.nodeValue)) return 'blank';
+      const parent = node.parentElement;
+      if (!parent) return 'detached';
+      if (parent.closest('.reader-source-fragment')) return 'mapped';
+      if (parent.closest('mjx-container')) return 'mathjax';
+      if (parent.closest('script, style, textarea, .note-editor')) return 'non-content';
+      return '';
+    }
+
+    function bodyContainsPendingMathTypeset(body) {
+      if (!body || body.querySelector?.('mjx-container')) return false;
+      return /\\[([]/.test(String(body.textContent || ''));
+    }
+
+    function applyMarkdownSourceMap(body, source) {
+      if (!body || typeof document === 'undefined') return false;
+      if (bodyContainsPendingMathTypeset(body)) return false;
+      const sourceText = String(source ?? '');
+      const key = markdownSourceMapKey(sourceText);
+      const cached = noteBodySourceMaps.get(body);
+      if (cached?.key === key) return true;
+
+      const info = displayExplanationSourceInfo(sourceText);
+      const searchable = markdownSearchText(info.displaySource);
+      const textNodes = [];
+      const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          return textNodeSourceMapSkipReason(node)
+            ? NodeFilter.FILTER_REJECT
+            : NodeFilter.FILTER_ACCEPT;
+        },
+      });
+      let current = walker.nextNode();
+      while (current) {
+        textNodes.push(current);
+        current = walker.nextNode();
+      }
+
+      let cursor = 0;
+      let mappedCount = 0;
+      textNodes.forEach(node => {
+        const text = String(node.nodeValue || '');
+        const normalized = collapsedSearchText(text);
+        if (!normalized) return;
+        const found = searchable.text.indexOf(normalized, cursor);
+        if (found < 0) return;
+        const span = document.createElement('span');
+        span.className = 'reader-source-fragment';
+        span.dataset.searchStart = String(found);
+        span.dataset.searchEnd = String(found + normalized.length);
+        node.parentNode.insertBefore(span, node);
+        span.appendChild(node);
+        cursor = found + normalized.length;
+        mappedCount += 1;
+      });
+
+      noteBodySourceMaps.set(body, {
+        key,
+        searchable,
+        displayToRaw: info.displayToRaw,
+      });
+      body.dataset.sourceMapped = mappedCount ? '1' : '0';
+      return mappedCount > 0;
+    }
+
+    function applyMarkdownSourceMapForBody(body) {
+      const note = body?.closest?.('.note');
+      const slideNumber = Number(note?.dataset?.page);
+      const page = pageForSlide(slideNumber);
+      if (!body || !page) return false;
+      return applyMarkdownSourceMap(body, page.explanation);
+    }
+
+    function applyMarkdownSourceMapsForBodies(bodies) {
+      (Array.isArray(bodies) ? bodies : [bodies]).forEach(body => {
+        if (body?.isConnected) applyMarkdownSourceMapForBody(body);
+      });
+    }
+
+    function sourceIndexFromMappedBoundary(body, container, offset, mode) {
+      const map = noteBodySourceMaps.get(body);
+      if (!map) return null;
+      if (!container) return null;
+      if (container.nodeType !== Node.TEXT_NODE) return null;
+      const fragment = container.parentElement?.closest?.('.reader-source-fragment');
+      if (!fragment) return null;
+      const searchStart = Number(fragment.dataset.searchStart);
+      const searchEnd = Number(fragment.dataset.searchEnd);
+      if (!Number.isInteger(searchStart) || !Number.isInteger(searchEnd) || searchEnd <= searchStart) return null;
+
+      const text = String(container.nodeValue || '');
+      const boundedOffset = Math.min(Math.max(Number(offset) || 0, 0), text.length);
+      const prefixLength = collapsedSearchText(text.slice(0, boundedOffset)).length;
+      const searchIndex = mode === 'end'
+        ? Math.min(Math.max(searchStart + prefixLength - 1, searchStart), searchEnd - 1)
+        : Math.min(searchStart + prefixLength, searchEnd - 1);
+      const displayIndex = map.searchable.map[searchIndex];
+      if (!Number.isInteger(displayIndex)) return null;
+      const rawIndex = map.displayToRaw[displayIndex];
+      if (!Number.isInteger(rawIndex)) return null;
+      return mode === 'end' ? rawIndex + 1 : rawIndex;
+    }
+
+    function sourceLocationFromSelectionRange(body, range) {
+      if (!body || !range) return null;
+      const start = sourceIndexFromMappedBoundary(body, range.startContainer, range.startOffset, 'start');
+      const end = sourceIndexFromMappedBoundary(body, range.endContainer, range.endOffset, 'end');
+      if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start) return null;
+      return { start, end };
+    }
+
+    function locateMarkdownSelectionInSource(source, payload) {
       const candidates = [
         payload.selectedTextRaw,
         payload.selectedText,
@@ -2299,28 +2622,42 @@
           : null;
         let bestIndex = -1;
         let bestScore = Number.NEGATIVE_INFINITY;
+        let bestContextSignal = 0;
+        let matchCount = 0;
         let searchFrom = 0;
         while (searchFrom <= searchable.text.length) {
           const found = searchable.text.indexOf(normalizedTarget, searchFrom);
           if (found < 0) break;
-          let score = 0;
+          matchCount += 1;
+          const beforeWindow = searchable.text.slice(Math.max(0, found - beforeAnchor.length - 240), found);
+          const afterStart = found + normalizedTarget.length;
+          const afterWindow = searchable.text.slice(afterStart, afterStart + afterAnchor.length + 240);
+          const beforeMatchWindow = beforeWindow.replace(/\s+$/g, '');
+          const beforeMatchAnchor = beforeAnchor.replace(/\s+$/g, '');
+          const afterMatchWindow = afterWindow.replace(/^\s+/g, '');
+          const afterMatchAnchor = afterAnchor.replace(/^\s+/g, '');
+          const beforeOverlapLength = beforeMatchAnchor
+            ? commonSuffixLength(beforeMatchWindow, beforeMatchAnchor, beforeMatchAnchor.length)
+            : 0;
+          const afterOverlapLength = afterMatchAnchor
+            ? commonPrefixLength(afterMatchWindow, afterMatchAnchor, afterMatchAnchor.length)
+            : 0;
+          const beforeOverlap = beforeMatchAnchor.slice(beforeMatchAnchor.length - beforeOverlapLength);
+          const afterOverlap = afterMatchAnchor.slice(0, afterOverlapLength);
+          const contextSignal = meaningfulContextLength(beforeOverlap) + meaningfulContextLength(afterOverlap);
+          let score = contextSignal * 1000 + beforeOverlapLength + afterOverlapLength;
           if (expectedStart !== null) {
-            score -= Math.abs(found - expectedStart) * 4;
-          }
-          if (beforeAnchor) {
-            const beforeWindow = searchable.text.slice(Math.max(0, found - beforeAnchor.length - 20), found);
-            if (beforeWindow.endsWith(beforeAnchor)) score += beforeAnchor.length;
-          }
-          if (afterAnchor) {
-            const afterStart = found + normalizedTarget.length;
-            const afterWindow = searchable.text.slice(afterStart, afterStart + afterAnchor.length + 20);
-            if (afterWindow.startsWith(afterAnchor)) score += afterAnchor.length;
+            score -= Math.min(Math.abs(found - expectedStart), 1000);
           }
           if (score > bestScore) {
             bestScore = score;
             bestIndex = found;
+            bestContextSignal = contextSignal;
           }
           searchFrom = found + Math.max(1, normalizedTarget.length);
+        }
+        if (matchCount > 1 && bestContextSignal === 0 && expectedStart === null) {
+          return null;
         }
         if (bestIndex >= 0) {
           const start = searchable.map[bestIndex];
@@ -2335,6 +2672,42 @@
         if (index >= 0) return { start: index, end: index + candidate.length };
       }
 
+      return null;
+    }
+
+    function displayAwareMarkdownSelectionLocation(source, payload) {
+      const info = displayExplanationSourceInfo(source);
+      if (info.removedPreamble) {
+        const displayLocation = locateMarkdownSelectionInSource(info.displaySource, payload);
+        if (displayLocation) {
+          const rawStart = info.displayToRaw[displayLocation.start];
+          const rawEndBase = info.displayToRaw[displayLocation.end - 1];
+          if (Number.isFinite(rawStart) && Number.isFinite(rawEndBase)) {
+            return { start: rawStart, end: rawEndBase + 1 };
+          }
+        }
+      }
+      return locateMarkdownSelectionInSource(source, payload);
+    }
+
+    function locateMarkdownSelection(source, payload) {
+      return displayAwareMarkdownSelectionLocation(source, payload);
+    }
+
+    function findMathSegmentBoundsForLocation(source, location) {
+      if (!location) return null;
+      let index = 0;
+      while (index < source.length) {
+        const math = findMathSegmentAt(source, index);
+        if (math) {
+          if (math.start <= location.start && location.end <= math.end) {
+            return { start: math.start, end: math.end };
+          }
+          index = math.end;
+          continue;
+        }
+        index += 1;
+      }
       return null;
     }
 
@@ -2357,7 +2730,9 @@
     }
 
     function markdownSelectionHighlightState(source, payload) {
-      const location = locateMarkdownSelection(source, payload);
+      const rawLocation = trustedMarkdownSelectionLocation(source, payload)
+        || displayAwareMarkdownSelectionLocation(source, payload);
+      const location = findMathSegmentBoundsForLocation(source, rawLocation) || rawLocation;
       const bounds = markdownHighlightBounds(source, location);
       return {
         location,
@@ -2425,14 +2800,16 @@
       if (!page || !body) return;
 
       const previousScrollTop = noteRoot.scrollTop;
-      body.innerHTML = renderMarkdown(page.explanation);
+      body.innerHTML = renderExplanationMarkdown(page.explanation);
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (button) {
         button.disabled = true;
         button.textContent = '刷新中';
       }
-      typesetTargets([body]).finally(() => {
+      typesetTargets([body]).then(typesetDone => {
+        if (typesetDone !== false) applyMarkdownSourceMap(body, page.explanation);
+      }).finally(() => {
         noteRoot.scrollTop = previousScrollTop;
         if (!button) return;
         button.textContent = '已刷新';
@@ -2547,7 +2924,9 @@
         pageRoot.scrollTop = previousPageScroll;
         restoreNoteAnchor(previousNoteAnchor);
         if (typesetQueue.length) {
-          typesetTargets(typesetQueue).finally(() => {
+          typesetTargets(typesetQueue).then(typesetDone => {
+            if (typesetDone !== false) applyMarkdownSourceMapsForBodies(typesetQueue);
+          }).finally(() => {
             pageRoot.scrollTop = previousPageScroll;
             restoreNoteAnchor(previousNoteAnchor);
           });
@@ -2586,7 +2965,6 @@
           <div class="note-header">
             <h3>${escapeHtml(noteTitleText(page))}</h3>
             <div class="note-actions">
-              <span class="note-links">${renderNoteBiLinks(page)}</span>
               <button type="button" class="note-action-button" data-edit-page="${page.slideNumber}" title="手动修改本页讲解">编辑讲解</button>
               <button type="button" class="note-refresh" data-refresh-page="${page.slideNumber}" title="重新渲染本页 Markdown 和公式">刷新显示</button>
             </div>
@@ -2640,7 +3018,9 @@
         renderChatForPage(currentSlideNumber);
       }, 80);
       const hydratedBodies = Array.from(noteRoot.querySelectorAll('.note-body[data-hydrated="1"]'));
-      typesetTargets([...hydratedBodies, canvasMessages]);
+      typesetTargets([...hydratedBodies, canvasMessages]).then(typesetDone => {
+        if (typesetDone !== false) applyMarkdownSourceMapsForBodies(hydratedBodies);
+      });
       if (!hasCenteredOnEntry && pages.length) {
         hasCenteredOnEntry = true;
         scheduleParentReaderCenter({
@@ -2700,6 +3080,10 @@
       const selectionStartOffset = before.length;
       const slideNumber = Number(note.dataset.page);
       const page = pages.find(item => Number(item.slideNumber) === slideNumber) || {};
+      if (!noteBodySourceMaps.get(noteBody)) {
+        applyMarkdownSourceMap(noteBody, page.explanation);
+      }
+      const sourceLocation = sourceLocationFromSelectionRange(noteBody, range);
       const startHighlight = startElement?.closest?.('.reader-highlight');
       const endHighlight = endElement?.closest?.('.reader-highlight');
       const payload = {
@@ -2714,6 +3098,10 @@
         contextAfter: clipText(after.slice(0, 700), 700),
         selectionStartOffset,
       };
+      if (sourceLocation) {
+        payload.sourceStart = sourceLocation.start;
+        payload.sourceEnd = sourceLocation.end;
+      }
       const markdownState = markdownSelectionHighlightState(String(page.explanation || ''), payload);
       payload.isHighlighted = Boolean(
         markdownState.isHighlighted || (startHighlight && startHighlight === endHighlight)
