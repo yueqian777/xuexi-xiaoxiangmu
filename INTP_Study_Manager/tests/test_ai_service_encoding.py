@@ -11,7 +11,16 @@ if "streamlit" not in sys.modules and importlib.util.find_spec("streamlit") is N
     streamlit_stub.session_state = {}
     sys.modules["streamlit"] = streamlit_stub
 
-from services.ai_service import _extract_text_output, _parse_response_json, _repair_utf8_mojibake
+from services.ai_service import (
+    AIProvider,
+    MIMO_TOKEN_PLAN_PROVIDER_KEY,
+    MIMO_TOKEN_PLAN_MODELS,
+    _build_request,
+    _extract_text_output,
+    _parse_response_json,
+    _repair_utf8_mojibake,
+    list_available_models,
+)
 
 
 class AIServiceEncodingTest(unittest.TestCase):
@@ -86,6 +95,39 @@ class AIServiceEncodingTest(unittest.TestCase):
 
         self.assertEqual(output, "目录 JSON")
         self.assertEqual(path, "output")
+
+    def test_mimo_token_plan_request_uses_api_key_header(self):
+        provider = AIProvider(
+            provider_key=MIMO_TOKEN_PLAN_PROVIDER_KEY,
+            name="MIMO Token Plan",
+            provider_type="openai_chat",
+            base_url="https://token-plan-cn.xiaomimimo.com/v1",
+            model="mimo-v2.5-pro",
+            api_key_env="MIMO_TOKEN_PLAN_API_KEY",
+            auth_type="api-key",
+            extra_headers_json="{}",
+            request_template_json="",
+            response_path="choices.0.message.content",
+        )
+
+        request = _build_request(provider, "ping", "tp-test", "mimo-v2.5-pro", 64, [])
+
+        self.assertEqual(request["url"], "https://token-plan-cn.xiaomimimo.com/v1/chat/completions")
+        self.assertEqual(request["headers"].get("api-key"), "tp-test")
+        self.assertNotIn("Authorization", request["headers"])
+        self.assertEqual(request["json"]["model"], "mimo-v2.5-pro")
+        self.assertEqual(request["json"]["max_completion_tokens"], 64)
+        self.assertNotIn("max_tokens", request["json"])
+
+    def test_mimo_token_plan_models_are_local_known_models(self):
+        provider = {
+            "provider_key": MIMO_TOKEN_PLAN_PROVIDER_KEY,
+            "provider_type": "openai_chat",
+            "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+            "api_key_env": "MIMO_TOKEN_PLAN_API_KEY",
+        }
+
+        self.assertEqual(list_available_models(provider, api_key=""), MIMO_TOKEN_PLAN_MODELS)
 
 
 if __name__ == "__main__":

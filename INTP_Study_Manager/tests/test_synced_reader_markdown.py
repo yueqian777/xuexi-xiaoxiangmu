@@ -86,6 +86,8 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "renderFallbackCodeSegment",
             "renderFallbackMarkdown",
             "renderMarkdown",
+            "isGeneratedExplanationPreambleLine",
+            "displayExplanationSource",
             "markdownSearchText",
             "collapsedSearchText",
             "locateMarkdownSelection",
@@ -187,6 +189,25 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             }
             """
         )
+
+    def test_display_explanation_strips_generated_wikilink_preamble(self):
+        self.run_js(
+            r"""
+            const source = '[[\u7b2c 1 \u9875]] [[\u6807\u7b7e:\u8bb2\u89e3\u9875]]: \u4ece\u8f93\u5165\u8f93\u51fa\u63cf\u8ff0\u5207\u5165\u72b6\u6001\u53d8\u91cf\u5206\u6790\n\n### \u672c\u9875\u6838\u5fc3\n- \u7cfb\u7edf\u63cf\u8ff0\u65b9\u6cd5';
+            const result = displayExplanationSource(source);
+            if (result.includes('[[\u7b2c 1 \u9875]]') || result.includes('[[\u6807\u7b7e:')) {
+              throw new Error(result);
+            }
+            if (!result.startsWith('### \u672c\u9875\u6838\u5fc3')) {
+              throw new Error(result);
+            }
+            """
+        )
+
+    def test_rendered_note_header_does_not_include_bilink_controls(self):
+        source = READER_HTML.read_text(encoding="utf-8")
+        self.assertNotIn('<span class="note-links">', source)
+        self.assertNotIn("renderNoteBiLinks(page)", source)
 
 
 if __name__ == "__main__":

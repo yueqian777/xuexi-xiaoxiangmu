@@ -68,6 +68,7 @@ data/study_manager.db
 | Kimi (Moonshot) | OpenAI Chat Completions | moonshot-v1-128k | `MOONSHOT_API_KEY` |
 | 字节豆包 (Doubao) | OpenAI Chat Completions | doubao-pro-32k | `DOUBAO_API_KEY` |
 | MiniMax | MiniMax Chat API | MiniMax-M2.7 | `MINIMAX_API_KEY` |
+| MIMO Token Plan | OpenAI Chat Completions | mimo-v2.5-pro | `MIMO_TOKEN_PLAN_API_KEY` |
 | 硅基流动 (SiliconFlow) | OpenAI Chat Completions | Qwen2.5-72B-Instruct | `SILICONFLOW_API_KEY` |
 | DeepSeek V4 Pro | OpenAI Chat Completions | deepseek-v4-pro | `DEEPSEEK_API_KEY` |
 

@@ -32,6 +32,7 @@
       --soft-green: #e9f9f2;
       --soft-blue: #edf8ff;
       --shadow: rgba(17, 89, 105, 0.13);
+      --resize-handle-width: 14px;
     }
     * { box-sizing: border-box; }
     html {
@@ -265,8 +266,46 @@
     .grid {
       height: calc(100% - 58px);
       display: grid;
-      grid-template-columns: minmax(260px, 1.15fr) 8px minmax(300px, 0.85fr) 8px minmax(330px, 0.55fr);
+      grid-template-columns: minmax(260px, 1.15fr) var(--resize-handle-width) minmax(300px, 0.85fr) var(--resize-handle-width) minmax(330px, 0.55fr);
       transition: grid-template-columns .14s ease;
+    }
+    .resize-handle {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: var(--resize-handle-width);
+      height: 100%;
+      background: linear-gradient(180deg, rgba(233, 249, 242, 0.55), rgba(237, 248, 255, 0.72));
+      cursor: col-resize;
+      cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 16 24'%3E%3Cpath d='M6 3v18M10 3v18' stroke='%23087b70' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E") 8 12, col-resize;
+      touch-action: none;
+      user-select: none;
+      z-index: 2;
+    }
+    body.reader-resizing,
+    body.reader-resizing * {
+      cursor: col-resize !important;
+      cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 16 24'%3E%3Cpath d='M6 3v18M10 3v18' stroke='%23087b70' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E") 8 12, col-resize !important;
+    }
+    .resize-handle::before {
+      content: "";
+      width: 7px;
+      height: 46px;
+      border-left: 2px solid rgba(24, 165, 143, 0.42);
+      border-right: 2px solid rgba(24, 165, 143, 0.42);
+      border-radius: 4px;
+      transition: border-color .15s, height .15s, background .15s;
+    }
+    .resize-handle:hover::before,
+    .resize-handle.dragging::before {
+      height: 58px;
+      border-color: var(--accent);
+      background: rgba(24, 165, 143, 0.08);
+    }
+    .resize-handle:hover,
+    .resize-handle.dragging {
+      background: linear-gradient(180deg, rgba(226, 250, 241, 0.92), rgba(232, 247, 255, 0.94));
     }
     .pages, .notes {
       height: 100%;
@@ -391,10 +430,12 @@
     }
     .note-header {
       display: flex;
-      align-items: flex-start;
+      align-items: center;
       justify-content: space-between;
-      gap: 12px;
-      margin: 0 0 10px;
+      gap: 14px;
+      margin: 0 0 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(203, 229, 234, 0.72);
     }
     .note h3 {
       margin: 0 0 10px;
@@ -402,45 +443,26 @@
       font-size: 18px;
     }
     .note-header h3 {
+      flex: 1 1 auto;
+      min-width: 0;
       margin: 0;
+      line-height: 1.38;
+      overflow-wrap: anywhere;
     }
     .note-actions,
     .note-edit-actions {
       display: flex;
-      flex-wrap: wrap;
       align-items: center;
-      justify-content: flex-end;
       gap: 7px;
     }
-    .note-links {
-      display: inline-flex;
-      flex-wrap: wrap;
-      align-items: center;
+    .note-actions {
+      flex: 0 0 auto;
       justify-content: flex-end;
-      gap: 6px;
-    }
-    .note-bilink {
-      display: inline-flex;
-      align-items: center;
-      min-height: 25px;
-      padding: 4px 8px;
-      border: 1px solid #b9dde6;
-      border-radius: 999px;
-      background: #eef8ff;
-      color: #1f6b86;
-      font-size: 12px;
-      font-weight: 900;
-      line-height: 1.2;
-      text-decoration: none;
       white-space: nowrap;
     }
-    .note-bilink.tag {
-      background: #f3fffb;
-      color: #087b70;
-    }
-    .note-bilink:hover {
-      border-color: var(--accent);
-      background: var(--soft-green);
+    .note-edit-actions {
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
     .note-action-button,
     .note-refresh {
@@ -516,6 +538,12 @@
     }
     .note-body {
       overflow-wrap: anywhere;
+    }
+    .note-body > :first-child {
+      margin-top: 0;
+    }
+    .note-body > :last-child {
+      margin-bottom: 0;
     }
     .note-body.lazy {
       min-height: 120px;
@@ -1346,6 +1374,29 @@
       );
     }
 
+    function isGeneratedExplanationPreambleLine(line) {
+      const text = String(line ?? '').trim();
+      if (!text.startsWith('[[')) return false;
+      return /^\[\[\s*第\s*\d+\s*页\s*\]\](?:\s+\[\[\s*标签\s*:[^\]]+\]\])?\s*[：:]\s*\S+/.test(text);
+    }
+
+    function displayExplanationSource(value) {
+      const source = String(value ?? '');
+      const lines = source.replace(/^\uFEFF/, '').split(/\r?\n/);
+      const firstContentIndex = lines.findIndex(line => line.trim());
+      if (firstContentIndex < 0) return source;
+      if (!isGeneratedExplanationPreambleLine(lines[firstContentIndex])) return source;
+      lines.splice(firstContentIndex, 1);
+      while (lines[firstContentIndex]?.trim() === '') {
+        lines.splice(firstContentIndex, 1);
+      }
+      return lines.join('\n');
+    }
+
+    function renderExplanationMarkdown(value) {
+      return renderMarkdown(displayExplanationSource(value));
+    }
+
     function connectedTypesetTargets(targets) {
       const seen = new Set();
       return (Array.isArray(targets) ? targets : [targets])
@@ -1581,7 +1632,7 @@
     function applyLayoutState() {
       if (!readerGrid) return;
       const chatColumn = chatCollapsed ? '48px' : `minmax(330px, ${layoutState.chat}fr)`;
-      readerGrid.style.gridTemplateColumns = `minmax(260px, ${layoutState.pages}fr) 8px minmax(300px, ${layoutState.notes}fr) 8px ${chatColumn}`;
+      readerGrid.style.gridTemplateColumns = `minmax(260px, ${layoutState.pages}fr) var(--resize-handle-width) minmax(300px, ${layoutState.notes}fr) var(--resize-handle-width) ${chatColumn}`;
       canvasChat.classList.toggle('collapsed', chatCollapsed);
       if (toggleCanvasButton) toggleCanvasButton.textContent = chatCollapsed ? '展开' : '收起';
     }
@@ -1721,7 +1772,7 @@
         start: { ...layoutState },
       };
       handle.classList.add('dragging');
-      document.body.style.cursor = 'col-resize';
+      document.body.classList.add('reader-resizing');
       document.body.style.userSelect = 'none';
     }
 
@@ -1745,7 +1796,7 @@
       if (!activeResize) return;
       activeResize.handle.classList.remove('dragging');
       activeResize = null;
-      document.body.style.cursor = '';
+      document.body.classList.remove('reader-resizing');
       document.body.style.userSelect = '';
       saveLayoutState();
     }
@@ -1808,7 +1859,7 @@
 
     function renderNoteBody(page, hydrate = false) {
       if (hydrate) {
-        return `<div class="note-body" data-hydrated="1">${renderMarkdown(page.explanation)}</div>`;
+        return `<div class="note-body" data-hydrated="1">${renderExplanationMarkdown(page.explanation)}</div>`;
       }
       return '<div class="note-body lazy" data-hydrated="0">讲解按需渲染</div>';
     }
@@ -1822,7 +1873,7 @@
       const hydrateKey = Number(slideNumber);
       const pending = hydratingNotePromises.get(hydrateKey);
       if (pending?.body === body) return pending.promise;
-      body.innerHTML = renderMarkdown(page.explanation);
+      body.innerHTML = renderExplanationMarkdown(page.explanation);
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (editor) editor.value = String(page.explanation || '');
@@ -1948,15 +1999,6 @@
       return title ? `第 ${page.slideNumber} 页：${title}` : `第 ${page.slideNumber} 页讲解`;
     }
 
-    function renderNoteBiLinks(page) {
-      const pageLabel = `第 ${Number(page.slideNumber)} 页`;
-      const tag = String(page.pageType || '未标注').trim() || '未标注';
-      return `
-        <a class="note-bilink page" href="#page-${Number(page.slideNumber)}" data-page-link="${Number(page.slideNumber)}">[[${escapeHtml(pageLabel)}]]</a>
-        <a class="note-bilink tag" href="#tag-${encodeURIComponent(tag)}" data-tag-link="${escapeHtml(tag)}">[[标签:${escapeHtml(tag)}]]</a>
-      `;
-    }
-
     function applyPendingExplanationOverrides(nextPages) {
       const now = Date.now();
       return nextPages.map(page => {
@@ -2001,7 +2043,7 @@
       const previousNoteScroll = noteRoot.scrollTop;
       const previousPageScroll = pageRoot.scrollTop;
       page.explanation = explanation;
-      body.innerHTML = renderMarkdown(explanation);
+      body.innerHTML = renderExplanationMarkdown(explanation);
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (editor) editor.value = explanation;
@@ -2069,11 +2111,6 @@
         if (title && title.textContent !== noteTitleText(page)) {
           title.textContent = noteTitleText(page);
         }
-        const links = note.querySelector('.note-links');
-        if (links) {
-          links.innerHTML = renderNoteBiLinks(page);
-        }
-
         const meta = note.querySelector('.note-meta');
         if (meta && meta.textContent !== noteMetaText(page)) {
           meta.textContent = noteMetaText(page);
@@ -2096,7 +2133,7 @@
         const body = note.querySelector('.note-body');
         const editor = note.querySelector('.note-editor');
         if (!body) return;
-        body.innerHTML = renderMarkdown(page.explanation);
+        body.innerHTML = renderExplanationMarkdown(page.explanation);
         body.classList.remove('lazy');
         body.dataset.hydrated = '1';
         if (editor) editor.value = String(page.explanation || '');
@@ -2425,7 +2462,7 @@
       if (!page || !body) return;
 
       const previousScrollTop = noteRoot.scrollTop;
-      body.innerHTML = renderMarkdown(page.explanation);
+      body.innerHTML = renderExplanationMarkdown(page.explanation);
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (button) {
@@ -2586,7 +2623,6 @@
           <div class="note-header">
             <h3>${escapeHtml(noteTitleText(page))}</h3>
             <div class="note-actions">
-              <span class="note-links">${renderNoteBiLinks(page)}</span>
               <button type="button" class="note-action-button" data-edit-page="${page.slideNumber}" title="手动修改本页讲解">编辑讲解</button>
               <button type="button" class="note-refresh" data-refresh-page="${page.slideNumber}" title="重新渲染本页 Markdown 和公式">刷新显示</button>
             </div>

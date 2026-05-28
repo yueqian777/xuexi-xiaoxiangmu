@@ -1066,6 +1066,14 @@ def _render_help() -> None:
 - 鉴权：`Authorization: Bearer <key>`
 - 响应路径：`choices.0.message.content`
 
+**MIMO Token Plan**
+- Provider 类型：OpenAI 兼容 Chat Completions
+- Base URL：`https://token-plan-cn.xiaomimimo.com/v1`
+- 可选集群：`https://token-plan-sgp.xiaomimimo.com/v1`、`https://token-plan-ams.xiaomimimo.com/v1`
+- 模型：`mimo-v2.5-pro`
+- 鉴权：`api-key: <tp-...>`
+- 响应路径：`choices.0.message.content`
+
 **自定义 HTTP JSON**
 - Base URL / Endpoint 填完整 POST 地址。
 - 请求体模板必须是 JSON。

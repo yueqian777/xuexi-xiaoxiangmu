@@ -253,6 +253,19 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             """
         )
 
+    def test_resize_handles_have_wide_hit_area_and_hover_cursor(self):
+        self.assertIn(
+            "grid-template-columns: minmax(260px, 1.15fr) var(--resize-handle-width)",
+            self.source,
+        )
+        self.assertIn("--resize-handle-width: 14px;", self.source)
+        self.assertIn(".resize-handle {", self.source)
+        self.assertIn("cursor: col-resize;", self.source)
+        self.assertIn("data:image/svg+xml", self.source)
+        self.assertIn(".resize-handle::before", self.source)
+        self.assertIn(".resize-handle:hover::before", self.source)
+        self.assertIn("document.body.classList.add('reader-resizing')", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
