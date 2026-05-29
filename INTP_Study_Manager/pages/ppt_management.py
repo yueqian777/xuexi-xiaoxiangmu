@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from db import execute, execute_many, fetch_all
+from repositories.ppt_repository import delete_slide_question_thread
 from services.auth_service import require_login
 
 DECK_STATUSES = ["使用中", "归档", "暂停", "待整理"]
@@ -171,19 +172,28 @@ def _render_question_management(user_id: int) -> None:
         st.warning("没有符合筛选条件的插问。")
         return
 
+    visible_columns = [
+        "id",
+        "sort_order",
+        "status",
+        "category",
+        "slide_number",
+        "slide_title",
+        "question_preview",
+        "answer_preview",
+        "model",
+        "created_at",
+    ]
+    overview = pd.DataFrame(visible)[visible_columns + ["question_kind"]]
+    st.dataframe(
+        overview.style.apply(_question_row_style, axis=1),
+        use_container_width=True,
+        hide_index=True,
+        column_order=visible_columns,
+    )
+
     frame = pd.DataFrame(visible)[
-        [
-            "id",
-            "sort_order",
-            "status",
-            "category",
-            "slide_number",
-            "slide_title",
-            "question_preview",
-            "answer_preview",
-            "model",
-            "created_at",
-        ]
+        visible_columns
     ]
     edited = st.data_editor(
         frame,
@@ -246,7 +256,7 @@ def _render_delete_deck(user_id: int, decks: list[dict]) -> None:
 
 
 def _render_question_detail_and_delete(user_id: int, questions: list[dict], slides: list[dict]) -> None:
-    st.subheader("查看 / 删除单条插问")
+    st.subheader("查看 / 删除插问")
     question_options = {item["id"]: item for item in questions}
     question_id = st.selectbox(
         "选择插问",
@@ -264,10 +274,10 @@ def _render_question_detail_and_delete(user_id: int, questions: list[dict], slid
             st.markdown(_quote_block(quote_text))
         st.markdown("**回答**")
         st.markdown(question["answer"])
-    confirm = st.text_input("输入 DELETE 确认删除这条插问", key="delete_question_confirm")
-    if st.button("删除这条插问", disabled=confirm != "DELETE", key="delete_question_button"):
-        execute("DELETE FROM slide_questions WHERE id = ? AND user_id = ?", (int(question_id), user_id))
-        st.success("插问已删除。")
+    confirm = st.text_input("输入 DELETE 确认删除这条插问及其子插问", key="delete_question_confirm")
+    if st.button("删除这条插问及其子插问", disabled=confirm != "DELETE", key="delete_question_button"):
+        deleted_count = delete_slide_question_thread(user_id, int(question_id))
+        st.success(f"已删除 {deleted_count} 条插问记录。")
         st.rerun()
 
 
@@ -321,11 +331,21 @@ def _fetch_questions(user_id: int, deck_id: int) -> list[dict]:
         SELECT
             sq.*,
             ps.slide_number,
-            ps.title AS slide_title
+            ps.title AS slide_title,
+            CASE WHEN sq.parent_question_id IS NULL THEN 'root' ELSE 'child' END AS question_kind,
+            COALESCE(sq.root_question_id, sq.id) AS thread_root_id
         FROM slide_questions sq
         JOIN ppt_slides ps ON ps.id = sq.slide_id AND ps.user_id = sq.user_id
         WHERE sq.user_id = ? AND ps.deck_id = ?
-        ORDER BY sq.status ASC, sq.category ASC, sq.sort_order ASC, ps.slide_number ASC, sq.created_at ASC, sq.id ASC
+        ORDER BY
+            sq.status ASC,
+            sq.category ASC,
+            ps.slide_number ASC,
+            COALESCE(sq.root_question_id, sq.id) ASC,
+            CASE WHEN sq.parent_question_id IS NULL THEN 0 ELSE 1 END,
+            sq.sort_order ASC,
+            sq.created_at ASC,
+            sq.id ASC
         """,
         (user_id, deck_id),
     )
@@ -333,6 +353,11 @@ def _fetch_questions(user_id: int, deck_id: int) -> list[dict]:
         row["question_preview"] = _preview(row["question"], 80)
         row["answer_preview"] = _preview(row["answer"], 90)
     return rows
+
+
+def _question_row_style(row) -> list[str]:
+    color = "#eefaf5" if row.get("question_kind") == "root" else "#f3f7fb"
+    return [f"background-color: {color}"] * len(row)
 
 
 def _matches_deck_keyword(deck: dict, keyword: str) -> bool:

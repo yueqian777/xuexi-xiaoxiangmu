@@ -108,9 +108,19 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "quoteLocationForCentering",
             "searchLocationForRawLocation",
             "centeredScrollTopForElement",
+            "questionIdForItem",
             "removeMarkdownHighlight",
             "wrapMarkdownSelection",
             "renderChatQuestion",
+            "renderChatTurn",
+            "clipText",
+            "applyLayoutState",
+            "nearestScrollPanel",
+            "childLayerScrollPositions",
+            "renderChildQuestionStack",
+            "sendQuestionThreadMerge",
+            "closeChildLayersForSlideChange",
+            "closeChildLayer",
         ]
         cls.js_helpers = "\n\n".join(
             block for name in helper_names if (block := _extract_function(source, name))
@@ -119,8 +129,9 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
     def run_js(self, body):
         script = self.js_helpers + "\n\n" + textwrap.dedent(body)
         result = subprocess.run(
-            [self.node, "-e", script],
+            [self.node, "-"],
             cwd=APP_ROOT,
+            input=script,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -463,6 +474,214 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             }
             if (!rendered.includes('\u5f15\u7528\u5185\u5bb9') || !rendered.includes('\u5468\u671f\u4fe1\u53f7')) {
               throw new Error(rendered);
+            }
+            """
+        )
+
+    def test_render_chat_turn_marks_child_answer_as_selectable_markdown_source(self):
+        self.run_js(
+            r"""
+            var currentSlideNumber = 2;
+            global.window = {
+              marked: { parse: value => String(value) },
+              DOMPurify: { sanitize: value => String(value) },
+            };
+
+            const rendered = renderChatTurn({
+              id: 12,
+              parentQuestionId: 8,
+              depth: 1,
+              question: '\u5b50\u63d2\u95ee',
+              answer: '\u56de\u7b54 ==\u91cd\u70b9==',
+              model: '\u6a21\u578b',
+              createdAt: 'today',
+            });
+            if (!rendered.includes('child-question') || !rendered.includes('data-question-id="12"')) {
+              throw new Error(rendered);
+            }
+            if (!rendered.includes('chat-answer-body') || !rendered.includes('data-slide-number="2"')) {
+              throw new Error(rendered);
+            }
+            if (!rendered.includes('reader-highlight')) {
+              throw new Error(rendered);
+            }
+            """
+        )
+
+    def test_child_layers_reserve_width_and_restore_when_closed(self):
+        self.run_js(
+            r"""
+            var childChatLayers = [];
+            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var chatCollapsed = false;
+            var readerGrid = {
+              style: { gridTemplateColumns: '' },
+              getBoundingClientRect: () => ({ width: 1600 }),
+            };
+            var canvasChat = { classList: { toggle() {} } };
+            var toggleCanvasButton = { textContent: '' };
+            var childChatStack = { style: { setProperty() {} } };
+
+            applyLayoutState();
+            const baseColumns = readerGrid.style.gridTemplateColumns;
+            if (baseColumns.includes('740px')) {
+              throw new Error(baseColumns);
+            }
+
+            childChatLayers = [{ layerId: 'a' }, { layerId: 'b' }];
+            applyLayoutState();
+            const expandedColumns = readerGrid.style.gridTemplateColumns;
+            if (!expandedColumns.includes('740px')) {
+              throw new Error(expandedColumns);
+            }
+
+            childChatLayers = [];
+            applyLayoutState();
+            if (readerGrid.style.gridTemplateColumns !== baseColumns) {
+              throw new Error(readerGrid.style.gridTemplateColumns);
+            }
+            """
+        )
+
+    def test_child_layer_reserved_width_is_capped_to_keep_main_reader_usable(self):
+        self.run_js(
+            r"""
+            var childChatLayers = [{}, {}, {}, {}, {}];
+            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var chatCollapsed = false;
+            var readerGrid = {
+              style: { gridTemplateColumns: '' },
+              getBoundingClientRect: () => ({ width: 1200 }),
+            };
+            var canvasChat = { classList: { toggle() {} } };
+            var toggleCanvasButton = { textContent: '' };
+            const stackVars = {};
+            var childChatStack = { style: { setProperty(name, value) { stackVars[name] = value; } } };
+
+            applyLayoutState();
+            if (!readerGrid.style.gridTemplateColumns.includes('440px')) {
+              throw new Error(readerGrid.style.gridTemplateColumns);
+            }
+            if (stackVars['--child-stack-width'] !== '440px') {
+              throw new Error(JSON.stringify(stackVars));
+            }
+            """
+        )
+
+    def test_child_chat_messages_are_independent_scroll_panels(self):
+        self.run_js(
+            r"""
+            const childPanel = { marker: 'child' };
+            const pagePanel = { marker: 'page' };
+            var pageRoot = pagePanel;
+            const target = {
+              closest(selector) {
+                if (selector === '.canvas-input') return null;
+                if (selector === '.page-jump-input') return null;
+                if (selector === '.note-editor') return null;
+                if (selector.includes('.child-chat-messages')) return childPanel;
+                return null;
+              },
+            };
+
+            const result = nearestScrollPanel(target);
+            if (result !== childPanel) {
+              throw new Error(JSON.stringify(result));
+            }
+            """
+        )
+
+    def test_child_chat_stack_preserves_existing_panel_scroll(self):
+        self.run_js(
+            r"""
+            const oldPanel = {
+              dataset: { childMessages: 'layer-a' },
+              scrollTop: 42,
+              scrollHeight: 200,
+            };
+            const newPanel = {
+              dataset: { childMessages: 'layer-a' },
+              scrollTop: 0,
+              scrollHeight: 200,
+            };
+            var childChatLayers = [{ layerId: 'layer-a', parentQuestionId: 1 }];
+            var childPanelScrollToBottomLayerId = null;
+            var childChatStack = {
+              _rendered: false,
+              set innerHTML(value) {
+                this._rendered = true;
+                this._html = value;
+              },
+              get innerHTML() {
+                return this._html || '';
+              },
+              querySelectorAll(selector) {
+                if (selector !== '.child-chat-messages') return [];
+                return this._rendered ? [newPanel] : [oldPanel];
+              },
+            };
+            questionById = () => ({ question: '\u6839\u95ee\u9898' });
+            childQuestionsFor = () => [{ id: 2, parentQuestionId: 1, question: '\u5b50\u95ee', answer: '\u7b54' }];
+            renderChatTurn = () => '<div class="chat-turn">child</div>';
+            typesetTargets = () => Promise.resolve(false);
+            applyChatSourceMaps = () => {};
+
+            renderChildQuestionStack();
+            if (newPanel.scrollTop !== 42) {
+              throw new Error(String(newPanel.scrollTop));
+            }
+            """
+        )
+
+    def test_closing_child_layer_sends_merge_for_closed_anchor(self):
+        self.run_js(
+            r"""
+            const emitted = [];
+            var Streamlit = { setComponentValue: value => emitted.push(value) };
+            var deckId = 3;
+            var currentSlideNumber = 2;
+            var childChatLayers = [
+              { layerId: 'l1', parentQuestionId: 10, depth: 1 },
+              { layerId: 'l2', parentQuestionId: 20, depth: 2 },
+            ];
+            var noteAnchorForSlide = () => null;
+            var pageRoot = { scrollTop: 7 };
+            var canvasMessages = { scrollTop: 9 };
+            childLayerScrollPositions = () => new Map();
+            renderChildQuestionStack = () => {};
+            applyLayoutState = () => {};
+            restoreReaderScrollPositions = () => {};
+
+            closeChildLayer('l1');
+            if (childChatLayers.length !== 0) {
+              throw new Error(JSON.stringify(childChatLayers));
+            }
+            if (emitted.length !== 1 || emitted[0].action !== 'merge_question_thread' || emitted[0].questionId !== 10) {
+              throw new Error(JSON.stringify(emitted));
+            }
+            """
+        )
+
+    def test_slide_change_merges_open_child_stack_before_clearing(self):
+        self.run_js(
+            r"""
+            const emitted = [];
+            var Streamlit = { setComponentValue: value => emitted.push(value) };
+            var deckId = 3;
+            var currentSlideNumber = 2;
+            var childChatLayers = [
+              { layerId: 'l1', parentQuestionId: 10, depth: 1 },
+              { layerId: 'l2', parentQuestionId: 20, depth: 2 },
+            ];
+            renderChildQuestionStack = () => {};
+            applyLayoutState = () => {};
+
+            closeChildLayersForSlideChange();
+            if (childChatLayers.length !== 0) {
+              throw new Error(JSON.stringify(childChatLayers));
+            }
+            if (emitted.length !== 1 || emitted[0].action !== 'merge_question_thread' || emitted[0].questionId !== 10) {
+              throw new Error(JSON.stringify(emitted));
             }
             """
         )

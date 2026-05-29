@@ -245,6 +245,11 @@ def _run_init_db() -> None:
                 quote_text TEXT DEFAULT '',
                 answer TEXT NOT NULL,
                 model TEXT NOT NULL,
+                root_question_id INTEGER,
+                parent_question_id INTEGER,
+                depth INTEGER NOT NULL DEFAULT 0,
+                quote_source TEXT DEFAULT 'slide',
+                quote_source_question_id INTEGER,
                 category TEXT DEFAULT '',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT '未整理',
@@ -349,6 +354,11 @@ def _run_init_db() -> None:
         _ensure_column(conn, "slide_explanations", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_questions", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_questions", "quote_text", "TEXT DEFAULT ''")
+        _ensure_column(conn, "slide_questions", "root_question_id", "INTEGER")
+        _ensure_column(conn, "slide_questions", "parent_question_id", "INTEGER")
+        _ensure_column(conn, "slide_questions", "depth", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "slide_questions", "quote_source", "TEXT DEFAULT 'slide'")
+        _ensure_column(conn, "slide_questions", "quote_source_question_id", "INTEGER")
         _ensure_column(conn, "api_providers", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "app_settings", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "daily_review_logs", "user_id", "INTEGER NOT NULL DEFAULT 0")
@@ -425,6 +435,10 @@ def _run_init_db() -> None:
                 ON slide_explanations(slide_id);
             CREATE INDEX IF NOT EXISTS idx_slide_questions_user_slide_created
                 ON slide_questions(user_id, slide_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_slide_questions_user_root_order
+                ON slide_questions(user_id, root_question_id, parent_question_id, sort_order ASC, created_at ASC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_slide_questions_user_parent_order
+                ON slide_questions(user_id, parent_question_id, sort_order ASC, created_at ASC, id ASC);
             CREATE INDEX IF NOT EXISTS idx_slide_questions_slide
                 ON slide_questions(slide_id);
             CREATE INDEX IF NOT EXISTS idx_invites_created_by

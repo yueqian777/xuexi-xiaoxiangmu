@@ -20,9 +20,11 @@ from db import BASE_DIR, execute, fetch_all, fetch_one, insert_and_get_id
 from repositories.ppt_repository import (
     add_slide_explanation,
     add_slide_question,
+    flatten_question_subtree,
     latest_explanation,
     latest_explanations_by_slide_ids,
     questions_by_slide_ids,
+    update_slide_question_answer,
     update_slide_learning_metadata,
 )
 from services.ai_service import (
@@ -736,7 +738,13 @@ def _handle_synced_reader_action(
     sections: list[dict],
 ) -> None:
     action = payload.get("action")
-    if action not in {"canvas_question", "save_explanation_edit", "reader_position"}:
+    if action not in {
+        "canvas_question",
+        "save_explanation_edit",
+        "save_question_answer_edit",
+        "merge_question_thread",
+        "reader_position",
+    }:
         return
     try:
         query_deck_id = int(payload.get("deckId", 0))
@@ -770,6 +778,38 @@ def _handle_synced_reader_action(
         st.toast(f"第 {slide['slide_number']} 页讲解已保存。")
         return
 
+    if action == "save_question_answer_edit":
+        last_answer_edit_token_key = f"ppt_question_answer_edit_last_token_{deck['id']}"
+        if token and st.session_state.get(last_answer_edit_token_key) == token:
+            return
+        try:
+            question_id = int(payload.get("questionId", 0))
+        except (TypeError, ValueError):
+            return
+        answer = str(payload.get("answer") or "").strip()
+        if not question_id or not answer:
+            return
+        update_slide_question_answer(require_login().id, question_id, answer)
+        if token:
+            st.session_state[last_answer_edit_token_key] = token
+        st.toast("插问回答高亮已保存。")
+        return
+
+    if action == "merge_question_thread":
+        last_merge_token_key = f"ppt_question_merge_last_token_{deck['id']}"
+        if token and st.session_state.get(last_merge_token_key) == token:
+            return
+        try:
+            question_id = int(payload.get("questionId", 0))
+        except (TypeError, ValueError):
+            return
+        if question_id:
+            flatten_question_subtree(require_login().id, question_id)
+        if token:
+            st.session_state[last_merge_token_key] = token
+        st.rerun()
+        return
+
     last_token_key = f"ppt_canvas_question_last_token_{deck['id']}"
     if token and st.session_state.get(last_token_key) == token:
         return
@@ -780,6 +820,16 @@ def _handle_synced_reader_action(
 
     quote_payload = payload.get("quote") if isinstance(payload.get("quote"), dict) else None
     quote = _quote_from_component_payload(deck, slide, quote_payload) if quote_payload else None
+    target_payload = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    parent_question_id = _optional_positive_int(
+        payload.get("parentQuestionId") or target_payload.get("parentQuestionId")
+    )
+    quote_source = str((quote_payload or {}).get("sourceKind") or (quote_payload or {}).get("sourceType") or "slide")
+    quote_source_question_id = _optional_positive_int(
+        (quote_payload or {}).get("questionId")
+        or (quote_payload or {}).get("sourceQuestionId")
+        or parent_question_id
+    )
     full_question = _compose_quoted_branch_question(quote, question) if quote else question
     context_by_slide = build_slide_context_map(deck, slides, sections)
     prompt = _build_branch_prompt(
@@ -805,10 +855,17 @@ def _handle_synced_reader_action(
             answer,
             _active_model_label(),
             quote_text=quote["selected_text"] if quote else "",
+            parent_question_id=parent_question_id,
+            quote_source=quote_source,
+            quote_source_question_id=quote_source_question_id,
         )
     except AIServiceError as exc:
         st.error(str(exc))
         st.caption("侧边插问调用失败，当前阅读位置不会被修改。")
+        return
+    except ValueError as exc:
+        st.error(f"插问保存失败：{exc}")
+        st.caption("请关闭过深或已失效的子插问栏后再试。")
         return
 
     if token:
@@ -818,6 +875,14 @@ def _handle_synced_reader_action(
 
 def _save_manual_explanation(slide_id: int, explanation: str) -> int:
     return add_slide_explanation(require_login().id, int(slide_id), f"手动编辑 / {_active_model_label()}", explanation)
+
+
+def _optional_positive_int(value: object) -> int | None:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _handle_reader_position_update(deck: dict, slide_number: int, token: str = "") -> bool:
@@ -3602,6 +3667,12 @@ def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
         slide_id: [
             {
                 **_branch_question_display_parts(row["question"], row.get("quote_text", "")),
+                "id": row.get("id"),
+                "rootQuestionId": row.get("root_question_id") or row.get("id"),
+                "parentQuestionId": row.get("parent_question_id"),
+                "depth": int(row.get("depth") or 0),
+                "quoteSource": row.get("quote_source") or "slide",
+                "quoteSourceQuestionId": row.get("quote_source_question_id"),
                 "answer": row["answer"],
                 "model": row["model"],
                 "category": row["category"],

@@ -786,6 +786,22 @@
       font-weight: 800;
       cursor: pointer;
     }
+    .canvas-scroll-bottom,
+    .child-chat-bottom {
+      width: 34px;
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid rgba(30, 132, 150, .26);
+      border-radius: 50%;
+      background: #ffffff;
+      color: #1c6f7b;
+      font-size: 19px;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow: 0 8px 18px rgba(30, 90, 110, .12);
+    }
     .canvas-chat-meta {
       margin-top: 5px;
       color: var(--muted);
@@ -819,6 +835,12 @@
     }
     .chat-turn {
       margin-bottom: 14px;
+    }
+    .chat-turn.child-question {
+      padding: 8px 8px 9px;
+      border-left: 3px solid #9ed4e1;
+      border-radius: 12px;
+      background: #f3f8fb;
     }
     .chat-question,
     .chat-answer {
@@ -886,6 +908,107 @@
       margin: 6px 2px 0;
       color: #6f8c96;
       font-size: 11px;
+    }
+    .chat-answer-body {
+      min-height: 1px;
+    }
+    .chat-turn-actions {
+      margin-top: 6px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+    }
+    .chat-turn-actions button,
+    .child-chat-close,
+    .child-chat-send {
+      border: 1px solid #c7e6e0;
+      border-radius: 999px;
+      padding: 5px 9px;
+      background: #ffffff;
+      color: #267c75;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .child-chat-stack {
+      position: fixed;
+      top: 78px;
+      right: 10px;
+      bottom: 12px;
+      display: flex;
+      align-items: stretch;
+      justify-content: flex-end;
+      gap: 10px;
+      width: var(--child-stack-width, auto);
+      max-width: min(calc(100% - 24px), var(--child-stack-width, calc(100% - 24px)));
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding-bottom: 4px;
+      pointer-events: none;
+      z-index: 30;
+    }
+    .child-chat-panel {
+      width: min(var(--child-panel-width, 360px), calc(100vw - 34px));
+      min-width: min(260px, var(--child-panel-width, 360px));
+      flex: 0 0 min(var(--child-panel-width, 360px), calc(100vw - 34px));
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      pointer-events: auto;
+      border: 1px solid #abdbe5;
+      border-radius: 14px;
+      background: rgba(250, 255, 253, .98);
+      box-shadow: 0 18px 48px rgba(22, 70, 82, .22);
+    }
+    .child-chat-header {
+      padding: 11px 12px 9px;
+      border-bottom: 1px solid #d4ecee;
+      background: #effafb;
+    }
+    .child-chat-header-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .child-chat-title {
+      margin: 0;
+      color: #115f69;
+      font-size: 14px;
+      font-weight: 800;
+    }
+    .child-chat-meta {
+      margin-top: 5px;
+      color: #66838b;
+      font-size: 12px;
+    }
+    .child-chat-messages {
+      min-height: 0;
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+    }
+    .child-chat-compose {
+      padding: 11px 12px 12px;
+      border-top: 1px solid #d4ecee;
+      background: #ffffff;
+    }
+    .child-chat-input {
+      width: 100%;
+      min-height: 78px;
+      resize: vertical;
+      border: 1px solid #c9e4e8;
+      border-radius: 10px;
+      padding: 8px 9px;
+      font-family: inherit;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .child-chat-actions {
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
     }
     .canvas-compose {
       padding: 12px 14px 14px;
@@ -1011,6 +1134,7 @@
         <header class="canvas-chat-header">
           <div class="canvas-chat-header-row">
             <h3 class="canvas-chat-title">侧边插问</h3>
+            <button type="button" class="canvas-scroll-bottom" id="canvasScrollBottomButton" title="滚到最下">↓</button>
             <button type="button" class="canvas-toggle" id="toggleCanvasButton">收起</button>
           </div>
           <div class="canvas-chat-meta" id="canvasChatMeta">跟随当前页，不改变阅读位置</div>
@@ -1031,6 +1155,7 @@
       </aside>
     </div>
   </div>
+  <div class="child-chat-stack" id="childChatStack"></div>
   <div class="selection-toolbar" id="selectionToolbar">
     <button type="button" id="askSelectionButton">引用到插问</button>
     <button type="button" class="secondary" id="highlightSelectionButton">高亮</button>
@@ -1085,10 +1210,12 @@
     const canvasMessages = document.getElementById('canvasMessages');
     const canvasInput = document.getElementById('canvasInput');
     const canvasSendButton = document.getElementById('canvasSendButton');
+    const canvasScrollBottomButton = document.getElementById('canvasScrollBottomButton');
     const canvasHint = document.getElementById('canvasHint');
     const quotePreview = document.getElementById('quotePreview');
     const quotePreviewText = document.getElementById('quotePreviewText');
     const clearQuoteButton = document.getElementById('clearQuoteButton');
+    const childChatStack = document.getElementById('childChatStack');
 
     let pages = [];
     let sections = [];
@@ -1098,6 +1225,8 @@
     let currentSelectionPayload = null;
     let currentSlideNumber = 1;
     let currentChatQuote = null;
+    let childChatLayers = [];
+    let childPanelScrollToBottomLayerId = null;
     let restoreScrollAfterRender = null;
     let layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
     let chatCollapsed = false;
@@ -1745,7 +1874,22 @@
     function applyLayoutState() {
       if (!readerGrid) return;
       const chatColumn = chatCollapsed ? '48px' : `minmax(330px, ${layoutState.chat}fr)`;
-      readerGrid.style.gridTemplateColumns = `minmax(260px, ${layoutState.pages}fr) var(--resize-handle-width) minmax(300px, ${layoutState.notes}fr) var(--resize-handle-width) ${chatColumn}`;
+      const childCount = Array.isArray(childChatLayers) ? childChatLayers.length : 0;
+      const gridWidth = Number(readerGrid.getBoundingClientRect?.().width || window.innerWidth || 1200);
+      const maxChildWidth = Math.max(300, gridWidth - 760);
+      const childReserveWidth = childCount
+        ? Math.floor(Math.min(childCount * 370, maxChildWidth, Math.max(300, gridWidth * 0.62)))
+        : 0;
+      const childGapWidth = Math.max(0, childCount - 1) * 10;
+      const childPanelWidth = childCount
+        ? Math.max(220, Math.min(360, Math.floor((childReserveWidth - childGapWidth) / childCount)))
+        : 360;
+      const childWidth = childReserveWidth ? ` minmax(${childReserveWidth}px, ${childReserveWidth}px)` : '';
+      readerGrid.style.gridTemplateColumns = `minmax(180px, ${layoutState.pages}fr) var(--resize-handle-width) minmax(220px, ${layoutState.notes}fr) var(--resize-handle-width) ${chatColumn}${childWidth}`;
+      if (typeof childChatStack !== 'undefined' && childChatStack) {
+        childChatStack.style.setProperty('--child-stack-width', childReserveWidth ? `${childReserveWidth}px` : '0px');
+        childChatStack.style.setProperty('--child-panel-width', `${childPanelWidth}px`);
+      }
       canvasChat.classList.toggle('collapsed', chatCollapsed);
       if (toggleCanvasButton) toggleCanvasButton.textContent = chatCollapsed ? '展开' : '收起';
     }
@@ -1772,6 +1916,28 @@
       if (focusInput) {
         window.setTimeout(() => canvasInput?.focus(), 80);
       }
+    }
+
+    function sendQuestionThreadMerge(questionId) {
+      const targetQuestionId = Number(questionId || 0);
+      if (!targetQuestionId) return false;
+      Streamlit.setComponentValue({
+        action: 'merge_question_thread',
+        token: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        deckId,
+        slideNumber: currentSlideNumber,
+        questionId: targetQuestionId,
+      });
+      return true;
+    }
+
+    function closeChildLayersForSlideChange() {
+      if (!childChatLayers.length) return;
+      sendQuestionThreadMerge(childChatLayers[0]?.parentQuestionId);
+      childChatLayers = [];
+      childPanelScrollToBottomLayerId = null;
+      renderChildQuestionStack();
+      applyLayoutState();
     }
 
     function toggleCanvasChat() {
@@ -2305,6 +2471,7 @@
       const nextSlideNumber = Number(pageNumber || 1);
       if (!pageForSlide(nextSlideNumber)) return;
       const sameSlide = nextSlideNumber === currentSlideNumber;
+      if (!sameSlide) closeChildLayersForSlideChange();
       const currentPage = document.getElementById(`page-${nextSlideNumber}`);
       const currentNote = document.getElementById(`note-${nextSlideNumber}`);
       if (
@@ -2620,6 +2787,40 @@
       const end = sourceIndexFromMappedBoundary(body, range.endContainer, range.endOffset, 'end');
       if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start) return null;
       return { start, end };
+    }
+
+    function questionIdForItem(item) {
+      const id = Number(item?.id || item?.questionId || 0);
+      return Number.isFinite(id) && id > 0 ? id : null;
+    }
+
+    function allQuestionsForCurrentPage() {
+      const page = pageForSlide(currentSlideNumber);
+      return Array.isArray(page?.questions) ? page.questions : [];
+    }
+
+    function questionById(questionId) {
+      const targetId = Number(questionId || 0);
+      if (!targetId) return null;
+      for (const page of pages) {
+        const found = (Array.isArray(page.questions) ? page.questions : [])
+          .find(item => Number(questionIdForItem(item)) === targetId);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    function childQuestionsFor(parentQuestionId) {
+      const parentId = Number(parentQuestionId || 0);
+      return allQuestionsForCurrentPage().filter(item => Number(item.parentQuestionId || 0) === parentId);
+    }
+
+    function applyChatSourceMaps(root = canvasMessages) {
+      if (!root) return;
+      root.querySelectorAll('.chat-answer-body').forEach(body => {
+        const item = questionById(body.dataset.questionId);
+        if (item) applyMarkdownSourceMap(body, item.answer);
+      });
     }
 
     function locateMarkdownSelectionInSource(source, payload) {
@@ -3005,6 +3206,34 @@
     function highlightCurrentSelection() {
       const payload = currentSelectionPayload || buildSelectionPayload();
       if (!payload) return;
+      if (payload.sourceKind === 'question_answer') {
+        const item = questionById(payload.questionId);
+        if (!item) return;
+        const result = wrapMarkdownSelection(String(item.answer || ''), payload);
+        if (!result) {
+          selectionHint.textContent = '未能在插问回答 Markdown 中定位选中文本';
+          return;
+        }
+        const previousScrollTop = canvasMessages.scrollTop;
+        item.answer = result.source;
+        renderChatForPage(currentSlideNumber, { preserveScroll: true });
+        canvasMessages.scrollTop = previousScrollTop;
+        renderChildQuestionStack();
+        selectionHint.textContent = result.action === 'remove'
+          ? '插问回答高亮已取消，正在后台保存'
+          : '插问回答高亮已显示，正在后台保存';
+        window.getSelection()?.removeAllRanges();
+        hideSelectionToolbar();
+        Streamlit.setComponentValue({
+          action: 'save_question_answer_edit',
+          token: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+          deckId,
+          slideNumber: payload.slideNumber,
+          questionId: payload.questionId,
+          answer: result.source,
+        });
+        return;
+      }
       const page = pageForSlide(payload.slideNumber);
       if (!page) return;
       const result = wrapMarkdownSelection(String(page.explanation || ''), payload);
@@ -3279,6 +3508,59 @@
       return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
     }
 
+    function buildChatSelectionPayloadFromRange(range, startElement, endElement, selectedText) {
+      const answerBody = startElement?.closest?.('.chat-answer-body');
+      if (!answerBody || !endElement || !answerBody.contains(endElement)) return null;
+      if (startElement?.closest?.('textarea, input') || endElement?.closest?.('textarea, input')) return null;
+      const questionId = Number(answerBody.dataset.questionId || 0);
+      const item = questionById(questionId);
+      if (!item) return null;
+
+      const beforeRange = document.createRange();
+      beforeRange.selectNodeContents(answerBody);
+      beforeRange.setEnd(range.startContainer, range.startOffset);
+      const beforeRaw = beforeRange.toString();
+
+      const afterRange = document.createRange();
+      afterRange.selectNodeContents(answerBody);
+      afterRange.setStart(range.endContainer, range.endOffset);
+      const afterRaw = afterRange.toString();
+
+      if (!noteBodySourceMaps.get(answerBody)) {
+        applyMarkdownSourceMap(answerBody, item.answer);
+      }
+      const sourceLocation = sourceLocationFromSelectionRange(answerBody, range);
+      const payload = {
+        action: 'branch_quote',
+        token: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        deckId,
+        slideNumber: Number(answerBody.dataset.slideNumber || currentSlideNumber),
+        slideTitle: `插问 #${questionId}`,
+        sourceKind: 'question_answer',
+        questionId,
+        sourceQuestionId: questionId,
+        parentQuestionId: item.parentQuestionId || null,
+        rootQuestionId: item.rootQuestionId || questionId,
+        depth: Number(item.depth || 0),
+        selectedText: clipText(selectedText, 1200),
+        selectedTextRaw: clipRawText(selectedText, 1200),
+        contextBefore: clipText(collapsedSearchText(beforeRaw).slice(-700), 700),
+        contextAfter: clipText(collapsedSearchText(afterRaw).slice(0, 700), 700),
+        selectionStartOffset: collapsedSearchText(beforeRaw).length,
+      };
+      if (sourceLocation) {
+        payload.sourceStart = sourceLocation.start;
+        payload.sourceEnd = sourceLocation.end;
+      }
+      const startHighlight = startElement?.closest?.('.reader-highlight');
+      const endHighlight = endElement?.closest?.('.reader-highlight');
+      const markdownState = markdownSelectionHighlightState(String(item.answer || ''), payload);
+      payload.isHighlighted = Boolean(
+        markdownState.isHighlighted || (startHighlight && startHighlight === endHighlight)
+      );
+      return payload;
+    }
+
     function buildSelectionPayload() {
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
@@ -3289,6 +3571,8 @@
       const startElement = nodeElement(range.startContainer);
       const endElement = nodeElement(range.endContainer);
       if (startElement?.closest?.('.note-editor') || endElement?.closest?.('.note-editor')) return null;
+      const chatPayload = buildChatSelectionPayloadFromRange(range, startElement, endElement, selectedText);
+      if (chatPayload) return chatPayload;
       const note = startElement?.closest?.('.note');
       if (!note || !noteRoot.contains(note) || !endElement || !note.contains(endElement)) return null;
 
@@ -3323,6 +3607,7 @@
         deckId,
         slideNumber,
         slideTitle: page.title || `第 ${slideNumber} 页`,
+        sourceKind: 'explanation',
         selectedText: clipText(selectedText, 1200),
         selectedTextRaw: clipRawText(selectedText, 1200),
         contextBefore: clipText(before.slice(-700), 700),
@@ -3384,7 +3669,10 @@
         quotePreviewText.textContent = '';
         return;
       }
-      quotePreviewText.textContent = `已引用第 ${currentChatQuote.slideNumber} 页：${clipText(currentChatQuote.selectedText, 140)}`;
+      const label = currentChatQuote.sourceKind === 'question_answer'
+        ? `已引用插问 #${currentChatQuote.questionId}`
+        : `已引用第 ${currentChatQuote.slideNumber} 页`;
+      quotePreviewText.textContent = `${label}：${clipText(currentChatQuote.selectedText, 140)}`;
       quotePreview.classList.add('show');
     }
 
@@ -3397,7 +3685,23 @@
       return `<div class="chat-question"><div class="chat-question-text">${questionHtml}</div>${quoteHtml}</div>`;
     }
 
-    function renderChatForPage(slideNumber) {
+    function renderChatTurn(item, options) {
+      options = options || {};
+      const questionId = questionIdForItem(item);
+      const isChild = Number(item.parentQuestionId || 0) > 0;
+      return `
+        <div class="chat-turn ${isChild ? 'child-question' : ''}" data-question-id="${questionId || ''}" data-depth="${Number(item.depth || 0)}">
+          ${renderChatQuestion(item)}
+          <div class="chat-answer">
+            <div class="chat-answer-body" data-question-id="${questionId || ''}" data-slide-number="${currentSlideNumber}">${renderMarkdown(item.answer || '')}</div>
+          </div>
+          <div class="chat-turn-meta">${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '· ' + escapeHtml(item.createdAt) : ''}</div>
+          ${options.inChildPanel ? '' : `<div class="chat-turn-actions"><button type="button" data-open-child-chat="${questionId || ''}">子插问</button></div>`}
+        </div>
+      `;
+    }
+
+    function renderChatForPage(slideNumber, options = {}) {
       const page = pageForSlide(slideNumber);
       if (!page) {
         canvasContext.textContent = '当前上下文：未识别页面';
@@ -3413,7 +3717,8 @@
       ].filter(Boolean);
       canvasContext.textContent = `当前上下文：${contextParts.join(' · ')}`;
       const messages = Array.isArray(page.questions) ? page.questions : [];
-      if (!messages.length) {
+      const rootMessages = messages.filter(item => !Number(item.parentQuestionId || 0));
+      if (!rootMessages.length) {
         canvasMessages.innerHTML = `
           <div class="canvas-empty">
             本页还没有插问。你可以直接围绕当前 PPT 页面和右侧讲解提问；回答会保存到这一页，不会覆盖主线讲解。
@@ -3421,15 +3726,23 @@
         `;
         return;
       }
-      canvasMessages.innerHTML = messages.map(item => `
-        <div class="chat-turn">
-          ${renderChatQuestion(item)}
-          <div class="chat-answer">${renderMarkdown(item.answer || '')}</div>
-          <div class="chat-turn-meta">${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '· ' + escapeHtml(item.createdAt) : ''}</div>
-        </div>
-      `).join('');
-      canvasMessages.scrollTop = canvasMessages.scrollHeight;
-      typesetTargets([canvasMessages]);
+      const previousScrollTop = canvasMessages.scrollTop;
+      canvasMessages.innerHTML = rootMessages.map(item => [
+        renderChatTurn(item),
+        ...messages
+          .filter(child => Number(child.rootQuestionId || child.id || 0) === Number(item.rootQuestionId || item.id || 0)
+            && Number(child.parentQuestionId || 0) > 0)
+          .map(child => renderChatTurn(child)),
+      ].join('')).join('');
+      if (options.preserveScroll) {
+        canvasMessages.scrollTop = previousScrollTop;
+      } else {
+        canvasMessages.scrollTop = canvasMessages.scrollHeight;
+      }
+      typesetTargets([canvasMessages]).then(typesetDone => {
+        if (typesetDone !== false) applyChatSourceMaps(canvasMessages);
+      });
+      renderChildQuestionStack();
     }
 
     function sendCanvasQuestion() {
@@ -3455,12 +3768,160 @@
         slideNumber: currentSlideNumber,
         question,
         quote: currentChatQuote,
+        parentQuestionId: currentChatQuote?.sourceKind === 'question_answer' ? currentChatQuote.questionId : null,
+      });
+    }
+
+    function sendChildQuestion(layerId) {
+      const layer = childChatLayers.find(item => item.layerId === layerId);
+      if (!layer) return;
+      const input = childChatStack.querySelector(`[data-child-input="${layerId}"]`);
+      const question = String(input?.value || '').trim();
+      if (!question) {
+        input?.focus();
+        return;
+      }
+      childPanelScrollToBottomLayerId = layerId;
+      Streamlit.setComponentValue({
+        action: 'canvas_question',
+        token: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        deckId,
+        slideNumber: currentSlideNumber,
+        question,
+        parentQuestionId: layer.parentQuestionId,
+        quote: layer.quote,
+      });
+    }
+
+    function openChildChatFromQuote(payload) {
+      if (!payload || payload.sourceKind !== 'question_answer' || !payload.questionId) return false;
+      const depth = Number(payload.depth || questionById(payload.questionId)?.depth || 0) + 1;
+      if (depth > 5) {
+        selectionHint.textContent = '子插问最多支持 5 级';
+        return true;
+      }
+      const anchorQuestionId = Number(payload.questionId);
+      const noteAnchor = noteAnchorForSlide(currentSlideNumber);
+      const pageScroll = pageRoot.scrollTop;
+      const chatScroll = canvasMessages.scrollTop;
+      const childScrollPositions = childLayerScrollPositions();
+      const keep = childChatLayers.filter(layer => Number(layer.depth || 0) < depth);
+      const layer = {
+        layerId: `${anchorQuestionId}_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        parentQuestionId: anchorQuestionId,
+        depth,
+        quote: payload,
+      };
+      childChatLayers = [...keep, layer].slice(-5);
+      renderChildQuestionStack({ scrollPositions: childScrollPositions });
+      applyLayoutState();
+      restoreReaderScrollPositions(noteAnchor, pageScroll, chatScroll);
+      return true;
+    }
+
+    function closeChildLayer(layerId) {
+      const index = childChatLayers.findIndex(layer => layer.layerId === layerId);
+      if (index < 0) return;
+      const noteAnchor = noteAnchorForSlide(currentSlideNumber);
+      const pageScroll = pageRoot.scrollTop;
+      const chatScroll = canvasMessages.scrollTop;
+      const childScrollPositions = childLayerScrollPositions();
+      const layer = childChatLayers[index];
+      childChatLayers = childChatLayers.slice(0, index);
+      renderChildQuestionStack({ scrollPositions: childScrollPositions });
+      applyLayoutState();
+      restoreReaderScrollPositions(noteAnchor, pageScroll, chatScroll);
+      sendQuestionThreadMerge(layer.parentQuestionId);
+    }
+
+    function scrollChatToBottom(container) {
+      if (!container) return;
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    }
+
+    function childLayerScrollPositions() {
+      const positions = new Map();
+      if (!childChatStack) return positions;
+      childChatStack.querySelectorAll('.child-chat-messages').forEach(panel => {
+        const layerId = String(panel.dataset.childMessages || '');
+        if (layerId) positions.set(layerId, panel.scrollTop);
+      });
+      return positions;
+    }
+
+    function restoreReaderScrollPositions(noteAnchor, pageScroll, chatScroll) {
+      const restore = () => {
+        pageRoot.scrollTop = pageScroll;
+        restoreNoteAnchor(noteAnchor);
+        canvasMessages.scrollTop = chatScroll;
+      };
+      window.requestAnimationFrame(() => {
+        restore();
+        window.requestAnimationFrame(restore);
+      });
+      [80, 180, 360].forEach(delay => window.setTimeout(restore, delay));
+    }
+
+    function renderChildQuestionStack(options) {
+      if (!childChatStack) return;
+      options = options || {};
+      const scrollPositions = options.scrollPositions || childLayerScrollPositions();
+      const forceBottomLayerId = String(options.forceBottomLayerId || childPanelScrollToBottomLayerId || '');
+      childChatStack.innerHTML = childChatLayers.map(layer => {
+        const parent = questionById(layer.parentQuestionId);
+        const children = childQuestionsFor(layer.parentQuestionId);
+        const messagesHtml = children.length
+          ? children.map(item => renderChatTurn(item, { inChildPanel: true })).join('')
+          : '<div class="canvas-empty">还没有子插问。</div>';
+        return `
+          <aside class="child-chat-panel" data-child-layer="${layer.layerId}">
+            <header class="child-chat-header">
+              <div class="child-chat-header-row">
+                <h3 class="child-chat-title">子插问</h3>
+                <button type="button" class="child-chat-bottom" data-child-bottom="${layer.layerId}" title="滚到最下">↓</button>
+                <button type="button" class="child-chat-close" data-child-close="${layer.layerId}">关闭</button>
+              </div>
+              <div class="child-chat-meta">引用插问 #${escapeHtml(layer.parentQuestionId)} · ${escapeHtml(clipText(parent?.question || '', 42))}</div>
+            </header>
+            <div class="child-chat-messages" data-child-messages="${layer.layerId}">${messagesHtml}</div>
+            <div class="child-chat-compose">
+              <div class="quote-preview show"><div>${escapeHtml(clipText(layer.quote?.selectedText || '', 160))}</div></div>
+              <textarea class="child-chat-input" data-child-input="${layer.layerId}" placeholder="继续围绕这段回答提问"></textarea>
+              <div class="child-chat-actions">
+                <span class="canvas-hint">回答会保存到当前 0 级插问下</span>
+                <button type="button" class="child-chat-send" data-child-send="${layer.layerId}">问当前模型</button>
+              </div>
+            </div>
+          </aside>
+        `;
+      }).join('');
+      childChatStack.querySelectorAll('.child-chat-messages').forEach(panel => {
+        const layerId = String(panel.dataset.childMessages || '');
+        if (forceBottomLayerId && layerId === forceBottomLayerId) {
+          panel.scrollTop = panel.scrollHeight;
+        } else if (scrollPositions.has(layerId)) {
+          panel.scrollTop = scrollPositions.get(layerId);
+        } else {
+          panel.scrollTop = panel.scrollHeight;
+        }
+      });
+      if (forceBottomLayerId && childPanelScrollToBottomLayerId === forceBottomLayerId) {
+        childPanelScrollToBottomLayerId = null;
+      }
+      typesetTargets([childChatStack]).then(typesetDone => {
+        if (typesetDone !== false) applyChatSourceMaps(childChatStack);
       });
     }
 
     function sendSelectionToBranch() {
       const payload = currentSelectionPayload || buildSelectionPayload();
       if (!payload) return;
+      if (openChildChatFromQuote(payload)) {
+        currentChatQuote = null;
+        hideSelectionToolbar();
+        window.getSelection()?.removeAllRanges();
+        return;
+      }
       currentChatQuote = payload;
       renderQuotePreview();
       setActive(payload.slideNumber, {
@@ -3531,6 +3992,7 @@
     highlightSelectionButton.addEventListener('click', highlightCurrentSelection);
     copySelectionButton.addEventListener('click', copyCurrentSelection);
     canvasSendButton.addEventListener('click', sendCanvasQuestion);
+    canvasScrollBottomButton.addEventListener('click', () => scrollChatToBottom(canvasMessages));
     toggleCanvasButton.addEventListener('click', toggleCanvasChat);
     openCanvasButton.addEventListener('click', () => openCanvasChat(true));
     sectionSelect.addEventListener('change', () => {
@@ -3598,6 +4060,43 @@
     });
     noteRoot.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
     noteRoot.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
+    canvasMessages.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
+    canvasMessages.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
+    childChatStack.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
+    childChatStack.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
+    canvasMessages.addEventListener('click', (event) => {
+      const button = event.target?.closest?.('[data-open-child-chat]');
+      if (!button) return;
+      const questionId = Number(button.dataset.openChildChat || 0);
+      const item = questionById(questionId);
+      if (!item) return;
+      openChildChatFromQuote({
+        sourceKind: 'question_answer',
+        questionId,
+        slideNumber: currentSlideNumber,
+        selectedText: item.answer || item.question || '',
+        selectedTextRaw: item.answer || item.question || '',
+        contextBefore: '',
+        contextAfter: '',
+        depth: Number(item.depth || 0),
+      });
+    });
+    childChatStack.addEventListener('click', (event) => {
+      const closeButton = event.target?.closest?.('[data-child-close]');
+      if (closeButton) {
+        closeChildLayer(closeButton.dataset.childClose);
+        return;
+      }
+      const sendButton = event.target?.closest?.('[data-child-send]');
+      if (sendButton) {
+        sendChildQuestion(sendButton.dataset.childSend);
+        return;
+      }
+      const bottomButton = event.target?.closest?.('[data-child-bottom]');
+      if (bottomButton) {
+        scrollChatToBottom(childChatStack.querySelector(`[data-child-messages="${bottomButton.dataset.childBottom}"]`));
+      }
+    });
     document.addEventListener('mousedown', (event) => {
       if (!selectionToolbar.contains(event.target)) {
         window.setTimeout(() => {
@@ -3609,9 +4108,10 @@
 
     function nearestScrollPanel(target) {
       if (target?.closest?.('.canvas-input')) return null;
+      if (target?.closest?.('.child-chat-input')) return null;
       if (target?.closest?.('.page-jump-input')) return null;
       if (target?.closest?.('.note-editor')) return null;
-      const element = target?.closest?.('.pages, .notes, .canvas-messages');
+      const element = target?.closest?.('.pages, .notes, .canvas-messages, .child-chat-messages');
       if (element) return element;
       return pageRoot;
     }
