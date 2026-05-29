@@ -4,12 +4,12 @@ import os
 import platform
 import subprocess
 import re
-from datetime import datetime
+import uuid
 from pathlib import Path
 from typing import BinaryIO
 
-from db import DATA_DIR, execute_many, managed_connection
-from services.auth_service import get_user_upload_usage, require_login
+from db import DATA_DIR, execute_many, write_transaction
+from services.auth_service import require_login
 
 UPLOAD_DIR = DATA_DIR / "uploads"
 PAGE_IMAGE_DIR = DATA_DIR / "page_images"
@@ -17,10 +17,9 @@ PAGE_IMAGE_DIR = DATA_DIR / "page_images"
 
 def import_deck(uploaded_file: BinaryIO, *, subject: str, title: str) -> int:
     user = require_login()
-    usage = get_user_upload_usage(user.id)
     data = bytes(uploaded_file.getbuffer() if hasattr(uploaded_file, "getbuffer") else uploaded_file.read())
     upload_size = len(data)
-    if usage["quota_bytes"] > 0 and usage["used_bytes"] + upload_size > usage["quota_bytes"]:
+    if not _reserve_upload_capacity(user.id, upload_size):
         raise RuntimeError("上传失败：已超过当前账户的上传容量配额。请联系管理员扩容或先删除旧资料。")
     original_name = getattr(uploaded_file, "name", "")
     suffix = Path(original_name).suffix.lower()
@@ -55,7 +54,18 @@ def _save_deck_records(
 ) -> int:
     user = require_login()
     deck_title = title.strip() or saved_path.stem
-    with managed_connection() as conn:
+    with write_transaction() as conn:
+        if not _has_upload_capacity(conn, user.id, saved_path.stat().st_size):
+            try:
+                saved_path.unlink()
+            except OSError:
+                pass
+            for image_path in image_paths.values():
+                try:
+                    image_path.unlink()
+                except OSError:
+                    pass
+            raise RuntimeError("上传失败：已超过当前账户的上传容量配额。请联系管理员扩容或先删除旧资料。")
         cursor = conn.execute(
             """
             INSERT INTO ppt_decks (user_id, filename, title, subject, file_path, slide_count)
@@ -86,15 +96,18 @@ def _save_deck_records(
 
 
 def save_uploaded_deck(uploaded_file: BinaryIO, *, file_bytes: bytes | None = None) -> Path:
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    user = require_login()
+    user_upload_dir = UPLOAD_DIR / f"user_{user.id}"
+    user_upload_dir.mkdir(parents=True, exist_ok=True)
     original_name = getattr(uploaded_file, "name", "uploaded")
     suffix = Path(original_name).suffix.lower() or ".pptx"
     safe_stem = _safe_filename(Path(original_name).stem) or "deck"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    target = UPLOAD_DIR / f"{timestamp}_{safe_stem}{suffix}"
+    target = user_upload_dir / f"{uuid.uuid4().hex}_{safe_stem}{suffix}"
+    temp_target = target.with_name(f".{target.name}.tmp")
 
     data = file_bytes if file_bytes is not None else bytes(uploaded_file.getbuffer() if hasattr(uploaded_file, "getbuffer") else uploaded_file.read())
-    target.write_bytes(data)
+    temp_target.write_bytes(data)
+    temp_target.replace(target)
     return target
 
 
@@ -408,7 +421,8 @@ def refresh_pdf_slide_text(deck: dict, slides: list[dict]) -> int:
 
 
 def _page_image_target_dir(path: Path) -> Path:
-    return PAGE_IMAGE_DIR / _safe_filename(path.stem)
+    user_id = _user_id_from_upload_path(path) or require_login().id
+    return PAGE_IMAGE_DIR / f"user_{user_id}" / _safe_filename(path.stem)
 
 
 def _slide_image_index(filename: str) -> int | None:
@@ -448,3 +462,35 @@ def _first_text_line(text: str) -> str:
 
 def _safe_filename(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "_", value).strip("._-")
+
+
+def _reserve_upload_capacity(user_id: int, upload_size: int) -> bool:
+    with write_transaction() as conn:
+        return _has_upload_capacity(conn, user_id, upload_size)
+
+
+def _has_upload_capacity(conn, user_id: int, upload_size: int) -> bool:
+    user_row = conn.execute("SELECT role, upload_quota_bytes FROM users WHERE id = ?", (int(user_id),)).fetchone()
+    user_data = dict(user_row) if user_row else {}
+    role = str(user_data.get("role") or "user")
+    quota = 0 if role == "admin" else int(user_data.get("upload_quota_bytes") or 0)
+    if quota <= 0:
+        return True
+    total = 0
+    rows = conn.execute("SELECT file_path FROM ppt_decks WHERE user_id = ?", (int(user_id),)).fetchall()
+    for row in rows:
+        path_text = str(row["file_path"] or "").strip()
+        if not path_text:
+            continue
+        path = Path(path_text)
+        if path.exists() and path.is_file():
+            total += path.stat().st_size
+    return total + int(upload_size) <= quota
+
+
+def _user_id_from_upload_path(path: Path) -> int | None:
+    for parent in path.parents:
+        match = re.fullmatch(r"user_(\d+)", parent.name)
+        if match:
+            return int(match.group(1))
+    return None

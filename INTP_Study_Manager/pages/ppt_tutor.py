@@ -78,6 +78,7 @@ PPT_INLINE_BENCHMARK_MIN_SLIDES = parallel_benchmark.INLINE_BENCHMARK_MIN_SAMPLE
 PPT_PARALLEL_BENCHMARK_STATE_KEY = "ppt_parallel_benchmark_results"
 PPT_GENERATION_REFRESH_SECONDS = 1.5
 PPT_GENERATION_REFRESH_STATE_KEY = "ppt_generation_last_refresh"
+PPT_GENERATION_MAX_RETRIES = 3
 PPT_STRUCTURE_REFRESH_STATE_KEY = "ppt_structure_last_refresh"
 PPT_STUDY_ASSET_REFRESH_STATE_KEY = "ppt_study_asset_last_refresh"
 PPT_STUDY_ASSET_REQUEST_TIMEOUT_SECONDS = 300
@@ -228,7 +229,7 @@ def render() -> None:
         return
     slide_by_id = {slide["id"]: slide for slide in slides}
     latest_by_slide_id = _latest_explanations_by_slide_ids(list(slide_by_id))
-    sections = fetch_deck_sections(int(deck["id"]))
+    sections = fetch_deck_sections(int(deck["id"]), user_id=user.id)
 
     st.divider()
     _render_deck_actions(deck, slides, latest_by_slide_id, sections)
@@ -672,7 +673,8 @@ def _generate_document_structure(
         reasoning_depth=reasoning_depth if reasoning_depth is not None else st.session_state.get("active_api_reasoning_depth"),
     )
     structure = parse_document_structure_response(response, slides)
-    save_deck_structure(int(deck["id"]), structure)
+    deck_user_id = int(deck["user_id"]) if deck.get("user_id") is not None else None
+    save_deck_structure(int(deck["id"]), structure, user_id=deck_user_id)
     return structure
 
 
@@ -2032,6 +2034,11 @@ def _generate_whole_deck_explanations(
     related_knowledge = _related_knowledge_context(deck.get("subject") or "未分类", user_id=user_id)
 
     if background:
+        existing_task = st.session_state.get("ppt_generation_task")
+        if existing_task and existing_task.get("status") == "running":
+            st.info("逐页讲解正在后台生成，不会重复启动。")
+            st.rerun()
+            return
         task = {
             "status": "running",
             "progress": 0.0,
@@ -2067,6 +2074,7 @@ def _generate_whole_deck_explanations(
             "inflight_slide_numbers": [],
             "completed": False,
             "stop_requested": False,
+            "max_retries": PPT_GENERATION_MAX_RETRIES,
         }
         st.session_state["ppt_generation_task"] = task
         thread = threading.Thread(
@@ -2689,6 +2697,7 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
     skipped = 0
     failed = 0
     retried = int(task.get("retried") or 0)
+    max_retries = max(0, int(task.get("max_retries") if task.get("max_retries") is not None else PPT_GENERATION_MAX_RETRIES))
     processed = 0
     total = len(targets)
     if total <= 0:
@@ -2861,10 +2870,11 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
                     skipped += 1
                     task.setdefault("skipped_slide_numbers", []).append(slide_number)
                 else:
-                    if not task.get("stop_requested"):
+                    next_attempt = int(job.get("attempt") or 0) + 1
+                    if not task.get("stop_requested") and next_attempt <= max_retries:
                         retry_job = {
                             "slide": slide,
-                            "attempt": int(job.get("attempt") or 0) + 1,
+                            "attempt": next_attempt,
                             "failed_provider_keys": set(job.get("failed_provider_keys") or set()) | {provider_state["provider_key"]},
                         }
                         pending.append(retry_job)
@@ -2884,6 +2894,17 @@ def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -
                     processed += 1
                     failed += 1
                     task.setdefault("failed_slide_numbers", []).append(slide_number)
+                    if not task.get("stop_requested"):
+                        _update_generation_task_progress(
+                            task,
+                            processed=processed,
+                            total=total,
+                            generated=generated,
+                            skipped=skipped,
+                            failed=failed,
+                            inflight=[int(item["slide"].get("slide_number") or 0) for item, _ in future_to_slide.values()],
+                            message=f"第 {slide_number} 页连续失败，已达到最大重试次数 {max_retries}。",
+                        )
 
                 if result.get("stop"):
                     task["stop_requested"] = True

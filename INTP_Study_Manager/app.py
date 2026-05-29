@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -23,6 +24,10 @@ from pages import (
 )
 from services.ai_service import ensure_default_api_providers
 from services.auth_service import (
+    AUTH_SESSION_COOKIE_NAME,
+    AUTH_SESSION_EXPIRES_AT_KEY,
+    AUTH_SESSION_IDLE_SECONDS,
+    AUTH_SESSION_TOKEN_KEY,
     bootstrap_admin,
     format_bytes,
     get_current_user,
@@ -31,8 +36,11 @@ from services.auth_service import (
     initialize_first_admin,
     login,
     logout,
+    record_browser_activity_ping,
     register_by_invite,
     require_login,
+    restore_current_user_from_device_session,
+    refresh_device_session_activity,
     ensure_auth_tables,
 )
 
@@ -130,10 +138,113 @@ def _install_browser_dom_guard() -> None:
     )
 
 
+def _install_auth_session_browser_guard() -> None:
+    token = str(st.session_state.get(AUTH_SESSION_TOKEN_KEY) or "").strip()
+    expires_at = int(st.session_state.get(AUTH_SESSION_EXPIRES_AT_KEY) or 0)
+    components.html(
+        f"""
+        <script>
+        (() => {{
+          const cookieName = {AUTH_SESSION_COOKIE_NAME!r};
+          const token = {token!r};
+          const expiresAt = {expires_at};
+          const idleMs = {AUTH_SESSION_IDLE_SECONDS * 1000};
+          let rootWindow;
+          try {{
+            rootWindow = window.parent || window;
+            void rootWindow.document;
+          }} catch {{
+            rootWindow = window;
+          }}
+          const doc = rootWindow.document;
+          const sameSite = rootWindow.location.protocol === 'https:' ? '; SameSite=Lax; Secure' : '; SameSite=Lax';
+          const setCookie = (value, maxAge) => {{
+            doc.cookie = `${{cookieName}}=${{encodeURIComponent(value)}}; Path=/; Max-Age=${{maxAge}}${{sameSite}}`;
+          }};
+          const clearCookie = () => setCookie('', 0);
+          if (token && expiresAt > 0) {{
+            setCookie(token, {AUTH_SESSION_IDLE_SECONDS});
+          }} else if (expiresAt === 0) {{
+            clearCookie();
+            delete rootWindow.__intpAuthSessionLastActivity;
+          }}
+          if (rootWindow.__intpAuthSessionGuardInstalled) {{
+            if (token) {{
+              rootWindow.__intpAuthSessionToken = token;
+            }}
+            return;
+          }}
+          rootWindow.__intpAuthSessionGuardInstalled = true;
+          rootWindow.__intpAuthSessionToken = token || rootWindow.__intpAuthSessionToken || '';
+          rootWindow.__intpAuthSessionLastActivity = Date.now();
+          let lastPingAt = 0;
+          let expiring = false;
+          const activityEvents = ['pointerdown', 'keydown', 'wheel', 'touchstart', 'input', 'change'];
+          const pingActivity = () => {{
+            const currentToken = rootWindow.__intpAuthSessionToken;
+            if (!currentToken || expiring) return;
+            rootWindow.__intpAuthSessionLastActivity = Date.now();
+            setCookie(currentToken, {AUTH_SESSION_IDLE_SECONDS});
+            const now = Date.now();
+            if (now - lastPingAt < 15000) return;
+            lastPingAt = now;
+            try {{
+              const url = new URL(rootWindow.location.href);
+              url.searchParams.set('intp_auth_ping', String(now));
+              rootWindow.history.replaceState(null, '', url.toString());
+            }} catch {{}}
+          }};
+          const expireIfIdle = () => {{
+            const currentToken = rootWindow.__intpAuthSessionToken;
+            if (!currentToken || expiring) return;
+            const lastActivity = Number(rootWindow.__intpAuthSessionLastActivity || 0);
+            if (Date.now() - lastActivity < idleMs) return;
+            expiring = true;
+            clearCookie();
+            rootWindow.__intpAuthSessionToken = '';
+            try {{
+              const url = new URL(rootWindow.location.href);
+              url.searchParams.set('intp_auth_expired', String(Date.now()));
+              rootWindow.location.replace(url.toString());
+            }} catch {{
+              rootWindow.location.reload();
+            }}
+          }};
+          activityEvents.forEach((eventName) => rootWindow.addEventListener(eventName, pingActivity, true));
+          rootWindow.setInterval(expireIfIdle, 5000);
+        }})();
+        </script>
+        """,
+        height=1,
+        width=1,
+    )
+
+
+def _consume_auth_activity_query_params() -> None:
+    if "intp_auth_ping" in st.query_params:
+        token = str(st.session_state.get(AUTH_SESSION_TOKEN_KEY) or "").strip()
+        try:
+            activity_at = int(str(st.query_params.get("intp_auth_ping") or "0"))
+        except ValueError:
+            activity_at = None
+        if token:
+            record_browser_activity_ping(token, activity_at=activity_at)
+        del st.query_params["intp_auth_ping"]
+    if "intp_auth_expired" in st.query_params:
+        logout()
+        del st.query_params["intp_auth_expired"]
+
+
 def _config_value(name: str, default: str = "") -> str:
     value = os.getenv(name)
     if value is not None:
         return value
+    secrets_paths = (
+        Path.home() / ".streamlit" / "secrets.toml",
+        Path(__file__).resolve().parent / ".streamlit" / "secrets.toml",
+    )
+    if not any(path.exists() for path in secrets_paths):
+        return default
     try:
         return str(st.secrets.get(name, default))
     except Exception:
@@ -242,11 +353,15 @@ def main() -> None:
     init_db()
     ensure_auth_tables()
     _seed_admin_from_env()
+    _consume_auth_activity_query_params()
 
-    user = get_current_user()
+    user = restore_current_user_from_device_session()
+    user = refresh_device_session_activity()
     if not user:
+        _install_auth_session_browser_guard()
         _render_auth_gate()
         return
+    _install_auth_session_browser_guard()
     ensure_default_api_providers()
 
     st.sidebar.title("INTP Study Manager")
