@@ -104,6 +104,25 @@ class PptRepositoryTest(unittest.TestCase):
         self.assertIn("ROW_NUMBER()", query)
         self.assertEqual(params, (4, 7))
 
+    def test_update_slide_bookmark_can_toggle_and_rename(self):
+        with patch.object(ppt_repository, "execute") as execute:
+            ppt_repository.update_slide_bookmark("4", "9", enabled=True, title="  My bookmark  ")
+
+        query, params = execute.call_args.args
+        self.assertIn("UPDATE ppt_slides", query)
+        self.assertIn("bookmark_enabled = ?", query)
+        self.assertIn("bookmark_title = ?", query)
+        self.assertEqual(params, (1, "My bookmark", 9, 4))
+
+    def test_update_slide_bookmark_can_toggle_without_overwriting_title(self):
+        with patch.object(ppt_repository, "execute") as execute:
+            ppt_repository.update_slide_bookmark("4", "9", enabled=False)
+
+        query, params = execute.call_args.args
+        self.assertIn("bookmark_enabled = ?", query)
+        self.assertNotIn("bookmark_title = ?", query)
+        self.assertEqual(params, (0, 9, 4))
+
     def test_questions_by_slide_ids_returns_empty_lists_for_requested_slides(self):
         with patch.object(ppt_repository, "fetch_all", return_value=[]):
             result = ppt_repository.questions_by_slide_ids(4, [7, 8])

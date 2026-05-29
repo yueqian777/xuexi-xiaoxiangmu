@@ -91,6 +91,8 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "isGeneratedExplanationPreambleLine",
             "displayExplanationSourceInfo",
             "displayExplanationSource",
+            "pageForSlide",
+            "createComponentToken",
             "findMathSegmentBoundsForLocation",
             "appendSearchableChar",
             "appendSearchableRange",
@@ -121,6 +123,19 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "sendQuestionThreadMerge",
             "closeChildLayersForSlideChange",
             "closeChildLayer",
+            "bookmarkTitleForPage",
+            "bookmarkedPages",
+            "renderBookmarkIcon",
+            "renderBookmarkList",
+            "renderBookmarkPanel",
+            "updateBookmarkControls",
+            "updatePageBookmarkButton",
+            "sendBookmarkUpdate",
+            "togglePageBookmark",
+            "renameBookmark",
+            "jumpToBookmark",
+            "closeBookmarkPanel",
+            "toggleBookmarkPanel",
         ]
         cls.js_helpers = "\n\n".join(
             block for name in helper_names if (block := _extract_function(source, name))
@@ -681,6 +696,86 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
               throw new Error(JSON.stringify(childChatLayers));
             }
             if (emitted.length !== 1 || emitted[0].action !== 'merge_question_thread' || emitted[0].questionId !== 10) {
+              throw new Error(JSON.stringify(emitted));
+            }
+            """
+        )
+
+    def test_bookmark_title_falls_back_to_slide_title(self):
+        self.run_js(
+            r"""
+            const title = bookmarkTitleForPage({
+              slideNumber: 2,
+              title: 'Signals',
+              bookmarkTitle: '',
+            });
+            if (title !== 'Signals') {
+              throw new Error(title);
+            }
+            """
+        )
+
+    def test_render_bookmark_list_shows_editable_bookmarks(self):
+        self.run_js(
+            r"""
+            var pages = [
+              { slideNumber: 2, title: 'Signals', bookmarkEnabled: true, bookmarkTitle: '' },
+              { slideNumber: 3, title: 'Noise', bookmarkEnabled: false, bookmarkTitle: '' },
+            ];
+            const html = renderBookmarkList();
+            if (!html.includes('data-bookmark-row="2"') || !html.includes('data-bookmark-title="2"')) {
+              throw new Error(html);
+            }
+            if (!html.includes('Signals') || html.includes('Noise')) {
+              throw new Error(html);
+            }
+            """
+        )
+
+    def test_toggle_page_bookmark_updates_local_page_and_emits_action(self):
+        self.run_js(
+            r"""
+            const emitted = [];
+            var pages = [
+              { slideNumber: 2, title: 'Signals', bookmarkEnabled: false, bookmarkTitle: '' },
+            ];
+            var deckId = 7;
+            var Streamlit = { setComponentValue: value => emitted.push(value) };
+            var document = { querySelector() { return null; } };
+            var bookmarkMenuButton = null;
+            var bookmarkPopover = null;
+
+            togglePageBookmark(2);
+            if (!pages[0].bookmarkEnabled) {
+              throw new Error(JSON.stringify(pages[0]));
+            }
+            if (emitted.length !== 1 || emitted[0].action !== 'toggle_slide_bookmark' || emitted[0].enabled !== true) {
+              throw new Error(JSON.stringify(emitted));
+            }
+            if ('title' in emitted[0]) {
+              throw new Error(JSON.stringify(emitted[0]));
+            }
+            """
+        )
+
+    def test_rename_bookmark_saves_custom_title_and_keeps_enabled(self):
+        self.run_js(
+            r"""
+            const emitted = [];
+            var pages = [
+              { slideNumber: 2, title: 'Signals', bookmarkEnabled: false, bookmarkTitle: '' },
+            ];
+            var deckId = 7;
+            var Streamlit = { setComponentValue: value => emitted.push(value) };
+            var document = { querySelector() { return null; } };
+            var bookmarkMenuButton = null;
+            var bookmarkPopover = null;
+
+            renameBookmark(2, '  Chapter start  ');
+            if (!pages[0].bookmarkEnabled || pages[0].bookmarkTitle !== 'Chapter start') {
+              throw new Error(JSON.stringify(pages[0]));
+            }
+            if (emitted.length !== 1 || emitted[0].action !== 'rename_slide_bookmark' || emitted[0].title !== 'Chapter start') {
               throw new Error(JSON.stringify(emitted));
             }
             """

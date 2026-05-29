@@ -250,5 +250,70 @@ class PptCanvasQuestionTest(unittest.TestCase):
         self.assertEqual(result[9][0]["rootQuestionId"], 12)
 
 
+    def test_build_reader_payload_includes_bookmark_status_with_title_fallback(self):
+        slides = [
+            {
+                "id": 9,
+                "slide_number": 2,
+                "title": "Signals",
+                "slide_text": "",
+                "image_path": "",
+                "bookmark_enabled": 1,
+                "bookmark_title": "",
+            }
+        ]
+
+        result = ppt_tutor._build_reader_payload(slides, {}, {}, image_slide_numbers=set())
+
+        self.assertTrue(result[0]["bookmarkEnabled"])
+        self.assertEqual(result[0]["bookmarkTitle"], "Signals")
+
+    def test_toggle_slide_bookmark_updates_slide_without_model_call(self):
+        deck = {"id": 3, "title": "Deck", "subject": "Subject"}
+        slide = {"id": 9, "slide_number": 2, "title": "Signals", "slide_text": ""}
+        payload = {
+            "action": "toggle_slide_bookmark",
+            "deckId": 3,
+            "slideNumber": 2,
+            "token": "tok-bookmark",
+            "enabled": True,
+        }
+
+        with (
+            patch.object(ppt_tutor.st, "session_state", {}),
+            patch.object(ppt_tutor.st, "toast"),
+            patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 11})()),
+            patch.object(ppt_tutor, "generate_text") as generate_text,
+            patch.object(ppt_tutor, "update_slide_bookmark") as update_bookmark,
+        ):
+            ppt_tutor._handle_synced_reader_action(deck, [slide], {}, payload, [])
+
+        generate_text.assert_not_called()
+        update_bookmark.assert_called_once_with(11, 9, enabled=True)
+
+    def test_rename_slide_bookmark_updates_title_without_model_call(self):
+        deck = {"id": 3, "title": "Deck", "subject": "Subject"}
+        slide = {"id": 9, "slide_number": 2, "title": "Signals", "slide_text": ""}
+        payload = {
+            "action": "rename_slide_bookmark",
+            "deckId": 3,
+            "slideNumber": 2,
+            "token": "tok-bookmark-name",
+            "title": "  Chapter start  ",
+        }
+
+        with (
+            patch.object(ppt_tutor.st, "session_state", {}),
+            patch.object(ppt_tutor.st, "toast"),
+            patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 11})()),
+            patch.object(ppt_tutor, "generate_text") as generate_text,
+            patch.object(ppt_tutor, "update_slide_bookmark") as update_bookmark,
+        ):
+            ppt_tutor._handle_synced_reader_action(deck, [slide], {}, payload, [])
+
+        generate_text.assert_not_called()
+        update_bookmark.assert_called_once_with(11, 9, enabled=True, title="Chapter start")
+
+
 if __name__ == "__main__":
     unittest.main()

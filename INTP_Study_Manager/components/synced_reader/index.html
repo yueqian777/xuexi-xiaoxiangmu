@@ -177,6 +177,158 @@
       align-items: center;
       gap: 10px;
     }
+    .bookmark-menu-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+    }
+    .bookmark-menu-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 32px;
+      border: 1px solid #b9dde6;
+      border-radius: 999px;
+      padding: 0 10px;
+      background: #ffffff;
+      color: #24606f;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 900;
+      cursor: pointer;
+      box-shadow: 0 4px 12px rgba(24, 111, 130, 0.08);
+    }
+    .bookmark-menu-button:hover,
+    .bookmark-menu-button.active,
+    .bookmark-menu-button[aria-expanded="true"] {
+      border-color: #f2bd2f;
+      background: #fff8dd;
+      color: #976600;
+    }
+    .bookmark-menu-button svg {
+      width: 15px;
+      height: 15px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2.4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .bookmark-menu-button.active svg,
+    .bookmark-menu-button[aria-expanded="true"] svg {
+      fill: currentColor;
+    }
+    .bookmark-count {
+      min-width: 18px;
+      height: 18px;
+      padding: 0 5px;
+      border-radius: 999px;
+      background: rgba(151, 102, 0, 0.12);
+      color: inherit;
+      line-height: 18px;
+      text-align: center;
+      font-size: 11px;
+    }
+    .bookmark-popover {
+      position: absolute;
+      top: 39px;
+      right: 0;
+      z-index: 80;
+      width: min(340px, calc(100vw - 28px));
+      max-height: min(430px, calc(100vh - 110px));
+      overflow: auto;
+      padding: 10px;
+      border: 1px solid #c9dde1;
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: 0 18px 42px rgba(20, 85, 98, 0.18);
+    }
+    .bookmark-popover[hidden] {
+      display: none;
+    }
+    .bookmark-popover-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 2px 2px 9px;
+      color: #244d58;
+      font-size: 13px;
+      font-weight: 900;
+    }
+    .bookmark-popover-hint {
+      color: #7a949b;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .bookmark-empty {
+      padding: 18px 10px;
+      border: 1px dashed #c9dde1;
+      border-radius: 8px;
+      background: #f7fbfd;
+      color: #6e8790;
+      font-size: 12px;
+      font-weight: 800;
+      text-align: center;
+    }
+    .bookmark-row {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr) 30px;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 6px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .bookmark-row:hover {
+      background: #f3fbff;
+    }
+    .bookmark-page-number {
+      color: #087b70;
+      font-size: 12px;
+      font-weight: 900;
+      text-align: center;
+    }
+    .bookmark-title-input {
+      width: 100%;
+      min-width: 0;
+      height: 30px;
+      border: 1px solid #d5e6e9;
+      border-radius: 7px;
+      padding: 0 8px;
+      background: #ffffff;
+      color: var(--ink);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      outline: none;
+    }
+    .bookmark-title-input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(24, 165, 143, 0.12);
+    }
+    .bookmark-jump {
+      width: 28px;
+      height: 28px;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: #67838c;
+      cursor: pointer;
+    }
+    .bookmark-jump:hover {
+      background: #e9f6f5;
+      color: #087b70;
+    }
+    .bookmark-jump svg {
+      width: 15px;
+      height: 15px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
     .section-select {
       width: min(260px, 28vw);
       min-width: 160px;
@@ -327,6 +479,7 @@
       scroll-padding-block: 28px;
     }
     .page {
+      position: relative;
       margin: 0 auto 30px;
       max-width: 960px;
       padding: 12px;
@@ -359,10 +512,52 @@
       flex-wrap: wrap;
       justify-content: space-between;
       gap: 10px;
-      padding: 2px 4px 10px;
+      padding: 2px 46px 10px 4px;
       font-size: 13px;
       color: var(--muted);
       font-weight: 700;
+    }
+    .page-bookmark-toggle {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 4;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      border: 1px solid rgba(118, 154, 164, 0.38);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.92);
+      color: #6f8790;
+      cursor: pointer;
+      box-shadow: 0 8px 22px rgba(20, 85, 98, 0.12);
+      transition: transform .16s, color .16s, border-color .16s, background .16s, box-shadow .16s;
+    }
+    .page-bookmark-toggle:hover {
+      transform: translateY(-1px);
+      border-color: #f2bd2f;
+      color: #976600;
+      background: #fff8dd;
+    }
+    .page-bookmark-toggle.active {
+      border-color: #f2bd2f;
+      background: #fff3bd;
+      color: #c08200;
+      box-shadow: 0 10px 26px rgba(192, 130, 0, 0.22);
+    }
+    .page-bookmark-toggle svg {
+      width: 18px;
+      height: 18px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2.35;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .page-bookmark-toggle.active svg {
+      fill: currentColor;
     }
     .page img {
       width: 100%;
@@ -1101,6 +1296,14 @@
         <div class="meta" id="deckMeta">未分类 · 原页面同步阅读</div>
       </div>
       <div class="topbar-right">
+        <div class="bookmark-menu-wrap" id="bookmarkMenuWrap">
+          <button type="button" class="bookmark-menu-button" id="bookmarkMenuButton" title="书签栏" aria-expanded="false">
+            <svg viewBox="0 0 24 24"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>
+            <span>书签</span>
+            <span class="bookmark-count">0</span>
+          </button>
+          <div class="bookmark-popover" id="bookmarkPopover" hidden></div>
+        </div>
         <select class="section-select" id="sectionSelect" title="目录跳转"></select>
         <div class="mode-controls" aria-label="PPT 阅读模式">
           <button type="button" data-reading-mode="paged">逐页</button>
@@ -1195,6 +1398,9 @@
     const noteRoot = document.getElementById('notes');
     const pageJumpInput = document.getElementById('pageJumpInput');
     const pageJumpTotal = document.getElementById('pageJumpTotal');
+    const bookmarkMenuWrap = document.getElementById('bookmarkMenuWrap');
+    const bookmarkMenuButton = document.getElementById('bookmarkMenuButton');
+    const bookmarkPopover = document.getElementById('bookmarkPopover');
     const sectionSelect = document.getElementById('sectionSelect');
     const fullscreenButton = document.getElementById('fullscreenButton');
     const selectionToolbar = document.getElementById('selectionToolbar');
@@ -2270,6 +2476,151 @@
 
     function createComponentToken() {
       return `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    }
+
+    function bookmarkTitleForPage(page) {
+      const customTitle = String(page?.bookmarkTitle ?? '').trim();
+      if (customTitle) return customTitle;
+      const pageTitle = String(page?.title ?? '').trim();
+      if (pageTitle) return pageTitle;
+      return `第 ${Number(page?.slideNumber || 1)} 页`;
+    }
+
+    function bookmarkedPages() {
+      return pages
+        .filter(page => Boolean(page.bookmarkEnabled))
+        .slice()
+        .sort((a, b) => Number(a.slideNumber || 0) - Number(b.slideNumber || 0));
+    }
+
+    function renderBookmarkIcon(active) {
+      const fill = active ? 'currentColor' : 'none';
+      return `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="${fill}" d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>`;
+    }
+
+    function renderBookmarkList() {
+      const items = bookmarkedPages();
+      if (!items.length) {
+        return '<div class="bookmark-empty">还没有书签，点击页面右上角标识即可添加</div>';
+      }
+      return items.map(page => {
+        const slideNumber = Number(page.slideNumber || 1);
+        const title = bookmarkTitleForPage(page);
+        return `
+          <div class="bookmark-row" data-bookmark-row="${slideNumber}" title="跳转到第 ${slideNumber} 页">
+            <div class="bookmark-page-number">${slideNumber}</div>
+            <input class="bookmark-title-input" data-bookmark-title="${slideNumber}" value="${escapeHtml(title)}" aria-label="第 ${slideNumber} 页书签名称" />
+            <button type="button" class="bookmark-jump" data-bookmark-jump="${slideNumber}" title="跳转到第 ${slideNumber} 页">
+              <svg viewBox="0 0 24 24"><path d="M7 17 17 7M9 7h8v8"/></svg>
+            </button>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderBookmarkPanel() {
+      if (!bookmarkPopover) return '';
+      const count = bookmarkedPages().length;
+      bookmarkPopover.innerHTML = `
+        <div class="bookmark-popover-header">
+          <span>书签栏</span>
+          <span class="bookmark-popover-hint">${count} 个书签</span>
+        </div>
+        ${renderBookmarkList()}
+      `;
+      return bookmarkPopover.innerHTML;
+    }
+
+    function updatePageBookmarkButton(page) {
+      if (typeof document === 'undefined') return;
+      const slideNumber = Number(page?.slideNumber || 0);
+      if (!slideNumber) return;
+      const button = document.querySelector?.(`[data-bookmark-slide="${slideNumber}"]`);
+      if (!button) return;
+      const enabled = Boolean(page.bookmarkEnabled);
+      button.classList.toggle('active', enabled);
+      button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      button.title = enabled ? '取消本页书签' : '添加本页书签';
+      button.innerHTML = renderBookmarkIcon(enabled);
+    }
+
+    function updateBookmarkControls() {
+      const count = bookmarkedPages().length;
+      pages.forEach(updatePageBookmarkButton);
+      if (bookmarkMenuButton) {
+        bookmarkMenuButton.classList.toggle('active', count > 0);
+        bookmarkMenuButton.innerHTML = `${renderBookmarkIcon(count > 0)}<span>书签</span><span class="bookmark-count">${count}</span>`;
+      }
+      if (bookmarkPopover && !bookmarkPopover.hidden) {
+        renderBookmarkPanel();
+      }
+    }
+
+    function sendBookmarkUpdate(page, enabled, title, action) {
+      if (!page || !deckId) return false;
+      const payload = {
+        action: action || 'toggle_slide_bookmark',
+        token: createComponentToken(),
+        deckId,
+        slideNumber: Number(page.slideNumber),
+        enabled: Boolean(enabled),
+      };
+      if (title !== undefined) {
+        payload.title = String(title ?? '').trim();
+      }
+      Streamlit.setComponentValue(payload);
+      return true;
+    }
+
+    function togglePageBookmark(slideNumber) {
+      const page = pageForSlide(slideNumber);
+      if (!page) return false;
+      const enabled = !Boolean(page.bookmarkEnabled);
+      page.bookmarkEnabled = enabled;
+      updateBookmarkControls();
+      sendBookmarkUpdate(page, enabled, undefined, 'toggle_slide_bookmark');
+      return true;
+    }
+
+    function renameBookmark(slideNumber, title) {
+      const page = pageForSlide(slideNumber);
+      if (!page) return false;
+      const cleanTitle = String(title ?? '').trim();
+      page.bookmarkEnabled = true;
+      page.bookmarkTitle = cleanTitle;
+      updateBookmarkControls();
+      sendBookmarkUpdate(page, true, cleanTitle, 'rename_slide_bookmark');
+      return true;
+    }
+
+    function jumpToBookmark(slideNumber) {
+      const targetSlide = Number(slideNumber || 0);
+      if (!pageForSlide(targetSlide)) return false;
+      setActive(targetSlide, {
+        scrollPage: true,
+        behavior: 'smooth',
+        immediateNearbyContent: true,
+      });
+      closeBookmarkPanel();
+      return true;
+    }
+
+    function closeBookmarkPanel() {
+      if (!bookmarkPopover) return;
+      bookmarkPopover.hidden = true;
+      if (bookmarkMenuButton) bookmarkMenuButton.setAttribute('aria-expanded', 'false');
+    }
+
+    function toggleBookmarkPanel(forceOpen) {
+      if (!bookmarkPopover || !bookmarkMenuButton) return;
+      const shouldOpen = forceOpen === undefined ? bookmarkPopover.hidden : Boolean(forceOpen);
+      if (shouldOpen) {
+        renderBookmarkPanel();
+        bookmarkPopover.hidden = false;
+        bookmarkMenuButton.setAttribute('aria-expanded', 'true');
+      } else {
+        closeBookmarkPanel();
+      }
     }
 
     function noteMetaText(page) {
@@ -3380,6 +3731,7 @@
         updatePageJumpDisplay();
         updateSectionSelect(currentSlideNumber);
         renderChatForPage(currentSlideNumber);
+        updateBookmarkControls();
         ensureNearbyContent(currentSlideNumber);
         pageRoot.scrollTop = previousPageScroll;
         restoreNoteAnchor(previousNoteAnchor);
@@ -3406,8 +3758,12 @@
           page.pageType || '',
           section ? section.title || '' : '',
         ].filter(Boolean).join(' · ');
+        const bookmarkActive = Boolean(page.bookmarkEnabled);
         return `
           <article class="page" id="page-${page.slideNumber}" data-page="${page.slideNumber}">
+            <button type="button" class="page-bookmark-toggle ${bookmarkActive ? 'active' : ''}" data-bookmark-slide="${page.slideNumber}" aria-pressed="${bookmarkActive ? 'true' : 'false'}" title="${bookmarkActive ? '取消本页书签' : '添加本页书签'}">
+              ${renderBookmarkIcon(bookmarkActive)}
+            </button>
             <div class="page-label">
               <span>第 ${page.slideNumber} 页</span>
               <span>${escapeHtml(page.title)}</span>
@@ -3441,6 +3797,7 @@
           </div>
         </article>
       `).join('');
+      updateBookmarkControls();
 
       observer = new IntersectionObserver((entries) => {
         if (Date.now() < suppressObserverUntil) return;
@@ -3995,6 +4352,49 @@
     canvasScrollBottomButton.addEventListener('click', () => scrollChatToBottom(canvasMessages));
     toggleCanvasButton.addEventListener('click', toggleCanvasChat);
     openCanvasButton.addEventListener('click', () => openCanvasChat(true));
+    if (bookmarkMenuButton) {
+      bookmarkMenuButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleBookmarkPanel();
+      });
+    }
+    if (bookmarkPopover) {
+      bookmarkPopover.addEventListener('click', (event) => {
+        const input = event.target?.closest?.('[data-bookmark-title]');
+        if (input) {
+          event.stopPropagation();
+          return;
+        }
+        const jumpTarget = event.target?.closest?.('[data-bookmark-jump],[data-bookmark-row]');
+        if (!jumpTarget) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const slideNumber = Number(jumpTarget.dataset.bookmarkJump || jumpTarget.dataset.bookmarkRow || 0);
+        jumpToBookmark(slideNumber);
+      });
+      bookmarkPopover.addEventListener('change', (event) => {
+        const input = event.target?.closest?.('[data-bookmark-title]');
+        if (!input) return;
+        renameBookmark(Number(input.dataset.bookmarkTitle || 0), input.value);
+      });
+      bookmarkPopover.addEventListener('keydown', (event) => {
+        const input = event.target?.closest?.('[data-bookmark-title]');
+        if (input && event.key === 'Enter') {
+          event.preventDefault();
+          renameBookmark(Number(input.dataset.bookmarkTitle || 0), input.value);
+          input.blur();
+        } else if (input && event.key === 'Escape') {
+          event.preventDefault();
+          const page = pageForSlide(Number(input.dataset.bookmarkTitle || 0));
+          input.value = bookmarkTitleForPage(page);
+          input.blur();
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          closeBookmarkPanel();
+        }
+      });
+    }
     sectionSelect.addEventListener('change', () => {
       const sectionIndex = Number(sectionSelect.value || 0);
       const section = sections.find(item => Number(item.sectionIndex) === sectionIndex);
@@ -4042,6 +4442,13 @@
       }
     });
     pageRoot.addEventListener('scroll', scheduleScrollStateSave, { passive: true });
+    pageRoot.addEventListener('click', (event) => {
+      const button = event.target?.closest?.('[data-bookmark-slide]');
+      if (!button) return;
+      event.preventDefault();
+      event.stopPropagation();
+      togglePageBookmark(Number(button.dataset.bookmarkSlide || 0));
+    });
     noteRoot.addEventListener('scroll', scheduleScrollStateSave, { passive: true });
     noteRoot.addEventListener('click', (event) => {
       const button = event.target?.closest?.('[data-refresh-page],[data-edit-page],[data-save-edit-page],[data-cancel-edit-page]');
@@ -4105,13 +4512,18 @@
         }, 80);
       }
     });
+    document.addEventListener('mousedown', (event) => {
+      if (!bookmarkPopover || bookmarkPopover.hidden) return;
+      if (bookmarkMenuWrap?.contains?.(event.target)) return;
+      closeBookmarkPanel();
+    });
 
     function nearestScrollPanel(target) {
       if (target?.closest?.('.canvas-input')) return null;
       if (target?.closest?.('.child-chat-input')) return null;
       if (target?.closest?.('.page-jump-input')) return null;
       if (target?.closest?.('.note-editor')) return null;
-      const element = target?.closest?.('.pages, .notes, .canvas-messages, .child-chat-messages');
+      const element = target?.closest?.('.pages, .notes, .canvas-messages, .child-chat-messages, .bookmark-popover');
       if (element) return element;
       return pageRoot;
     }

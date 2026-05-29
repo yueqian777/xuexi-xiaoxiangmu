@@ -25,6 +25,7 @@ from repositories.ppt_repository import (
     latest_explanations_by_slide_ids,
     questions_by_slide_ids,
     update_slide_question_answer,
+    update_slide_bookmark,
     update_slide_learning_metadata,
 )
 from services.ai_service import (
@@ -743,6 +744,8 @@ def _handle_synced_reader_action(
         "save_explanation_edit",
         "save_question_answer_edit",
         "merge_question_thread",
+        "toggle_slide_bookmark",
+        "rename_slide_bookmark",
         "reader_position",
     }:
         return
@@ -762,6 +765,21 @@ def _handle_synced_reader_action(
     if action == "reader_position":
         if _handle_reader_position_update(deck, slide_number, token):
             st.rerun()
+        return
+
+    if action in {"toggle_slide_bookmark", "rename_slide_bookmark"}:
+        last_bookmark_token_key = f"ppt_slide_bookmark_last_token_{deck['id']}"
+        if token and st.session_state.get(last_bookmark_token_key) == token:
+            return
+        user_id = require_login().id
+        if action == "toggle_slide_bookmark":
+            update_slide_bookmark(user_id, int(slide["id"]), enabled=bool(payload.get("enabled")))
+        else:
+            title = str(payload.get("title") or "").strip()
+            update_slide_bookmark(user_id, int(slide["id"]), enabled=True, title=title)
+        if token:
+            st.session_state[last_bookmark_token_key] = token
+        st.toast(f"第 {slide['slide_number']} 页书签已更新。")
         return
 
     if action == "save_explanation_edit":
@@ -3025,6 +3043,7 @@ def _build_reader_payload(
         latest = latest_by_slide_id.get(int(slide["id"]))
         slide_text = slide.get("slide_text") or ""
         slide_title = slide.get("title") or f"第 {slide['slide_number']} 页"
+        bookmark_title = str(slide.get("bookmark_title") or "").strip() or slide_title
 
         image_available = image_path.exists() and image_path.is_file()
         if image_available and int(slide["slide_number"]) in image_slide_numbers:
@@ -3046,6 +3065,8 @@ def _build_reader_payload(
                 "summary": slide.get("one_sentence_summary") or "",
                 "slideRole": slide.get("slide_role") or "",
                 "keyPoints": slide.get("key_points") or "",
+                "bookmarkEnabled": bool(slide.get("bookmark_enabled")),
+                "bookmarkTitle": bookmark_title,
                 "questions": question_by_slide_id.get(int(slide["id"]), []),
             }
         )

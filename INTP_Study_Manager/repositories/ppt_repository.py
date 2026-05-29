@@ -37,6 +37,33 @@ def update_slide_learning_metadata(user_id: int, slide_id: int, *, title: str = 
     )
 
 
+def update_slide_bookmark(
+    user_id: int,
+    slide_id: int,
+    *,
+    enabled: bool | None = None,
+    title: str | None = None,
+) -> None:
+    assignments = []
+    params = []
+    if enabled is not None:
+        assignments.append("bookmark_enabled = ?")
+        params.append(1 if enabled else 0)
+    if title is not None:
+        assignments.append("bookmark_title = ?")
+        params.append(str(title or "").strip()[:120])
+    if not assignments:
+        return
+    execute(
+        f"""
+        UPDATE ppt_slides
+        SET {", ".join(assignments)}
+        WHERE id = ? AND user_id = ?
+        """,
+        (*params, int(slide_id), int(user_id)),
+    )
+
+
 def latest_explanation(user_id: int, slide_id: int) -> dict | None:
     return fetch_one(
         """

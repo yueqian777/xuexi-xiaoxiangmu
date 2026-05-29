@@ -203,6 +203,8 @@ def _run_init_db() -> None:
                 one_sentence_summary TEXT DEFAULT '',
                 slide_role TEXT DEFAULT '',
                 key_points TEXT DEFAULT '',
+                bookmark_enabled INTEGER NOT NULL DEFAULT 0,
+                bookmark_title TEXT DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 FOREIGN KEY (deck_id) REFERENCES ppt_decks(id) ON DELETE CASCADE,
                 UNIQUE(deck_id, slide_number)
@@ -350,6 +352,8 @@ def _run_init_db() -> None:
         _ensure_column(conn, "ppt_slides", "one_sentence_summary", "TEXT DEFAULT ''")
         _ensure_column(conn, "ppt_slides", "slide_role", "TEXT DEFAULT ''")
         _ensure_column(conn, "ppt_slides", "key_points", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_slides", "bookmark_enabled", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "ppt_slides", "bookmark_title", "TEXT DEFAULT ''")
         _ensure_column(conn, "ppt_sections", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_explanations", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_questions", "user_id", "INTEGER NOT NULL DEFAULT 0")
@@ -423,6 +427,8 @@ def _run_init_db() -> None:
                 ON ppt_decks(user_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_ppt_slides_user_deck_number
                 ON ppt_slides(user_id, deck_id, slide_number ASC);
+            CREATE INDEX IF NOT EXISTS idx_ppt_slides_user_deck_bookmark
+                ON ppt_slides(user_id, deck_id, bookmark_enabled, slide_number ASC);
             CREATE INDEX IF NOT EXISTS idx_ppt_slides_deck
                 ON ppt_slides(deck_id);
             CREATE INDEX IF NOT EXISTS idx_ppt_sections_user_deck_index
