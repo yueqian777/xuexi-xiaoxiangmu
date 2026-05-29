@@ -37,16 +37,48 @@ def _secret_store_path(user_id: int | None = None) -> Any:
     return DATA_DIR / f"api_keys_user_{int(user_id)}.enc.json"
 
 
+def _existing_secret_store_path(user_id: int | None = None) -> Any:
+    store_path = _secret_store_path(user_id)
+    if store_path.exists() or store_path == SECRET_STORE_PATH:
+        return store_path
+    if SECRET_STORE_PATH.exists() and _legacy_secret_store_visible_for_user(user_id):
+        return SECRET_STORE_PATH
+    return store_path
+
+
+def _legacy_secret_store_visible_for_user(user_id: int | None = None) -> bool:
+    try:
+        payload = json.loads(SECRET_STORE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    return _secret_store_owner_matches(payload.get("user_id"), user_id)
+
+
+def _secret_store_owner_matches(owner_id: Any, user_id: int | None = None) -> bool:
+    try:
+        owner = int(owner_id or 0)
+    except (TypeError, ValueError):
+        return False
+    if owner == 0:
+        return True
+    if user_id is None:
+        try:
+            user_id = require_login().id
+        except Exception:
+            return False
+    return owner == int(user_id)
+
+
 class SecretStoreError(RuntimeError):
     pass
 
 
 def secret_store_exists() -> bool:
-    return _secret_store_path().exists()
+    return _existing_secret_store_path().exists()
 
 
 def load_secret_store(master_password: str) -> dict[str, Any]:
-    store_path = _secret_store_path()
+    store_path = _existing_secret_store_path()
     if not store_path.exists():
         return {"providers": {}}
     if not master_password:
@@ -55,6 +87,8 @@ def load_secret_store(master_password: str) -> dict[str, Any]:
 
     try:
         payload = json.loads(store_path.read_text(encoding="utf-8"))
+        if store_path == SECRET_STORE_PATH and not _secret_store_owner_matches(payload.get("user_id")):
+            return {"providers": {}}
         salt = _b64decode(payload["salt"])
         nonce = _b64decode(payload["nonce"])
         ciphertext = _b64decode(payload["ciphertext"])
@@ -74,6 +108,9 @@ def load_secret_store(master_password: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise SecretStoreError("密钥库内容格式不正确。")
     data.setdefault("providers", {})
+    if store_path == SECRET_STORE_PATH and not _secret_store_owner_matches(data.get("user_id")):
+        return {"providers": {}}
+    _migrate_legacy_secret_store(master_password, data, store_path)
     return data
 
 
@@ -109,7 +146,7 @@ def save_secret_store(master_password: str, data: dict[str, Any]) -> None:
 
 
 def load_secret_public_index() -> list[dict[str, Any]]:
-    store_path = _secret_store_path()
+    store_path = _existing_secret_store_path()
     if not store_path.exists():
         return []
     try:
@@ -122,6 +159,21 @@ def load_secret_public_index() -> list[dict[str, Any]]:
     index = payload.get("public_index", {})
     providers = index.get("providers", [])
     return providers if isinstance(providers, list) else []
+
+
+def _migrate_legacy_secret_store(master_password: str, data: dict[str, Any], source_path: Any) -> None:
+    if source_path != SECRET_STORE_PATH:
+        return
+    try:
+        user = require_login()
+    except Exception:
+        return
+    user_path = _secret_store_path(user.id)
+    if user_path.exists():
+        return
+    if not _secret_store_owner_matches(data.get("user_id"), user.id):
+        return
+    save_secret_store(master_password, data)
 
 
 def upsert_provider_secret(

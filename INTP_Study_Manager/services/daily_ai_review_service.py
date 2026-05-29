@@ -353,7 +353,10 @@ def _normalize_plan_payload(
         expected = [_sanitize_expected_point(point) for point in expected_points]
         expected = [point for point in expected if point]
 
-        if _asks_for_formula_writing(" ".join([question_type, question, answer_format, " ".join(expected)])):
+        if question_type == "数据计算题" and not _has_concrete_given_data(given_data):
+            replacement = _fallback_question(candidate, question_id=str(item.get("question_id") or f"q{len(questions) + 1}"))
+            questions.append(replacement)
+        elif _asks_for_formula_writing(" ".join([question_type, question, answer_format, " ".join(expected)])):
             replacement = _fallback_question(candidate, question_id=str(item.get("question_id") or f"q{len(questions) + 1}"))
             questions.append(replacement)
         else:
@@ -709,7 +712,7 @@ def _fallback_question(candidate: dict[str, Any], *, question_id: str) -> dict[s
         "topic": topic,
         "question_type": "快速定位题",
         "review_focus": _default_review_focus(candidate),
-        "question": f"不用写公式：请用自己的话说明「{topic}」要解决的核心问题、适用条件，以及最容易错的一个位置。",
+        "question": f"请用自己的话说明「{topic}」要解决的核心问题、适用条件，以及最容易错的一个位置。",
         "answer_format": "用 2-4 句中文回答；可写数字或判断，无需特殊公式格式。",
         "given_data": [],
         "expected_points": [core_question, one_sentence, application],
@@ -731,6 +734,45 @@ def _string_list(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+CONCRETE_NUMERIC_DATA_PATTERN = re.compile(
+    r"(?:[:：=<>≤≥]\s*-?\d+(?:\.\d+)?)"
+    r"|(?:-?\d+(?:\.\d+)?\s*(?:[<>]=?|≤|≥))"
+    r"|(?:-?\d+(?:\.\d+)?\s*[,，、]\s*-?\d)"
+    r"|(?:-?\d+(?:\.\d+)?\s*(?:%|Hz|ms|s|V|A|Ω|rad|次|个|点|倍|分|秒|米|cm|kg))"
+)
+ORDINAL_REFERENCE_PATTERN = re.compile(
+    r"(?:第\s*)?\d+(?:\s*[,，、-]\s*\d+)*\s*(?:章|节|页|例|题|问|小题)"
+    r"|(?:章|节|页|例|题|问|小题)\s*\d+(?:\s*[,，、-]\s*\d+)*"
+)
+DATA_PLACEHOLDER_PATTERN = re.compile(r"(?:见题|题干|如图|略|相关参数|相关数据|待定|自行)")
+DATA_MARKER_PATTERN = re.compile(r"[:：=<>≤≥]|(?:ROC|半径|极点|零点|频率|时间|速度|长度|质量|电压|电流|概率|均值|方差|比例|百分比)")
+
+
+def _has_concrete_given_data(items: list[str]) -> bool:
+    return bool(items) and all(_has_concrete_numeric_data(item) for item in items)
+
+
+def _has_concrete_numeric_data(text: str) -> bool:
+    text = _text(text)
+    if not re.search(r"\d", text):
+        return False
+    if DATA_PLACEHOLDER_PATTERN.search(text):
+        return False
+    if ORDINAL_REFERENCE_PATTERN.search(text) and _looks_like_reference_only(text):
+        return False
+    if ORDINAL_REFERENCE_PATTERN.search(text) and not DATA_MARKER_PATTERN.search(text):
+        return False
+    if CONCRETE_NUMERIC_DATA_PATTERN.search(text):
+        return True
+    numbers = re.findall(r"-?\d+(?:\.\d+)?", text)
+    return len(numbers) >= 2 and not ORDINAL_REFERENCE_PATTERN.search(text)
+
+
+def _looks_like_reference_only(text: str) -> bool:
+    text = ORDINAL_REFERENCE_PATTERN.sub("", text)
+    return not re.search("[A-Za-z\u4e00-\u9fff]", text)
 
 
 def _text(value: Any) -> str:

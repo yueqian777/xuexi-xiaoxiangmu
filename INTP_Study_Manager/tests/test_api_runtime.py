@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from services import api_runtime
@@ -40,6 +41,48 @@ class ApiRuntimeProviderModelTest(unittest.TestCase):
             self.assertEqual(api_runtime.ensure_provider_model(provider), DEFAULT_MODEL)
 
         self.assertEqual(session_state[key], DEFAULT_MODEL)
+
+
+class ApiRuntimeDefaultConfigTest(unittest.TestCase):
+    def test_get_default_api_config_migrates_legacy_global_setting(self):
+        calls = []
+        legacy = {"value": '{"provider_key": "sub2api-243706", "model": "gpt-5.4"}'}
+
+        def fake_fetch_one(_sql, params):
+            calls.append(params[0])
+            if params[0] == "user:1:default_api_config":
+                return None
+            if params[0] == "default_api_config":
+                return legacy
+            return None
+
+        with (
+            patch.object(api_runtime, "require_login", return_value=SimpleNamespace(id=1)),
+            patch.object(api_runtime, "fetch_one", side_effect=fake_fetch_one),
+            patch.object(api_runtime, "execute") as execute,
+        ):
+            config = api_runtime.get_default_api_config()
+
+        self.assertEqual(config, {"provider_key": "sub2api-243706", "model": "gpt-5.4"})
+        self.assertEqual(calls, ["user:1:default_api_config", "default_api_config"])
+        execute.assert_called_once()
+        self.assertIn("user:1:default_api_config", execute.call_args.args[1])
+
+    def test_get_default_api_config_prefers_user_scoped_setting(self):
+        rows = {
+            "user:1:default_api_config": {"value": '{"provider_key": "user-provider", "model": "user-model"}'},
+            "default_api_config": {"value": '{"provider_key": "legacy-provider", "model": "legacy-model"}'},
+        }
+
+        with (
+            patch.object(api_runtime, "require_login", return_value=SimpleNamespace(id=1)),
+            patch.object(api_runtime, "fetch_one", side_effect=lambda _sql, params: rows.get(params[0])),
+            patch.object(api_runtime, "execute") as execute,
+        ):
+            config = api_runtime.get_default_api_config()
+
+        self.assertEqual(config, {"provider_key": "user-provider", "model": "user-model"})
+        execute.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -144,7 +144,7 @@ def _render_default_api_and_daily_ai_review() -> None:
             st.rerun()
         except (AIServiceError, ValueError, RuntimeError) as exc:
             st.error(f"生成失败：{exc}")
-    controls[1].caption("建议每天 3-5 题；直接写中文、数字或选项，不需要写 LaTeX。")
+    controls[1].caption("建议每天 3-5 题；直接写中文、数字或选项，无需特殊公式格式。")
 
     plan = plan or get_today_ai_review_plan(user_id=user.id)
     if not plan:
@@ -184,7 +184,7 @@ def _render_daily_ai_review_plan(
                 answers[question_id] = st.text_area(
                     "你的回答",
                     value=saved_answers.get(question_id, ""),
-                    placeholder="直接写中文、数字、选项或一句理由；不用 LaTeX。不会就写“不会”。",
+                    placeholder="直接写中文、数字、选项或一句理由；无需特殊公式格式。不会就写“不会”。",
                     key=f"daily_ai_answer_{plan_row['id']}_{question_id}",
                     height=110,
                 )

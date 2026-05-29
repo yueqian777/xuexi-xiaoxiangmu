@@ -37,11 +37,23 @@ def set_active_provider(provider_key: str, model: str) -> None:
 
 def get_default_api_config() -> dict[str, Any]:
     user = require_login()
-    row = fetch_one("SELECT value FROM app_settings WHERE key = ?", (_user_setting_key(DEFAULT_API_SETTING_KEY, user.id),))
-    if not row:
+    user_key = _user_setting_key(DEFAULT_API_SETTING_KEY, user.id)
+    row = fetch_one("SELECT value FROM app_settings WHERE key = ?", (user_key,))
+    if row:
+        return _decode_default_api_config(row["value"])
+
+    legacy_row = fetch_one("SELECT value FROM app_settings WHERE key = ?", (DEFAULT_API_SETTING_KEY,))
+    if not legacy_row:
         return {}
+    config = _decode_default_api_config(legacy_row["value"])
+    if config:
+        _save_default_api_config_for_user(user_key, user.id, config)
+    return config
+
+
+def _decode_default_api_config(text: str) -> dict[str, Any]:
     try:
-        data = json.loads(row["value"])
+        data = json.loads(text)
     except json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
@@ -53,6 +65,11 @@ def save_default_api_config(provider_key: str, model: str) -> None:
         {"provider_key": provider_key, "model": model.strip() or DEFAULT_MODEL},
         ensure_ascii=False,
     )
+    _save_default_api_config_for_user(_user_setting_key(DEFAULT_API_SETTING_KEY, user.id), user.id, json.loads(payload))
+
+
+def _save_default_api_config_for_user(key: str, user_id: int, config: dict[str, Any]) -> None:
+    payload = json.dumps(config, ensure_ascii=False)
     execute(
         """
         INSERT INTO app_settings (key, user_id, value, updated_at)
@@ -62,7 +79,7 @@ def save_default_api_config(provider_key: str, model: str) -> None:
             value = excluded.value,
             updated_at = excluded.updated_at
         """,
-        (_user_setting_key(DEFAULT_API_SETTING_KEY, user.id), user.id, payload),
+        (key, user_id, payload),
     )
 
 
