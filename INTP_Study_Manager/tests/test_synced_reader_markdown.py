@@ -118,7 +118,21 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "renderChatQuestion",
             "renderChatTurn",
             "clipText",
+            "nodeElement",
+            "rectFromRange",
             "applyLayoutState",
+            "scrollAnchorCandidates",
+            "visualRectForAnchor",
+            "cssAttributeValue",
+            "stableScrollAnchorSelector",
+            "measurableRangeForCaret",
+            "captureTextRangeAnchor",
+            "captureScrollPanelAnchor",
+            "restoreScrollPanelAnchor",
+            "captureReaderViewportAnchors",
+            "restoreReaderViewportAnchors",
+            "restoreReaderAnchorsAfterLayoutChange",
+            "updateResize",
             "nearestScrollPanel",
             "scrollChildPanelToQuestionTop",
             "childLayerScrollPositions",
@@ -685,6 +699,210 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
         self.assertIsNotNone(frame_z)
         self.assertIsNotNone(stack_z)
         self.assertGreater(stack_z, frame_z)
+
+    def test_reader_grid_transition_is_disabled_while_resizing(self):
+        source = READER_HTML.read_text(encoding="utf-8")
+        self.assertRegex(
+            source,
+            r"body\.reader-resizing\s+\.grid\s*\{[^}]*transition\s*:\s*none",
+        )
+
+    def test_scroll_panel_anchor_restores_same_visible_element_after_reflow(self):
+        self.run_js(
+            r"""
+            let anchorTop = 60;
+            const anchor = {
+              isConnected: true,
+              getBoundingClientRect() {
+                return { top: anchorTop, bottom: anchorTop + 24 };
+              },
+            };
+            const panel = {
+              scrollTop: 100,
+              scrollHeight: 900,
+              clientHeight: 300,
+              getBoundingClientRect() {
+                return { top: 10, bottom: 310 };
+              },
+              querySelectorAll(selector) {
+                return selector === '.reader-source-fragment' ? [anchor] : [];
+              },
+            };
+
+            const snapshot = captureScrollPanelAnchor(panel, ['.reader-source-fragment']);
+            if (!snapshot || snapshot.offsetTop !== 50) {
+              throw new Error(JSON.stringify(snapshot));
+            }
+
+            anchorTop = 142;
+            restoreScrollPanelAnchor(snapshot);
+            if (panel.scrollTop !== 182) {
+              throw new Error(String(panel.scrollTop));
+            }
+            """
+        )
+
+    def test_scroll_panel_anchor_prefers_text_range_for_long_reflowed_blocks(self):
+        self.run_js(
+            r"""
+            let rangeTop = 95;
+            const range = {
+              startContainer: { isConnected: true },
+              getClientRects() {
+                return [{ top: rangeTop, bottom: rangeTop + 18, width: 1, height: 18 }];
+              },
+              getBoundingClientRect() {
+                return { top: rangeTop, bottom: rangeTop + 18, width: 1, height: 18 };
+              },
+            };
+            const block = {
+              isConnected: true,
+              getBoundingClientRect() {
+                return { top: 20, bottom: 220 };
+              },
+            };
+            const panel = {
+              scrollTop: 300,
+              scrollHeight: 1200,
+              clientHeight: 400,
+              getBoundingClientRect() {
+                return { top: 40, bottom: 440 };
+              },
+            };
+            const snapshot = {
+              panel,
+              anchor: block,
+              offsetTop: -20,
+              range,
+              rangeOffsetTop: 55,
+              scrollTop: 300,
+              scrollLeft: 0,
+            };
+
+            rangeTop = 170;
+            restoreScrollPanelAnchor(snapshot);
+            if (panel.scrollTop !== 375) {
+              throw new Error(String(panel.scrollTop));
+            }
+            """
+        )
+
+    def test_scroll_panel_anchor_reselects_semantic_anchor_after_dom_rebuild(self):
+        self.run_js(
+            r"""
+            const oldTurn = {
+              isConnected: false,
+              dataset: { questionId: '9' },
+              matches(selector) {
+                return selector === '[data-question-id]';
+              },
+              getBoundingClientRect() {
+                return { top: 60, bottom: 100 };
+              },
+            };
+            const newTurn = {
+              isConnected: true,
+              getBoundingClientRect() {
+                return { top: 150, bottom: 190 };
+              },
+            };
+            const panel = {
+              scrollTop: 40,
+              scrollHeight: 600,
+              clientHeight: 240,
+              scrollLeft: 0,
+              getBoundingClientRect() {
+                return { top: 30, bottom: 270 };
+              },
+              querySelector(selector) {
+                if (selector === '[data-question-id="9"]') return newTurn;
+                return null;
+              },
+            };
+            const snapshot = {
+              panel,
+              anchor: oldTurn,
+              anchorSelector: stableScrollAnchorSelector(oldTurn),
+              offsetTop: 30,
+              scrollTop: 40,
+              scrollLeft: 0,
+            };
+
+            restoreScrollPanelAnchor(snapshot);
+            if (panel.scrollTop !== 130) {
+              throw new Error(String(panel.scrollTop));
+            }
+            """
+        )
+
+    def test_layout_anchor_restore_is_throttled_to_latest_animation_frame(self):
+        self.run_js(
+            r"""
+            const restored = [];
+            let nextId = 1;
+            const frames = new Map();
+            global.window = {
+              requestAnimationFrame(callback) {
+                const id = nextId++;
+                frames.set(id, callback);
+                return id;
+              },
+              cancelAnimationFrame(id) {
+                frames.delete(id);
+              },
+            };
+            restoreReaderViewportAnchors = snapshot => restored.push(snapshot.marker);
+
+            restoreReaderAnchorsAfterLayoutChange({ marker: 'first' }, { immediate: false });
+            restoreReaderAnchorsAfterLayoutChange({ marker: 'second' }, { immediate: false });
+            if (frames.size !== 1) {
+              throw new Error(`frames=${frames.size}`);
+            }
+            Array.from(frames.values()).forEach(callback => callback());
+            if (restored.join(',') !== 'second') {
+              throw new Error(restored.join(','));
+            }
+            """
+        )
+
+    def test_resize_preserves_reader_viewport_anchors_during_layout_changes(self):
+        self.run_js(
+            r"""
+            const restored = [];
+            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var chatCollapsed = false;
+            var childChatLayers = [];
+            var readerGrid = {
+              style: { gridTemplateColumns: '' },
+              getBoundingClientRect: () => ({ width: 1000 }),
+            };
+            var canvasChat = { classList: { toggle() {} } };
+            var toggleCanvasButton = { textContent: '' };
+            var childChatStack = { style: { setProperty() {} } };
+            var activeResize = {
+              handle: { classList: { remove() {} } },
+              kind: 'pages-notes',
+              startX: 200,
+              start: { ...layoutState },
+              anchors: { marker: 'before-resize' },
+            };
+            var suppressObserverUntil = 0;
+            var VIEWPORT_ANCHOR_MS = 1400;
+            restoreReaderAnchorsAfterLayoutChange = snapshot => restored.push(snapshot);
+
+            updateResize({
+              preventDefault() {},
+              clientX: 260,
+            });
+
+            if (restored.length !== 1 || restored[0].marker !== 'before-resize') {
+              throw new Error(JSON.stringify(restored));
+            }
+            if (suppressObserverUntil <= 0) {
+              throw new Error(String(suppressObserverUntil));
+            }
+            """
+        )
 
     def test_child_chat_messages_are_independent_scroll_panels(self):
         self.run_js(

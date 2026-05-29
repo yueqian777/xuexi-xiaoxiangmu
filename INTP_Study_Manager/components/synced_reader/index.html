@@ -440,6 +440,9 @@
       cursor: col-resize !important;
       cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 16 24'%3E%3Cpath d='M6 3v18M10 3v18' stroke='%23087b70' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E") 8 12, col-resize !important;
     }
+    body.reader-resizing .grid {
+      transition: none;
+    }
     .resize-handle::before {
       content: "";
       width: 7px;
@@ -1448,6 +1451,8 @@
     let suppressObserverUntil = 0;
     let viewportAnchorState = null;
     let viewportAnchorReleaseTimer = null;
+    let layoutAnchorRestoreFrame = 0;
+    let layoutAnchorRestoreFollowupFrame = 0;
     let hasCenteredOnEntry = false;
     let parentCenterTimer = null;
     let lastFullscreenState = false;
@@ -2190,6 +2195,255 @@
       noteRoot.scrollTo({ top: clamp(rawTop, 0, maxTop), behavior: 'auto' });
     }
 
+    function scrollAnchorCandidates(panel, selectors) {
+      if (!panel || typeof panel.querySelectorAll !== 'function') return [];
+      const seen = new Set();
+      return (Array.isArray(selectors) ? selectors : [])
+        .flatMap(selector => Array.from(panel.querySelectorAll(selector)))
+        .filter(element => {
+          if (!element || seen.has(element)) return false;
+          seen.add(element);
+          return typeof element.getBoundingClientRect === 'function';
+        });
+    }
+
+    function visualRectForAnchor(element) {
+      if (!element || typeof element.getBoundingClientRect !== 'function') return null;
+      const rect = element.getBoundingClientRect();
+      if (rect && (rect.width || rect.height || rect.bottom !== rect.top)) return rect;
+      const doc = element.ownerDocument || (typeof document !== 'undefined' ? document : null);
+      if (!doc || typeof doc.createRange !== 'function') return rect || null;
+      try {
+        const range = doc.createRange();
+        range.selectNodeContents(element);
+        return rectFromRange(range) || rect || null;
+      } catch (_) {
+        return rect || null;
+      }
+    }
+
+    function cssAttributeValue(value) {
+      return String(value ?? '').replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+    }
+
+    function stableScrollAnchorSelector(element) {
+      if (!element) return '';
+      const dataset = element.dataset || {};
+      if (dataset.questionId) return `[data-question-id="${cssAttributeValue(dataset.questionId)}"]`;
+      if (dataset.page) return `[data-page="${cssAttributeValue(dataset.page)}"]`;
+      if (dataset.searchStart && dataset.searchEnd) {
+        return `[data-search-start="${cssAttributeValue(dataset.searchStart)}"][data-search-end="${cssAttributeValue(dataset.searchEnd)}"]`;
+      }
+      return '';
+    }
+
+    function measurableRangeForCaret(range) {
+      if (!range || !range.collapsed || typeof range.cloneRange !== 'function') return range;
+      const container = range.startContainer;
+      const offset = Number(range.startOffset || 0);
+      if (!container || container.nodeType !== 3) return range;
+      const textLength = String(container.nodeValue || '').length;
+      if (!textLength) return range;
+      const measured = range.cloneRange();
+      try {
+        if (offset < textLength) {
+          measured.setEnd(container, offset + 1);
+        } else if (offset > 0) {
+          measured.setStart(container, offset - 1);
+        }
+      } catch (_) {
+        return range;
+      }
+      return measured;
+    }
+
+    function captureTextRangeAnchor(panel, anchor, topLine) {
+      const doc = panel?.ownerDocument || (typeof document !== 'undefined' ? document : null);
+      if (!doc || !panel || !anchor || typeof anchor.getBoundingClientRect !== 'function') return null;
+      if (typeof doc.createRange !== 'function') return null;
+      const panelRect = panel.getBoundingClientRect();
+      const anchorRect = visualRectForAnchor(anchor);
+      if (!anchorRect) return null;
+      const right = Math.max(anchorRect.left + 1, anchorRect.right - 1);
+      const bottom = Math.max(anchorRect.top + 1, anchorRect.bottom - 1);
+      const x = clamp(Math.max(anchorRect.left + 1, panelRect.left + 24), panelRect.left + 1, Math.min(panelRect.right - 1, right));
+      const y = clamp(Number(topLine || panelRect.top), Math.max(panelRect.top + 1, anchorRect.top + 1), Math.min(panelRect.bottom - 1, bottom));
+      let range = null;
+      try {
+        if (typeof doc.caretPositionFromPoint === 'function') {
+          const position = doc.caretPositionFromPoint(x, y);
+          if (position?.offsetNode) {
+            range = doc.createRange();
+            range.setStart(position.offsetNode, position.offset);
+            range.collapse(true);
+          }
+        } else if (typeof doc.caretRangeFromPoint === 'function') {
+          range = doc.caretRangeFromPoint(x, y);
+        }
+      } catch (_) {
+        range = null;
+      }
+      if (!range) return null;
+      const rangeElement = nodeElement(range.startContainer);
+      if (!rangeElement) return null;
+      if (typeof panel.contains === 'function' && !panel.contains(rangeElement)) return null;
+      if (typeof anchor.contains === 'function' && !anchor.contains(rangeElement) && rangeElement !== anchor) return null;
+      const measuredRange = measurableRangeForCaret(range);
+      const rect = rectFromRange(measuredRange);
+      if (!rect) return null;
+      return {
+        range: measuredRange,
+        offsetTop: Number(rect.top || 0) - Number(panelRect.top || 0),
+      };
+    }
+
+    function captureScrollPanelAnchor(panel, selectors) {
+      if (!panel || typeof panel.getBoundingClientRect !== 'function') return null;
+      const panelRect = panel.getBoundingClientRect();
+      const panelTop = Number(panelRect.top || 0);
+      const panelBottom = Number(panelRect.bottom || panelTop + Number(panel.clientHeight || 0));
+      const topLine = panelTop + 8;
+      let best = null;
+      scrollAnchorCandidates(panel, selectors).forEach(anchor => {
+        const rect = visualRectForAnchor(anchor);
+        if (!rect) return;
+        const top = Number(rect.top || 0);
+        const bottom = Number(rect.bottom || top + Number(rect.height || 0));
+        if (bottom < panelTop || top > panelBottom) return;
+        const crossesTop = top <= topLine && bottom >= topLine;
+        const score = crossesTop ? -100000 + Math.abs(top - topLine) : Math.abs(top - topLine);
+        if (!best || score < best.score) {
+          best = {
+            score,
+            anchor,
+            offsetTop: top - panelTop,
+          };
+        }
+      });
+      const rangeAnchor = best?.anchor
+        ? captureTextRangeAnchor(panel, best.anchor, topLine)
+        : null;
+      return {
+        panel,
+        anchor: best?.anchor || null,
+        anchorSelector: stableScrollAnchorSelector(best?.anchor),
+        offsetTop: Number(best?.offsetTop || 0),
+        range: rangeAnchor?.range || null,
+        rangeOffsetTop: Number(rangeAnchor?.offsetTop || 0),
+        scrollTop: Number(panel.scrollTop || 0),
+        scrollLeft: Number(panel.scrollLeft || 0),
+        selectors: Array.isArray(selectors) ? selectors.slice() : [],
+      };
+    }
+
+    function restoreScrollPanelAnchor(snapshot) {
+      if (!snapshot?.panel) return false;
+      const panel = snapshot.panel;
+      const rangeNode = snapshot.range?.startContainer || null;
+      if (snapshot.range && rangeNode?.isConnected !== false && typeof panel.getBoundingClientRect === 'function') {
+        const rangeRect = rectFromRange(snapshot.range);
+        if (rangeRect) {
+          const panelRect = panel.getBoundingClientRect();
+          const delta = Number(rangeRect.top || 0) - Number(panelRect.top || 0) - Number(snapshot.rangeOffsetTop || 0);
+          const maxTop = Math.max(0, Number(panel.scrollHeight || 0) - Number(panel.clientHeight || 0));
+          panel.scrollTop = clamp(Number(panel.scrollTop || 0) + delta, 0, maxTop);
+          panel.scrollLeft = Number(snapshot.scrollLeft || 0);
+          return true;
+        }
+      }
+      let anchor = snapshot.anchor;
+      if (anchor?.isConnected === false && snapshot.anchorSelector && typeof panel.querySelector === 'function') {
+        anchor = panel.querySelector(snapshot.anchorSelector);
+      }
+      if (anchor && anchor.isConnected !== false && typeof anchor.getBoundingClientRect === 'function' && typeof panel.getBoundingClientRect === 'function') {
+        const anchorRect = visualRectForAnchor(anchor);
+        if (!anchorRect) return false;
+        const panelRect = panel.getBoundingClientRect();
+        const delta = Number(anchorRect.top || 0) - Number(panelRect.top || 0) - Number(snapshot.offsetTop || 0);
+        const maxTop = Math.max(0, Number(panel.scrollHeight || 0) - Number(panel.clientHeight || 0));
+        panel.scrollTop = clamp(Number(panel.scrollTop || 0) + delta, 0, maxTop);
+        panel.scrollLeft = Number(snapshot.scrollLeft || 0);
+        return true;
+      }
+      panel.scrollTop = Number(snapshot.scrollTop || 0);
+      panel.scrollLeft = Number(snapshot.scrollLeft || 0);
+      return false;
+    }
+
+    function captureReaderViewportAnchors() {
+      const childPanels = childChatStack?.querySelectorAll
+        ? Array.from(childChatStack.querySelectorAll('.child-chat-messages'))
+        : [];
+      return {
+        page: captureScrollPanelAnchor(pageRoot, ['.page.active', '.page']),
+        note: captureScrollPanelAnchor(noteRoot, [
+          '.note.active .reader-source-fragment',
+          '.note.active .note-body h1',
+          '.note.active .note-body h2',
+          '.note.active .note-body h3',
+          '.note.active .note-body p',
+          '.note.active .note-body li',
+          '.note.active .note-body pre',
+          '.note.active',
+          '.note',
+        ]),
+        canvas: captureScrollPanelAnchor(canvasMessages, ['.chat-turn[data-question-id]', '.chat-turn']),
+        childPanels: childPanels.map(panel => ({
+          layerId: String(panel.dataset?.childMessages || ''),
+          anchor: captureScrollPanelAnchor(panel, ['.chat-turn[data-question-id]', '.chat-turn']),
+        })),
+      };
+    }
+
+    function restoreReaderViewportAnchors(snapshot) {
+      if (!snapshot) return;
+      restoreScrollPanelAnchor(snapshot.page);
+      restoreScrollPanelAnchor(snapshot.note);
+      restoreScrollPanelAnchor(snapshot.canvas);
+      (Array.isArray(snapshot.childPanels) ? snapshot.childPanels : []).forEach(item => {
+        let anchor = item.anchor;
+        if (anchor?.panel?.isConnected === false && item.layerId && childChatStack?.querySelector) {
+          const panel = childChatStack.querySelector(`[data-child-messages="${item.layerId}"]`);
+          if (panel) anchor = { ...anchor, panel };
+        }
+        restoreScrollPanelAnchor(anchor);
+      });
+    }
+
+    function restoreReaderAnchorsAfterLayoutChange(snapshot) {
+      const options = arguments.length > 1 && arguments[1] ? arguments[1] : {};
+      if (!snapshot) return;
+      if (typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+        if (typeof layoutAnchorRestoreFrame !== 'undefined' && layoutAnchorRestoreFrame) {
+          window.cancelAnimationFrame(layoutAnchorRestoreFrame);
+        }
+        if (typeof layoutAnchorRestoreFollowupFrame !== 'undefined' && layoutAnchorRestoreFollowupFrame) {
+          window.cancelAnimationFrame(layoutAnchorRestoreFollowupFrame);
+        }
+      }
+      layoutAnchorRestoreFrame = 0;
+      layoutAnchorRestoreFollowupFrame = 0;
+      const restore = () => restoreReaderViewportAnchors(snapshot);
+      const hasAnimationFrame = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function';
+      const scheduleFollowup = () => {
+        if (options.followup === false || !hasAnimationFrame) return;
+        layoutAnchorRestoreFollowupFrame = window.requestAnimationFrame(() => {
+          layoutAnchorRestoreFollowupFrame = 0;
+          restore();
+        });
+      };
+      if (options.immediate === false && hasAnimationFrame) {
+        layoutAnchorRestoreFrame = window.requestAnimationFrame(() => {
+          layoutAnchorRestoreFrame = 0;
+          restore();
+          scheduleFollowup();
+        });
+        return;
+      }
+      restore();
+      scheduleFollowup();
+    }
+
     function preserveCurrentSlideAfterViewportChange(slideNumber = currentSlideNumber) {
       const targetSlide = Number(slideNumber || currentSlideNumber || 1);
       if (!pageForSlide(targetSlide)) return;
@@ -2258,7 +2512,9 @@
         kind: handle.dataset.resizeHandle,
         startX: event.clientX,
         start: { ...layoutState },
+        anchors: captureReaderViewportAnchors(),
       };
+      suppressObserverUntil = Date.now() + VIEWPORT_ANCHOR_MS;
       handle.classList.add('dragging');
       document.body.classList.add('reader-resizing');
       document.body.style.userSelect = 'none';
@@ -2277,15 +2533,19 @@
         layoutState.chat = clamp(activeResize.start.chat - delta, 0.28, 2.4);
         if (chatCollapsed && delta < -0.02) chatCollapsed = false;
       }
+      suppressObserverUntil = Date.now() + VIEWPORT_ANCHOR_MS;
       applyLayoutState();
+      restoreReaderAnchorsAfterLayoutChange(activeResize.anchors, { immediate: false });
     }
 
     function stopResize() {
       if (!activeResize) return;
+      const anchors = activeResize.anchors;
       activeResize.handle.classList.remove('dragging');
       activeResize = null;
       document.body.classList.remove('reader-resizing');
       document.body.style.userSelect = '';
+      restoreReaderAnchorsAfterLayoutChange(anchors, { followup: false });
       saveLayoutState();
     }
 
