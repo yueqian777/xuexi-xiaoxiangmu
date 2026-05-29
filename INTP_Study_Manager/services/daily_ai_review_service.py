@@ -15,6 +15,27 @@ from services.prompt_service import render_template
 MAX_DAILY_REVIEW_QUESTIONS = 6
 DEFAULT_DAILY_REVIEW_QUESTIONS = 5
 
+QUESTION_TYPES = {
+    "快速定位题",
+    "条件判断题",
+    "数据计算题",
+    "应用识别题",
+    "错因修正题",
+    "对比辨析题",
+}
+
+FORMULA_WRITING_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"latex",
+        r"la\s*tex",
+        r"写.{0,6}公式",
+        r"默写.{0,6}公式",
+        r"推导完整公式",
+        r"公式默写",
+    )
+]
+
 
 def get_today_ai_review_plan(*, user_id: int | None = None) -> dict[str, Any] | None:
     user_id = user_id if user_id is not None else require_login().id
@@ -222,6 +243,30 @@ def answers_payload(plan_row: dict[str, Any]) -> dict[str, str]:
     return {str(key): str(value) for key, value in data.items()} if isinstance(data, dict) else {}
 
 
+def daily_review_question_markdown(question: dict[str, Any], index: int) -> str:
+    topic = _text(question.get("topic")) or "未命名知识点"
+    question_type = _normalize_question_type(question.get("question_type"))
+    review_focus = _text(question.get("review_focus")) or "检查核心问题、条件边界和应用识别。"
+    question_text = _text(question.get("question")) or "请用自己的话解释这个知识点想解决的核心问题。"
+    answer_format = _text(question.get("answer_format")) or "用 2-4 句中文、数字或选项回答；无需特殊公式格式。"
+    given_data = _string_list(question.get("given_data"))
+
+    sections = [
+        f"### {index}. {topic}",
+        f"`{question_type}` · `{answer_format}`",
+        f"**考点**\n\n{review_focus}",
+    ]
+    if given_data:
+        sections.append("**给定数据**\n\n" + "\n".join(f"- {item}" for item in given_data))
+    sections.extend(
+        [
+            f"**题目**\n\n{question_text}",
+            f"**作答方式**\n\n{answer_format}",
+        ]
+    )
+    return "\n\n".join(sections)
+
+
 def _save_today_plan(
     *,
     user_id: int,
@@ -282,6 +327,7 @@ def _normalize_plan_payload(
     max_questions: int,
 ) -> dict[str, Any]:
     candidate_ids = {int(item["knowledge_id"]) for item in candidates}
+    candidates_by_id = {int(item["knowledge_id"]): item for item in candidates}
     raw_questions = payload.get("questions") if isinstance(payload.get("questions"), list) else []
     questions: list[dict[str, Any]] = []
     for index, item in enumerate(raw_questions, start=1):
@@ -299,31 +345,37 @@ def _normalize_plan_payload(
         expected_points = item.get("expected_points")
         if not isinstance(expected_points, list):
             expected_points = []
-        questions.append(
-            {
-                "question_id": str(item.get("question_id") or f"q{len(questions) + 1}"),
-                "knowledge_id": knowledge_id,
-                "topic": str(item.get("topic") or _topic_for_candidate(candidates, knowledge_id)),
-                "question_type": str(item.get("question_type") or "概念解释题"),
-                "question": question,
-                "expected_points": [str(point).strip() for point in expected_points if str(point).strip()],
-            }
-        )
+        candidate = candidates_by_id[knowledge_id]
+        question_type = _normalize_question_type(item.get("question_type"))
+        review_focus = _text(item.get("review_focus")) or _default_review_focus(candidate)
+        answer_format = _text(item.get("answer_format")) or _default_answer_format(question_type)
+        given_data = _string_list(item.get("given_data"))
+        expected = [_sanitize_expected_point(point) for point in expected_points]
+        expected = [point for point in expected if point]
+
+        if _asks_for_formula_writing(" ".join([question_type, question, answer_format, " ".join(expected)])):
+            replacement = _fallback_question(candidate, question_id=str(item.get("question_id") or f"q{len(questions) + 1}"))
+            questions.append(replacement)
+        else:
+            questions.append(
+                {
+                    "question_id": str(item.get("question_id") or f"q{len(questions) + 1}"),
+                    "knowledge_id": knowledge_id,
+                    "topic": str(item.get("topic") or _topic_for_candidate(candidates, knowledge_id)),
+                    "question_type": question_type,
+                    "review_focus": review_focus,
+                    "question": question,
+                    "answer_format": answer_format,
+                    "given_data": given_data,
+                    "expected_points": expected,
+                }
+            )
         if len(questions) >= max_questions:
             break
 
     if not questions:
         for index, candidate in enumerate(candidates[:max_questions], start=1):
-            questions.append(
-                {
-                    "question_id": f"q{index}",
-                    "knowledge_id": int(candidate["knowledge_id"]),
-                    "topic": candidate["topic"],
-                    "question_type": "概念解释题",
-                    "question": f"闭卷解释：{candidate['topic']} 想解决什么核心问题？它和前面学过的哪些概念容易混淆？",
-                    "expected_points": [candidate.get("core_question") or "说明核心问题", candidate.get("one_sentence") or "给出一句话解释"],
-                }
-            )
+            questions.append(_fallback_question(candidate, question_id=f"q{index}"))
 
     return {
         "main_line": str(payload.get("main_line") or "今天用少量问题检查到期复习和低掌握度知识点。"),
@@ -610,3 +662,76 @@ def _clamp_int(value: Any, default: int) -> int:
 def _clip(text: str, limit: int) -> str:
     normalized = " ".join(str(text or "").split())
     return normalized if len(normalized) <= limit else f"{normalized[:limit]}..."
+
+
+def _normalize_question_type(value: Any) -> str:
+    text = _text(value)
+    if text in QUESTION_TYPES:
+        return text
+    if "计算" in text or "数据" in text:
+        return "数据计算题"
+    if "判断" in text or "条件" in text:
+        return "条件判断题"
+    if "应用" in text or "场景" in text:
+        return "应用识别题"
+    if "错" in text or "纠" in text:
+        return "错因修正题"
+    if "对比" in text or "辨析" in text or "混淆" in text:
+        return "对比辨析题"
+    return "快速定位题"
+
+
+def _default_review_focus(candidate: dict[str, Any]) -> str:
+    focus = _text(candidate.get("last_cause"))
+    if focus:
+        return f"优先检查上次错因：{focus}。"
+    if int(candidate.get("mastery") or 0) < 70:
+        return "优先检查低掌握度知识点的核心问题和易混边界。"
+    return "检查核心问题、条件边界和应用识别。"
+
+
+def _default_answer_format(question_type: str) -> str:
+    if question_type == "数据计算题":
+        return "写数字/判断结果 + 1 句理由；无需特殊公式格式。"
+    if question_type in {"条件判断题", "应用识别题", "对比辨析题"}:
+        return "写选项或判断 + 1-2 句理由；无需特殊公式格式。"
+    return "用 2-4 句中文回答；无需特殊公式格式。"
+
+
+def _fallback_question(candidate: dict[str, Any], *, question_id: str) -> dict[str, Any]:
+    topic = _text(candidate.get("topic")) or "未命名知识点"
+    core_question = _text(candidate.get("core_question")) or f"{topic} 想解决什么核心问题？"
+    one_sentence = _text(candidate.get("one_sentence")) or "给出一句话解释"
+    application = _text(candidate.get("application")) or "说明一个典型应用或识别信号"
+    return {
+        "question_id": question_id,
+        "knowledge_id": int(candidate["knowledge_id"]),
+        "topic": topic,
+        "question_type": "快速定位题",
+        "review_focus": _default_review_focus(candidate),
+        "question": f"不用写公式：请用自己的话说明「{topic}」要解决的核心问题、适用条件，以及最容易错的一个位置。",
+        "answer_format": "用 2-4 句中文回答；可写数字或判断，无需特殊公式格式。",
+        "given_data": [],
+        "expected_points": [core_question, one_sentence, application],
+    }
+
+
+def _asks_for_formula_writing(text: str) -> bool:
+    return any(pattern.search(text or "") for pattern in FORMULA_WRITING_PATTERNS)
+
+
+def _sanitize_expected_point(value: Any) -> str:
+    text = _text(value)
+    return "" if _asks_for_formula_writing(text) else text
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [_text(item) for item in value if _text(item)]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()

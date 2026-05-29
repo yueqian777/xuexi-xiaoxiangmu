@@ -18,6 +18,7 @@ from services.auth_service import require_login
 from services.daily_ai_review_service import (
     answers_payload,
     collect_review_candidates,
+    daily_review_question_markdown,
     evaluate_today_ai_review,
     evaluation_payload,
     generate_today_ai_review_plan,
@@ -36,8 +37,9 @@ def _self_test_question(topic: str) -> str:
 
 def _render_default_api_and_daily_ai_review() -> None:
     user = require_login()
+    _install_daily_review_styles()
     st.subheader("每日 AI 轻量复习")
-    st.caption("先设置项目默认 API。首页会用少量问题检查今天最值得复习的知识点；提交答案后自动批改，并写回知识点掌握度。")
+    st.caption("少量闭卷检索题检查今天最值得复习的知识点；提交后自动批改，并写回知识点掌握度。")
 
     providers = list_api_providers(enabled_only=True)
     if not providers:
@@ -142,7 +144,7 @@ def _render_default_api_and_daily_ai_review() -> None:
             st.rerun()
         except (AIServiceError, ValueError, RuntimeError) as exc:
             st.error(f"生成失败：{exc}")
-    controls[1].caption("建议每天 3-5 题，不把复习变成负担。")
+    controls[1].caption("建议每天 3-5 题；直接写中文、数字或选项，不需要写 LaTeX。")
 
     plan = plan or get_today_ai_review_plan(user_id=user.id)
     if not plan:
@@ -178,14 +180,11 @@ def _render_daily_ai_review_plan(
             answers: dict[str, str] = {}
             for index, question in enumerate(questions, start=1):
                 question_id = str(question.get("question_id") or f"q{index}")
-                st.markdown(
-                    f"**{index}. [{question.get('question_type', '自测题')}] {question.get('topic', '')}**\n\n"
-                    f"{question.get('question', '')}"
-                )
+                st.markdown(daily_review_question_markdown(question, index))
                 answers[question_id] = st.text_area(
                     "你的回答",
                     value=saved_answers.get(question_id, ""),
-                    placeholder="先闭卷写。不会就留空或写“不会”，系统会按错因处理。",
+                    placeholder="直接写中文、数字、选项或一句理由；不用 LaTeX。不会就写“不会”。",
                     key=f"daily_ai_answer_{plan_row['id']}_{question_id}",
                     height=110,
                 )
@@ -216,20 +215,48 @@ def _render_daily_ai_review_evaluation(evaluation: dict) -> None:
     st.info(evaluation.get("overall_summary") or "已完成批改。")
     for item in evaluation.get("evaluations", []):
         with st.container(border=True):
-            st.markdown(
-                f"**{item.get('result')} · {item.get('score')} 分 · 错因：{item.get('cause_category')}**"
-            )
+            cols = st.columns([0.9, 0.9, 1.4])
+            cols[0].metric("得分", f"{item.get('score', 0)}")
+            cols[1].markdown(f"**{item.get('result')}**")
+            cols[2].markdown(f"错因：**{item.get('cause_category')}**")
+            st.progress(int(item.get("score") or 0), text="本题掌握度证据")
             if item.get("feedback"):
-                st.markdown(f"反馈：{item['feedback']}")
+                st.markdown(f"**反馈**\n\n{item['feedback']}")
             if item.get("correct_answer"):
-                st.markdown(f"参考答案：{item['correct_answer']}")
+                st.markdown(f"**参考答案**\n\n{item['correct_answer']}")
             if item.get("next_question"):
-                st.caption(f"下一轮追问：{item['next_question']}")
+                st.markdown(f"**下一轮最小追问**\n\n{item['next_question']}")
 
     updates = evaluation.get("mastery_updates") or []
     if updates:
         st.markdown("**掌握度更新**")
-        st.dataframe(pd.DataFrame(updates), use_container_width=True, hide_index=True)
+        for update in updates:
+            before = int(update.get("mastery_before") or 0)
+            after = int(update.get("mastery_after") or 0)
+            delta = after - before
+            with st.container(border=True):
+                cols = st.columns([1.6, 0.8, 0.8, 0.8])
+                cols[0].markdown(f"**{update.get('topic', '未命名知识点')}**")
+                cols[1].metric("本次得分", int(update.get("score") or 0))
+                cols[2].metric("掌握度", f"{after}%", delta=delta)
+                cols[3].markdown(f"**{update.get('result')}**")
+
+
+def _install_daily_review_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stForm"] .stMarkdown h3 {
+            margin-top: 0.35rem;
+            margin-bottom: 0.2rem;
+        }
+        div[data-testid="stForm"] textarea {
+            min-height: 96px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render() -> None:
