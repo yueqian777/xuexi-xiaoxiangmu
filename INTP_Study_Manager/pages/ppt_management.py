@@ -258,6 +258,10 @@ def _render_question_detail_and_delete(user_id: int, questions: list[dict], slid
     with st.expander("查看完整问题和回答", expanded=True):
         st.markdown("**问题**")
         st.markdown(question["question"])
+        quote_text = str(question.get("quote_text") or "").strip()
+        if quote_text:
+            st.markdown("**引用内容**")
+            st.markdown(_quote_block(quote_text))
         st.markdown("**回答**")
         st.markdown(question["answer"])
     confirm = st.text_input("输入 DELETE 确认删除这条插问", key="delete_question_confirm")
@@ -337,7 +341,10 @@ def _matches_deck_keyword(deck: dict, keyword: str) -> bool:
 
 
 def _matches_question_keyword(question: dict, keyword: str) -> bool:
-    text = " ".join(str(question.get(key) or "") for key in ["question", "answer", "category", "slide_title"])
+    text = " ".join(
+        str(question.get(key) or "")
+        for key in ["question", "quote_text", "answer", "category", "slide_title"]
+    )
     return not keyword.strip() or keyword.strip().lower() in text.lower()
 
 
@@ -346,6 +353,10 @@ def _preview(text: str, limit: int) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[:limit].rstrip() + "..."
+
+
+def _quote_block(text: str) -> str:
+    return "\n".join(f"> {line}" if line else ">" for line in str(text or "").splitlines())
 
 
 def _int_or_zero(value: object) -> int:

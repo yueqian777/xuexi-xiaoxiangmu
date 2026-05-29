@@ -834,6 +834,24 @@
       color: #ffffff;
       border-bottom-right-radius: 5px;
     }
+    .chat-question-text {
+      font-weight: 650;
+    }
+    .chat-quote {
+      margin-top: 8px;
+      padding: 8px 9px;
+      border-left: 3px solid rgba(255,255,255,.82);
+      border-radius: 8px;
+      background: rgba(255,255,255,.18);
+      color: rgba(255,255,255,.95);
+      font-weight: 500;
+    }
+    .chat-quote-label {
+      margin-bottom: 3px;
+      font-size: 12px;
+      font-weight: 800;
+      opacity: .92;
+    }
     .chat-answer {
       margin-top: 8px;
       margin-right: 22px;
@@ -2741,6 +2759,219 @@
       };
     }
 
+    function quoteLocationForCentering(source, payload) {
+      const sourceText = String(source ?? '');
+      if (!sourceText || !payload) return null;
+      return markdownSelectionHighlightState(sourceText, payload).location || null;
+    }
+
+    function searchLocationForRawLocation(searchable, displayToRaw, rawLocation) {
+      if (!searchable || !Array.isArray(searchable.map) || !Array.isArray(displayToRaw) || !rawLocation) {
+        return null;
+      }
+      const rawStart = Number(rawLocation.start);
+      const rawEnd = Number(rawLocation.end);
+      if (!Number.isInteger(rawStart) || !Number.isInteger(rawEnd) || rawEnd <= rawStart) return null;
+
+      let start = -1;
+      let end = -1;
+      for (let searchIndex = 0; searchIndex < searchable.map.length; searchIndex += 1) {
+        const displayIndex = searchable.map[searchIndex];
+        const rawIndex = displayToRaw[displayIndex];
+        if (!Number.isInteger(rawIndex) || rawIndex < rawStart || rawIndex >= rawEnd) continue;
+        if (start < 0) start = searchIndex;
+        end = searchIndex + 1;
+      }
+      return start >= 0 && end > start ? { start, end } : null;
+    }
+
+    function centeredScrollTopForElement(containerHeight, targetTop, targetHeight, maxTop) {
+      const visibleHeight = Math.max(0, Number(containerHeight) || 0);
+      const boundedMax = Math.max(0, Number(maxTop) || 0);
+      const targetCenter = (Number(targetTop) || 0) + Math.max(0, Number(targetHeight) || 0) / 2;
+      return clamp(targetCenter - visibleHeight / 2, 0, boundedMax);
+    }
+
+    function firstTextNode(root) {
+      if (!root || typeof document === 'undefined') return null;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      return walker.nextNode();
+    }
+
+    function textOffsetForSearchOffset(text, searchOffset) {
+      const target = Math.max(0, Number(searchOffset) || 0);
+      if (target <= 0) return 0;
+      const sourceText = String(text || '');
+      let count = 0;
+      let lastWasSpace = false;
+      for (let index = 0; index < sourceText.length; index += 1) {
+        const char = sourceText[index];
+        let addsSearchChar = false;
+        if (/\s/.test(char)) {
+          if (!lastWasSpace) {
+            addsSearchChar = true;
+            lastWasSpace = true;
+          }
+        } else {
+          addsSearchChar = true;
+          lastWasSpace = false;
+        }
+        if (!addsSearchChar) continue;
+        count += 1;
+        if (count >= target) return index + 1;
+      }
+      return sourceText.length;
+    }
+
+    function rangeForSearchLocation(body, searchLocation) {
+      if (!body || typeof document === 'undefined' || !searchLocation) return null;
+      const searchStart = Number(searchLocation.start);
+      const searchEnd = Number(searchLocation.end);
+      if (!Number.isInteger(searchStart) || !Number.isInteger(searchEnd) || searchEnd <= searchStart) return null;
+
+      let rangeStart = null;
+      let rangeEnd = null;
+      Array.from(body.querySelectorAll('.reader-source-fragment')).forEach(fragment => {
+        const fragmentStart = Number(fragment.dataset.searchStart);
+        const fragmentEnd = Number(fragment.dataset.searchEnd);
+        if (!Number.isInteger(fragmentStart) || !Number.isInteger(fragmentEnd) || fragmentEnd <= fragmentStart) return;
+        const overlapStart = Math.max(searchStart, fragmentStart);
+        const overlapEnd = Math.min(searchEnd, fragmentEnd);
+        if (overlapEnd <= overlapStart) return;
+        const textNode = firstTextNode(fragment);
+        if (!textNode) return;
+        if (!rangeStart) {
+          rangeStart = {
+            node: textNode,
+            offset: textOffsetForSearchOffset(textNode.nodeValue, overlapStart - fragmentStart),
+          };
+        }
+        rangeEnd = {
+          node: textNode,
+          offset: textOffsetForSearchOffset(textNode.nodeValue, overlapEnd - fragmentStart),
+        };
+      });
+
+      if (!rangeStart || !rangeEnd) return null;
+      try {
+        const range = document.createRange();
+        range.setStart(rangeStart.node, rangeStart.offset);
+        range.setEnd(rangeEnd.node, rangeEnd.offset);
+        return range.collapsed ? null : range;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function rectFromRange(range) {
+      if (!range) return null;
+      const rects = Array.from(range.getClientRects()).filter(rect => rect.width || rect.height);
+      if (!rects.length) {
+        const fallback = range.getBoundingClientRect();
+        return fallback.width || fallback.height ? fallback : null;
+      }
+      const bounds = rects.reduce((acc, rect) => ({
+        top: Math.min(acc.top, rect.top),
+        right: Math.max(acc.right, rect.right),
+        bottom: Math.max(acc.bottom, rect.bottom),
+        left: Math.min(acc.left, rect.left),
+      }), {
+        top: rects[0].top,
+        right: rects[0].right,
+        bottom: rects[0].bottom,
+        left: rects[0].left,
+      });
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: Math.max(0, bounds.right - bounds.left),
+        height: Math.max(1, bounds.bottom - bounds.top),
+      };
+    }
+
+    function quoteRectInBody(body, rawLocation) {
+      const map = noteBodySourceMaps.get(body);
+      const searchLocation = searchLocationForRawLocation(map?.searchable, map?.displayToRaw, rawLocation);
+      return rectFromRange(rangeForSearchLocation(body, searchLocation));
+    }
+
+    function isCurrentChatQuotePayload(payload) {
+      if (!payload || !currentChatQuote) return false;
+      if (payload.token && currentChatQuote.token) return payload.token === currentChatQuote.token;
+      return Number(payload.slideNumber) === Number(currentChatQuote.slideNumber)
+        && String(payload.selectedText || '') === String(currentChatQuote.selectedText || '')
+        && String(payload.sourceStart ?? '') === String(currentChatQuote.sourceStart ?? '')
+        && String(payload.sourceEnd ?? '') === String(currentChatQuote.sourceEnd ?? '');
+    }
+
+    function centerQuoteInNotes(payload, options = {}) {
+      const slideNumber = Number(payload?.slideNumber);
+      const page = pageForSlide(slideNumber);
+      const note = document.getElementById(`note-${slideNumber}`);
+      if (!Number.isFinite(slideNumber) || !page || !note) return false;
+
+      setActive(slideNumber, {
+        scrollPage: true,
+        scrollNote: false,
+        behavior: options.pageBehavior || options.behavior || 'auto',
+        immediateNearbyContent: true,
+        skipChatRender: options.skipChatRender === true,
+        skipSave: true,
+      });
+
+      const body = note.querySelector('.note-body');
+      if (!body) return false;
+      if (body.dataset.hydrated !== '1') {
+        hydrateNote(slideNumber).then(() => {
+          if (isCurrentChatQuotePayload(payload)) {
+            centerQuoteInNotes(payload, { ...options, skipChatRender: true });
+          }
+        });
+        return false;
+      }
+
+      if (!noteBodySourceMaps.get(body)) {
+        applyMarkdownSourceMap(body, page.explanation);
+      }
+
+      const location = quoteLocationForCentering(page.explanation || '', payload);
+      const targetRect = quoteRectInBody(body, location) || note.getBoundingClientRect();
+      const rootRect = noteRoot.getBoundingClientRect();
+      const targetTop = targetRect.top - rootRect.top + noteRoot.scrollTop;
+      const maxTop = Math.max(0, noteRoot.scrollHeight - noteRoot.clientHeight);
+      const nextTop = centeredScrollTopForElement(
+        noteRoot.clientHeight,
+        targetTop,
+        targetRect.height || 1,
+        maxTop
+      );
+      noteRoot.scrollTo({ top: nextTop, behavior: options.behavior || 'auto' });
+      if (readingMode === 'paged') {
+        centerPage(slideNumber, options.pageBehavior || options.behavior || 'auto');
+      }
+      saveScrollState();
+      return Boolean(location);
+    }
+
+    function centerQuoteAfterLayoutChange(payload) {
+      if (!payload) return;
+      const center = () => {
+        if (!isCurrentChatQuotePayload(payload)) return;
+        centerQuoteInNotes(payload, {
+          behavior: 'auto',
+          pageBehavior: 'auto',
+          skipChatRender: true,
+        });
+      };
+      window.requestAnimationFrame(() => {
+        center();
+        window.requestAnimationFrame(center);
+      });
+      [80, 180, 360, 700].forEach(delay => window.setTimeout(center, delay));
+    }
+
     function removeMarkdownHighlight(source, location, bounds) {
       const before = source.slice(bounds.contentStart, location.start);
       const selected = source.slice(location.start, location.end);
@@ -3157,6 +3388,15 @@
       quotePreview.classList.add('show');
     }
 
+    function renderChatQuestion(item) {
+      const questionHtml = escapeHtml(item.question || '').replaceAll('\n', '<br>');
+      const quoteText = String(item.quoteText || '').trim();
+      const quoteHtml = quoteText
+        ? `<div class="chat-quote"><div class="chat-quote-label">引用内容</div><div>${escapeHtml(quoteText).replaceAll('\n', '<br>')}</div></div>`
+        : '';
+      return `<div class="chat-question"><div class="chat-question-text">${questionHtml}</div>${quoteHtml}</div>`;
+    }
+
     function renderChatForPage(slideNumber) {
       const page = pageForSlide(slideNumber);
       if (!page) {
@@ -3183,7 +3423,7 @@
       }
       canvasMessages.innerHTML = messages.map(item => `
         <div class="chat-turn">
-          <div class="chat-question">${escapeHtml(item.question || '').replaceAll('\n', '<br>')}</div>
+          ${renderChatQuestion(item)}
           <div class="chat-answer">${renderMarkdown(item.answer || '')}</div>
           <div class="chat-turn-meta">${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '· ' + escapeHtml(item.createdAt) : ''}</div>
         </div>
@@ -3221,9 +3461,17 @@
     function sendSelectionToBranch() {
       const payload = currentSelectionPayload || buildSelectionPayload();
       if (!payload) return;
-      openCanvasChat(true);
       currentChatQuote = payload;
       renderQuotePreview();
+      setActive(payload.slideNumber, {
+        scrollPage: true,
+        scrollNote: false,
+        behavior: 'auto',
+        immediateNearbyContent: true,
+        skipSave: true,
+      });
+      openCanvasChat(true);
+      centerQuoteAfterLayoutChange(payload);
       canvasInput.focus();
       canvasHint.textContent = '已引用选中文本，将随下一次提问发送';
       selectionHint.textContent = '已引用到侧边插问栏';

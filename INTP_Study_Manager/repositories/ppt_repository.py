@@ -76,13 +76,21 @@ def latest_explanations_by_slide_ids(user_id: int, slide_ids: list[int]) -> dict
     return latest
 
 
-def add_slide_question(user_id: int, slide_id: int, question: str, answer: str, model: str) -> int:
+def add_slide_question(
+    user_id: int,
+    slide_id: int,
+    question: str,
+    answer: str,
+    model: str,
+    *,
+    quote_text: str = "",
+) -> int:
     return insert_and_get_id(
         """
-        INSERT INTO slide_questions (user_id, slide_id, question, answer, model)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO slide_questions (user_id, slide_id, question, quote_text, answer, model)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (int(user_id), int(slide_id), question, answer, model),
+        (int(user_id), int(slide_id), question, quote_text, answer, model),
     )
 
 
@@ -96,7 +104,7 @@ def questions_by_slide_ids(user_id: int, slide_ids: list[int]) -> dict[int, list
         placeholders = ",".join("?" for _ in chunk)
         rows = fetch_all(
             f"""
-            SELECT slide_id, question, answer, model, category, status, sort_order, created_at
+            SELECT slide_id, question, quote_text, answer, model, category, status, sort_order, created_at
             FROM slide_questions
             WHERE user_id = ? AND slide_id IN ({placeholders})
             ORDER BY sort_order ASC, created_at ASC, id ASC

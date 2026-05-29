@@ -796,7 +796,14 @@ def _handle_synced_reader_action(
                 model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
             )
-        add_slide_question(require_login().id, slide["id"], question, answer, _active_model_label())
+        add_slide_question(
+            require_login().id,
+            slide["id"],
+            question,
+            answer,
+            _active_model_label(),
+            quote_text=quote["selected_text"] if quote else "",
+        )
     except AIServiceError as exc:
         st.error(str(exc))
         st.caption("侧边插问调用失败，当前阅读位置不会被修改。")
@@ -1796,7 +1803,14 @@ def _render_branch_question_form(
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
                 reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
             )
-        add_slide_question(require_login().id, slide["id"], typed_question, answer, _active_model_label())
+        add_slide_question(
+            require_login().id,
+            slide["id"],
+            typed_question,
+            answer,
+            _active_model_label(),
+            quote_text=quote["selected_text"] if quote else "",
+        )
         if quote:
             st.session_state.pop(_branch_quote_state_key(quote["deck_id"]), None)
         st.success(f"插问已保存。现在回到第 {slide['slide_number']} 页主线。")
@@ -1827,21 +1841,40 @@ def _compose_quoted_branch_question(quote: dict, question: str) -> str:
     )
 
 
-def _display_branch_question(question: str) -> str:
+def _legacy_branch_question_parts(question: str) -> dict[str, str]:
     text = str(question or "").strip()
     if not all(marker in text for marker in ("引用内容", "前文上下文", "后文上下文")):
-        return text
-    match = re.search(r"(?:^|\n)我的问题[：:]\s*(?P<question>[\s\S]+)$", text)
-    if not match:
-        return text
-    display_question = match.group("question").strip()
-    return display_question or text
+        return {}
+    quote_match = re.search(r"(?:^|\n)引用内容[：:]\s*(?P<quote>[\s\S]*?)\n\s*前文上下文[：:]", text)
+    question_match = re.search(r"(?:^|\n)我的问题[：:]\s*(?P<question>[\s\S]+)$", text)
+    return {
+        "question": question_match.group("question").strip() if question_match else "",
+        "quoteText": quote_match.group("quote").strip() if quote_match else "",
+    }
+
+
+def _branch_question_display_parts(question: str, quote_text: str = "") -> dict[str, str]:
+    text = str(question or "").strip()
+    quote = str(quote_text or "").strip()
+    legacy = _legacy_branch_question_parts(text)
+    return {
+        "question": legacy.get("question") or text,
+        "quoteText": quote or legacy.get("quoteText", ""),
+    }
+
+
+def _display_branch_question(question: str) -> str:
+    return _branch_question_display_parts(question)["question"]
+
+
+def _markdown_quote_block(text: str) -> str:
+    return "\n".join(f"> {line}" if line else ">" for line in str(text or "").splitlines())
 
 
 def _render_question_history(slide_id: int) -> None:
     questions = fetch_all(
         """
-        SELECT question, answer, model, category, status, sort_order, created_at
+        SELECT question, quote_text, answer, model, category, status, sort_order, created_at
         FROM slide_questions
         WHERE slide_id = ?
         ORDER BY sort_order ASC, created_at ASC, id ASC
@@ -1853,8 +1886,11 @@ def _render_question_history(slide_id: int) -> None:
         st.caption("当前页还没有插问。")
         return
     for item in questions:
+        display_parts = _branch_question_display_parts(item["question"], item.get("quote_text", ""))
         with st.container(border=True):
-            st.markdown(f"**问：** {_display_branch_question(item['question'])}")
+            st.markdown(f"**问：** {display_parts['question']}")
+            if display_parts["quoteText"]:
+                st.markdown(f"**引用：**\n{_markdown_quote_block(display_parts['quoteText'])}")
             st.markdown(item["answer"])
             st.caption(
                 f"分类：{item.get('category') or '未分类'} · 状态：{item.get('status') or '未整理'} · "
@@ -3544,7 +3580,7 @@ def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
     return {
         slide_id: [
             {
-                "question": _display_branch_question(row["question"]),
+                **_branch_question_display_parts(row["question"], row.get("quote_text", "")),
                 "answer": row["answer"],
                 "model": row["model"],
                 "category": row["category"],

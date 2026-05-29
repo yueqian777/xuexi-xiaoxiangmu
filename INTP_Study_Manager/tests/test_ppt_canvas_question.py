@@ -6,7 +6,7 @@ from pages import ppt_tutor
 
 
 class PptCanvasQuestionTest(unittest.TestCase):
-    def test_display_branch_question_extracts_typed_question_from_legacy_prompt(self):
+    def test_display_branch_question_parts_extract_legacy_prompt_question_and_quote(self):
         legacy_question = "\n".join(
             [
                 "我选中了第 9 页的一段内容，想围绕这段话插问。",
@@ -25,10 +25,13 @@ class PptCanvasQuestionTest(unittest.TestCase):
             ]
         )
 
+        parts = ppt_tutor._branch_question_display_parts(legacy_question)
+
         self.assertEqual(
-            ppt_tutor._display_branch_question(legacy_question),
+            parts["question"],
             "为什么这里强调周期信号？",
         )
+        self.assertEqual(parts["quoteText"], "周期信号")
 
     def test_canvas_question_saves_typed_question_while_prompt_keeps_quote_context(self):
         deck = {"id": 3, "title": "信号课件", "subject": "信号与系统"}
@@ -75,8 +78,31 @@ class PptCanvasQuestionTest(unittest.TestCase):
         self.assertIn("周期信号", prompt_inputs["question"])
         self.assertTrue(prompt_inputs["question"].endswith("为什么这里强调周期信号？"))
         generate_text.assert_called_once()
-        add_slide_question.assert_called_once_with(11, 9, "为什么这里强调周期信号？", "回答内容", "测试模型")
+        add_slide_question.assert_called_once_with(11, 9, "为什么这里强调周期信号？", "回答内容", "测试模型", quote_text="周期信号")
         rerun.assert_called_once()
+
+    def test_questions_by_slide_ids_includes_saved_quote_text(self):
+        rows = [
+            {
+                "question": "为什么这里强调周期信号？",
+                "quote_text": "周期信号",
+                "answer": "回答",
+                "model": "模型",
+                "category": "",
+                "status": "未整理",
+                "sort_order": 0,
+                "created_at": "today",
+            }
+        ]
+
+        with (
+            patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 11})()),
+            patch.object(ppt_tutor, "questions_by_slide_ids", return_value={9: rows}),
+        ):
+            result = ppt_tutor._questions_by_slide_ids([9])
+
+        self.assertEqual(result[9][0]["question"], "为什么这里强调周期信号？")
+        self.assertEqual(result[9][0]["quoteText"], "周期信号")
 
 
 if __name__ == "__main__":

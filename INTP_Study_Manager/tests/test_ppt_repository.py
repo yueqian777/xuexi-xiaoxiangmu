@@ -16,12 +16,13 @@ class PptRepositoryTest(unittest.TestCase):
 
     def test_add_slide_question_normalizes_ids_and_returns_insert_id(self):
         with patch.object(ppt_repository, "insert_and_get_id", return_value=88) as insert_and_get_id:
-            result = ppt_repository.add_slide_question("4", "9", "问题", "答案", "模型")
+            result = ppt_repository.add_slide_question("4", "9", "问题", "答案", "模型", quote_text="引用")
 
         self.assertEqual(result, 88)
         query, params = insert_and_get_id.call_args.args
         self.assertIn("INSERT INTO slide_questions", query)
-        self.assertEqual(params, (4, 9, "问题", "答案", "模型"))
+        self.assertIn("quote_text", query)
+        self.assertEqual(params, (4, 9, "问题", "引用", "答案", "模型"))
 
     def test_latest_explanations_by_slide_ids_returns_empty_for_no_ids(self):
         with patch.object(ppt_repository, "fetch_all") as fetch_all:
@@ -65,6 +66,7 @@ class PptRepositoryTest(unittest.TestCase):
 
         self.assertEqual(result, {7: rows})
         query, params = fetch_all.call_args.args
+        self.assertIn("quote_text", query)
         self.assertIn("ORDER BY sort_order ASC, created_at ASC, id ASC", query)
         self.assertEqual(params, (4, 7))
 

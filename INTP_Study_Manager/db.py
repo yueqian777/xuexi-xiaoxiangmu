@@ -220,6 +220,7 @@ def init_db() -> None:
                 user_id INTEGER NOT NULL DEFAULT 0,
                 slide_id INTEGER NOT NULL,
                 question TEXT NOT NULL,
+                quote_text TEXT DEFAULT '',
                 answer TEXT NOT NULL,
                 model TEXT NOT NULL,
                 category TEXT DEFAULT '',
@@ -324,6 +325,7 @@ def init_db() -> None:
         _ensure_column(conn, "ppt_slides", "key_points", "TEXT DEFAULT ''")
         _ensure_column(conn, "slide_explanations", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_questions", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "slide_questions", "quote_text", "TEXT DEFAULT ''")
         _ensure_column(conn, "api_providers", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "app_settings", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "daily_review_logs", "user_id", "INTEGER NOT NULL DEFAULT 0")

@@ -72,6 +72,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
         source = READER_HTML.read_text(encoding="utf-8")
         helper_names = [
             "escapeHtml",
+            "clamp",
             "findUnescaped",
             "isAsciiWordLike",
             "isLikelyEqualityOperator",
@@ -104,8 +105,12 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "locateMarkdownSelection",
             "markdownHighlightBounds",
             "markdownSelectionHighlightState",
+            "quoteLocationForCentering",
+            "searchLocationForRawLocation",
+            "centeredScrollTopForElement",
             "removeMarkdownHighlight",
             "wrapMarkdownSelection",
+            "renderChatQuestion",
         ]
         cls.js_helpers = "\n\n".join(
             block for name in helper_names if (block := _extract_function(source, name))
@@ -333,6 +338,82 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             """
         )
 
+    def test_quote_centering_uses_source_range_for_repeated_text(self):
+        self.run_js(
+            r"""
+            const source = [
+              '\u4e0a\u65b9\uff1a\u5468\u671f\u4fe1\u53f7',
+              '',
+              '$$ a_1 + a_2 + a_3 + a_4 + a_5 + a_6 + a_7 + a_8 $$',
+              '',
+              '\u4e0b\u65b9\uff1a\u5468\u671f\u4fe1\u53f7',
+            ].join('\n');
+            const lowerStart = source.lastIndexOf('\u5468\u671f\u4fe1\u53f7');
+            const payload = {
+              selectedText: '\u5468\u671f\u4fe1\u53f7',
+              selectedTextRaw: '\u5468\u671f\u4fe1\u53f7',
+              contextBefore: '',
+              contextAfter: '',
+              selectionStartOffset: 0,
+              sourceStart: lowerStart,
+              sourceEnd: lowerStart + '\u5468\u671f\u4fe1\u53f7'.length,
+            };
+            const location = quoteLocationForCentering(source, payload);
+            if (!location || location.start !== lowerStart || location.end !== payload.sourceEnd) {
+              throw new Error(JSON.stringify(location));
+            }
+            """
+        )
+
+    def test_raw_source_location_maps_to_rendered_search_range_after_hidden_preamble(self):
+        self.run_js(
+            r"""
+            const source = [
+              '[[\u7b2c 1 \u9875]] [[\u6807\u7b7e:\u8bb2\u89e3\u9875]]: \u5468\u671f\u4fe1\u53f7',
+              '',
+              '\u4e0a\u65b9\uff1a\u5468\u671f\u4fe1\u53f7',
+              '',
+              '\u4e0b\u65b9\uff1a\u5468\u671f\u4fe1\u53f7',
+            ].join('\n');
+            const lowerStart = source.lastIndexOf('\u5468\u671f\u4fe1\u53f7');
+            const info = displayExplanationSourceInfo(source);
+            const searchable = markdownSearchText(info.displaySource);
+            const location = searchLocationForRawLocation(searchable, info.displayToRaw, {
+              start: lowerStart,
+              end: lowerStart + '\u5468\u671f\u4fe1\u53f7'.length,
+            });
+            if (!location) {
+              throw new Error('missing search location');
+            }
+            const selected = searchable.text.slice(location.start, location.end);
+            if (selected !== '\u5468\u671f\u4fe1\u53f7') {
+              throw new Error(JSON.stringify({ location, selected, text: searchable.text }));
+            }
+            const before = searchable.text.slice(0, location.start);
+            if (!before.includes('\u4e0b\u65b9\uff1a')) {
+              throw new Error(JSON.stringify({ location, before, text: searchable.text }));
+            }
+            """
+        )
+
+    def test_centered_scroll_top_clamps_to_scroll_bounds(self):
+        self.run_js(
+            r"""
+            const centered = centeredScrollTopForElement(400, 900, 50, 1200);
+            if (centered !== 725) {
+              throw new Error(String(centered));
+            }
+            const clampedStart = centeredScrollTopForElement(400, 40, 40, 1200);
+            if (clampedStart !== 0) {
+              throw new Error(String(clampedStart));
+            }
+            const clampedEnd = centeredScrollTopForElement(400, 1500, 80, 1200);
+            if (clampedEnd !== 1200) {
+              throw new Error(String(clampedEnd));
+            }
+            """
+        )
+
     def test_render_markdown_highlights_math_segment(self):
         self.run_js(
             r"""
@@ -369,6 +450,22 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
         source = READER_HTML.read_text(encoding="utf-8")
         self.assertNotIn('<span class="note-links">', source)
         self.assertNotIn("renderNoteBiLinks(page)", source)
+
+    def test_render_chat_question_shows_question_and_quote_text(self):
+        self.run_js(
+            r"""
+            const rendered = renderChatQuestion({
+              question: '\u4e3a\u4ec0\u4e48\u8fd9\u91cc\u5f3a\u8c03\u5468\u671f\u4fe1\u53f7\uff1f',
+              quoteText: '\u5468\u671f\u4fe1\u53f7',
+            });
+            if (!rendered.includes('\u4e3a\u4ec0\u4e48\u8fd9\u91cc\u5f3a\u8c03\u5468\u671f\u4fe1\u53f7\uff1f')) {
+              throw new Error(rendered);
+            }
+            if (!rendered.includes('\u5f15\u7528\u5185\u5bb9') || !rendered.includes('\u5468\u671f\u4fe1\u53f7')) {
+              throw new Error(rendered);
+            }
+            """
+        )
 
 
 if __name__ == "__main__":
