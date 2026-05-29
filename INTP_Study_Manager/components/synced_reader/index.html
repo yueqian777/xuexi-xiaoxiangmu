@@ -2315,6 +2315,21 @@
       };
     }
 
+    function initialReaderTargetSlide(args, stored, isSameDeckRefresh) {
+      const slideOrZero = (value) => {
+        const slideNumber = Number(value || 0);
+        return pageForSlide(slideNumber) ? slideNumber : 0;
+      };
+      const restoredSlide = slideOrZero(restoreScrollAfterRender?.currentSlide);
+      if (isSameDeckRefresh && restoredSlide) return restoredSlide;
+      const storedSlide = slideOrZero(stored?.currentSlide);
+      if (storedSlide) return storedSlide;
+      const initialSlide = slideOrZero(args?.initial_slide_number);
+      if (initialSlide) return initialSlide;
+      if (restoredSlide) return restoredSlide;
+      return Number(pages[0]?.slideNumber || 1);
+    }
+
     function pageForSlide(slideNumber) {
       return pages.find(item => Number(item.slideNumber) === Number(slideNumber)) || null;
     }
@@ -2818,7 +2833,8 @@
       setActive(nextSlide, { scrollPage: true, behavior: 'smooth' });
     }
 
-    function setActive(pageNumber, options = {}) {
+    function setActive(pageNumber, options) {
+      options = options || {};
       const nextSlideNumber = Number(pageNumber || 1);
       if (!pageForSlide(nextSlideNumber)) return;
       const sameSlide = nextSlideNumber === currentSlideNumber;
@@ -2832,6 +2848,10 @@
         && !options.scrollPage
         && !options.forceNoteScroll
       ) {
+        const currentBody = currentNote?.querySelector?.('.note-body');
+        if (currentBody?.dataset?.hydrated !== '1') {
+          hydrateNote(nextSlideNumber);
+        }
         scheduleScrollStateSave();
         return;
       }
@@ -2842,6 +2862,10 @@
       if (page) page.classList.add('active');
       if (note) {
         note.classList.add('active');
+        const body = note.querySelector?.('.note-body');
+        if (body?.dataset?.hydrated !== '1') {
+          hydrateNote(currentSlideNumber);
+        }
         if (options.scrollNote !== false && (!sameSlide || options.forceNoteScroll)) {
           noteRoot.scrollTo({
             top: note.offsetTop - noteRoot.offsetTop,
@@ -3694,15 +3718,7 @@
       loadLayoutState();
       loadReadingMode();
       const stored = readScrollState();
-      const requestedSlide = Number(
-        (isSameDeckRefresh ? restoreScrollAfterRender?.currentSlide : args.initial_slide_number)
-        || args.initial_slide_number
-        || stored?.currentSlide
-        || restoreScrollAfterRender?.currentSlide
-        || pages[0]?.slideNumber
-        || 1
-      );
-      const targetSlide = pageForSlide(requestedSlide) ? requestedSlide : Number(pages[0]?.slideNumber || 1);
+      const targetSlide = initialReaderTargetSlide(args, stored, isSameDeckRefresh);
 
       deckTitle.textContent = String(args.title || '学习资料');
       deckMeta.textContent = `${String(args.subject || '未分类')} · 原页面同步阅读`;
@@ -3789,7 +3805,7 @@
           ${renderPageContext(page)}
           ${renderNoteBody(page, shouldHydrateNote(Number(page.slideNumber), targetSlide))}
           <div class="note-edit-panel">
-            <textarea class="note-editor" spellcheck="false">${shouldHydrateNote(Number(page.slideNumber), targetSlide) ? escapeHtml(page.explanation || '') : ''}</textarea>
+            <textarea class="note-editor" data-note-slide="${page.slideNumber}" spellcheck="false">${shouldHydrateNote(Number(page.slideNumber), targetSlide) ? escapeHtml(page.explanation || '') : ''}</textarea>
             <div class="note-edit-actions">
               <button type="button" class="note-action-button note-cancel" data-cancel-edit-page="${page.slideNumber}">取消</button>
               <button type="button" class="note-action-button note-save" data-save-edit-page="${page.slideNumber}">保存修改</button>
@@ -4196,6 +4212,27 @@
       container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
     }
 
+    function shouldSubmitInputOnEnter(event) {
+      return (
+        event &&
+        event.key === 'Enter' &&
+        !event.shiftKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        !event.isComposing &&
+        event.keyCode !== 229
+      );
+    }
+
+    function submitInputOnEnter(event, submitAction) {
+      if (!shouldSubmitInputOnEnter(event)) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      submitAction();
+      return true;
+    }
+
     function childLayerScrollPositions() {
       const positions = new Map();
       if (!childChatStack) return positions;
@@ -4436,6 +4473,7 @@
       canvasHint.textContent = '已清除引用';
     });
     canvasInput.addEventListener('keydown', (event) => {
+      if (submitInputOnEnter(event, sendCanvasQuestion)) return;
       if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
         event.preventDefault();
         sendCanvasQuestion();
@@ -4465,12 +4503,22 @@
         cancelEditExplanation(Number(button.dataset.cancelEditPage));
       }
     });
+    noteRoot.addEventListener('keydown', (event) => {
+      const editor = event.target?.closest?.('.note-editor');
+      if (!editor) return;
+      submitInputOnEnter(event, () => saveEditedExplanation(Number(editor.dataset.noteSlide || 0)));
+    });
     noteRoot.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
     noteRoot.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
     canvasMessages.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
     canvasMessages.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
     childChatStack.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
     childChatStack.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
+    childChatStack.addEventListener('keydown', (event) => {
+      const input = event.target?.closest?.('.child-chat-input');
+      if (!input) return;
+      submitInputOnEnter(event, () => sendChildQuestion(input.dataset.childInput));
+    });
     canvasMessages.addEventListener('click', (event) => {
       const button = event.target?.closest?.('[data-open-child-chat]');
       if (!button) return;

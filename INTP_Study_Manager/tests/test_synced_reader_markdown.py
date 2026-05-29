@@ -93,6 +93,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "displayExplanationSource",
             "pageForSlide",
             "createComponentToken",
+            "initialReaderTargetSlide",
             "findMathSegmentBoundsForLocation",
             "appendSearchableChar",
             "appendSearchableRange",
@@ -136,6 +137,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "jumpToBookmark",
             "closeBookmarkPanel",
             "toggleBookmarkPanel",
+            "setActive",
         ]
         cls.js_helpers = "\n\n".join(
             block for name in helper_names if (block := _extract_function(source, name))
@@ -436,6 +438,88 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             const clampedEnd = centeredScrollTopForElement(400, 1500, 80, 1200);
             if (clampedEnd !== 1200) {
               throw new Error(String(clampedEnd));
+            }
+            """
+        )
+
+    def test_initial_reader_target_prefers_browser_saved_slide_on_first_entry(self):
+        self.run_js(
+            r"""
+            var pages = [
+              { slideNumber: 1 },
+              { slideNumber: 9 },
+            ];
+            var restoreScrollAfterRender = { currentSlide: 4 };
+
+            const target = initialReaderTargetSlide(
+              { initial_slide_number: 1 },
+              { currentSlide: 9, pageScroll: 500, noteScroll: 300 },
+              false
+            );
+            if (target !== 9) {
+              throw new Error(String(target));
+            }
+            """
+        )
+
+    def test_set_active_hydrates_the_selected_note_immediately(self):
+        self.run_js(
+            r"""
+            var pages = [{ slideNumber: 5 }];
+            var currentSlideNumber = 1;
+            var noteRoot = {
+              offsetTop: 0,
+              scrollTo(value) { this.lastScroll = value; },
+            };
+            const body = { dataset: { hydrated: '0' } };
+            const page = {
+              classList: {
+                add(name) { this.added = name; },
+                contains() { return false; },
+                remove() {},
+              },
+            };
+            const note = {
+              offsetTop: 120,
+              classList: {
+                add(name) { this.added = name; },
+                contains() { return false; },
+                remove() {},
+              },
+              querySelector(selector) {
+                return selector === '.note-body' ? body : null;
+              },
+            };
+            var document = {
+              getElementById(id) {
+                if (id === 'page-5') return page;
+                if (id === 'note-5') return note;
+                return null;
+              },
+              querySelectorAll() { return []; },
+            };
+            var hydratedSlide = 0;
+            var nearbySlide = 0;
+            function closeChildLayersForSlideChange() {}
+            function updatePageJumpDisplay() {}
+            function updateSectionSelect() {}
+            function renderChatForPage() {}
+            function hydrateNote(slideNumber) {
+              hydratedSlide = Number(slideNumber);
+              body.dataset.hydrated = '1';
+              return Promise.resolve(true);
+            }
+            function ensureNearbyContent(slideNumber) { nearbySlide = Number(slideNumber); }
+            function scheduleNearbyContent(slideNumber) { nearbySlide = Number(slideNumber); }
+            function centerPage() {}
+            function saveScrollState() {}
+
+            setActive(5, { scrollNote: false });
+            if (hydratedSlide !== 5) {
+              throw new Error(String(hydratedSlide));
+            }
+            if (nearbySlide !== 5) {
+              throw new Error(String(nearbySlide));
             }
             """
         )

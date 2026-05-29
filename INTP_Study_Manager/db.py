@@ -209,6 +209,19 @@ def _run_init_db() -> None:
                 UNIQUE(deck_id, slide_number)
             );
 
+            CREATE TABLE IF NOT EXISTS ppt_study_asset_pages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                deck_id INTEGER NOT NULL,
+                slide_number INTEGER NOT NULL,
+                session_id INTEGER,
+                knowledge_count INTEGER NOT NULL DEFAULT 0,
+                range_label TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                FOREIGN KEY (deck_id) REFERENCES ppt_decks(id) ON DELETE CASCADE,
+                FOREIGN KEY (session_id) REFERENCES study_sessions(id) ON DELETE SET NULL
+            );
+
             CREATE TABLE IF NOT EXISTS ppt_sections (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL DEFAULT 0,
@@ -353,6 +366,7 @@ def _run_init_db() -> None:
         _ensure_column(conn, "ppt_slides", "key_points", "TEXT DEFAULT ''")
         _ensure_column(conn, "ppt_slides", "bookmark_enabled", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "ppt_slides", "bookmark_title", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_study_asset_pages", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "ppt_sections", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_explanations", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_questions", "user_id", "INTEGER NOT NULL DEFAULT 0")
@@ -430,6 +444,8 @@ def _run_init_db() -> None:
                 ON ppt_slides(user_id, deck_id, bookmark_enabled, slide_number ASC);
             CREATE INDEX IF NOT EXISTS idx_ppt_slides_deck
                 ON ppt_slides(deck_id);
+            CREATE INDEX IF NOT EXISTS idx_ppt_study_asset_pages_user_deck_slide
+                ON ppt_study_asset_pages(user_id, deck_id, slide_number ASC, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_ppt_sections_user_deck_index
                 ON ppt_sections(user_id, deck_id, section_index ASC);
             CREATE INDEX IF NOT EXISTS idx_ppt_sections_deck
@@ -454,6 +470,7 @@ def _run_init_db() -> None:
         )
         _migrate_api_provider_identity(conn)
         _migrate_daily_ai_review_plan_user_scope(conn)
+        _migrate_ppt_study_asset_pages_user_scope(conn)
         _migrate_ppt_sections_user_scope(conn)
         conn.execute(
             """
@@ -496,6 +513,20 @@ def _migrate_ppt_sections_user_scope(conn: sqlite3.Connection) -> None:
         UPDATE ppt_sections
         SET user_id = COALESCE(
             (SELECT d.user_id FROM ppt_decks d WHERE d.id = ppt_sections.deck_id),
+            NULLIF(user_id, 0),
+            0
+        )
+        WHERE COALESCE(user_id, 0) = 0
+        """
+    )
+
+
+def _migrate_ppt_study_asset_pages_user_scope(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE ppt_study_asset_pages
+        SET user_id = COALESCE(
+            (SELECT d.user_id FROM ppt_decks d WHERE d.id = ppt_study_asset_pages.deck_id),
             NULLIF(user_id, 0),
             0
         )

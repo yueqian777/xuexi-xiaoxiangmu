@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-from db import BASE_DIR, execute, fetch_all, fetch_one, insert_and_get_id
+from db import BASE_DIR, execute, execute_many, fetch_all, fetch_one, insert_and_get_id
 from repositories.ppt_repository import (
     add_slide_explanation,
     add_slide_question,
@@ -1077,6 +1077,7 @@ def _render_study_asset_generator_inner(
 ) -> None:
     st.caption("根据当前资料的目录块、手动选择的今日学习页码范围和已生成讲解，调用当前 API 生成草稿；确认后写入学习登记、知识点卡片和 1-3-7-14 复习计划。")
 
+    user = require_login()
     slides_with_explanations = _slides_with_latest_explanations(slides, latest_by_slide_id)
     recognized = [slide for slide in slides_with_explanations if _slide_has_learning_content(slide)]
     today_slides = [slide for slide in recognized if _is_today(slide.get("explanation_created_at"))]
@@ -1084,7 +1085,14 @@ def _render_study_asset_generator_inner(
         st.info("当前资料还没有可沉淀的文字或讲解。请先重新提取 PDF 文字，或生成逐页讲解。")
         return
 
-    selected_slides, range_label, scope_mode = _select_study_asset_scope(deck, recognized, sections, today_slides)
+    completed_slide_numbers = _completed_study_asset_slide_numbers(user.id, int(deck["id"]))
+    selected_slides, range_label, scope_mode = _select_study_asset_scope(
+        deck,
+        recognized,
+        sections,
+        today_slides,
+        completed_slide_numbers=completed_slide_numbers,
+    )
 
     cols = st.columns([1, 1])
     max_chars = cols[1].number_input(
@@ -1176,6 +1184,15 @@ def _render_study_asset_generator_inner(
             except Exception as exc:
                 st.error(f"写入失败：{exc}")
                 return
+            draft_slide_numbers = draft_meta.get("slide_numbers") or _study_asset_slide_numbers(selected_slides)
+            _record_completed_study_asset_pages(
+                user_id=user.id,
+                deck_id=int(deck["id"]),
+                slide_numbers=draft_slide_numbers,
+                session_id=session_id,
+                knowledge_count=len(knowledge_ids),
+                range_label=str(draft_meta.get("range_label") or range_label),
+            )
             st.success(f"已写入学习记录 #{session_id}，知识点卡片 {len(knowledge_ids)} 张，并已生成复习计划。")
             del st.session_state[draft_key]
             st.session_state.pop(meta_key, None)
@@ -1204,6 +1221,7 @@ def _start_study_asset_generation_task(
         "deck_id": int(deck["id"]),
         "range_label": range_label,
         "used_pages": int(total_used_pages),
+        "slide_numbers": _study_asset_batch_slide_numbers(batches),
         "batch_count": len(batches),
         "completed_batches": 0,
         "batches": batches,
@@ -1278,9 +1296,11 @@ def _render_study_asset_task_status(
             st.rerun()
             return
 
-    if _should_refresh_task(task, PPT_STUDY_ASSET_REFRESH_STATE_KEY, interval=1.5):
-        time.sleep(0.3)
-        st.rerun()
+    refresh_due = _should_refresh_task(task, PPT_STUDY_ASSET_REFRESH_STATE_KEY, interval=1.5)
+    # The task can finish while its progress text is unchanged; keep polling so
+    # the completed draft is adopted without requiring another user action.
+    time.sleep(0.3 if refresh_due else 0.5)
+    st.rerun()
 
 
 def _background_study_asset_worker(task: dict, deck: dict) -> None:
@@ -1336,6 +1356,7 @@ def _background_study_asset_worker(task: dict, deck: dict) -> None:
         task["meta"] = {
             "range_label": task.get("range_label"),
             "used_pages": int(task.get("used_pages") or 0),
+            "slide_numbers": _study_asset_batch_slide_numbers(list(task.get("batches") or [])),
             "batch_count": total,
             "coverage_report": coverage_report,
         }
@@ -1409,12 +1430,227 @@ def _is_today(value: str | None) -> bool:
     return bool(value and value[:10] == date.today().isoformat())
 
 
+def _study_asset_slide_numbers(slides: list[dict]) -> list[int]:
+    numbers: list[int] = []
+    seen: set[int] = set()
+    for slide in slides:
+        try:
+            number = int(slide.get("slide_number"))
+        except (TypeError, ValueError):
+            continue
+        if number <= 0 or number in seen:
+            continue
+        numbers.append(number)
+        seen.add(number)
+    return numbers
+
+
+def _study_asset_batch_slide_numbers(batches: list[dict]) -> list[int]:
+    numbers: list[int] = []
+    seen: set[int] = set()
+    for batch in batches:
+        for raw_number in batch.get("slide_numbers") or []:
+            try:
+                number = int(raw_number)
+            except (TypeError, ValueError):
+                continue
+            if number <= 0 or number in seen:
+                continue
+            numbers.append(number)
+            seen.add(number)
+    return numbers
+
+
+def _completed_study_asset_slide_numbers(user_id: int, deck_id: int) -> set[int]:
+    rows = fetch_all(
+        """
+        SELECT DISTINCT slide_number
+        FROM ppt_study_asset_pages
+        WHERE user_id = ? AND deck_id = ?
+        ORDER BY slide_number ASC
+        """,
+        (int(user_id), int(deck_id)),
+    )
+    numbers: set[int] = set()
+    for row in rows:
+        try:
+            number = int(row["slide_number"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if number > 0:
+            numbers.add(number)
+    return numbers
+
+
+def _record_completed_study_asset_pages(
+    *,
+    user_id: int,
+    deck_id: int,
+    slide_numbers: list[int],
+    session_id: int,
+    knowledge_count: int,
+    range_label: str,
+) -> None:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw_number in slide_numbers:
+        try:
+            number = int(raw_number)
+        except (TypeError, ValueError):
+            continue
+        if number <= 0 or number in seen:
+            continue
+        normalized.append(number)
+        seen.add(number)
+    if not normalized:
+        return
+
+    rows = [
+        (int(user_id), int(deck_id), number, int(session_id), int(knowledge_count), str(range_label or ""))
+        for number in normalized
+    ]
+    execute_many(
+        """
+        INSERT INTO ppt_study_asset_pages (
+            user_id, deck_id, slide_number, session_id, knowledge_count, range_label
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+
+
+def _study_asset_page_status_bar_html(
+    slides: list[dict],
+    *,
+    selected_slide_numbers: set[int],
+    completed_slide_numbers: set[int],
+) -> str:
+    page_numbers = _study_asset_slide_numbers(slides)
+    if not page_numbers:
+        return ""
+
+    page_items: list[str] = []
+    for number in page_numbers:
+        is_selected = number in selected_slide_numbers
+        is_completed = number in completed_slide_numbers
+        classes = ["study-asset-page"]
+        title_parts = [f"第 {number} 页"]
+        if is_selected:
+            classes.append("is-selected")
+            title_parts.append("当前选择")
+        if is_completed:
+            classes.append("is-completed")
+            title_parts.append("已生成知识卡片")
+        if not is_selected and not is_completed:
+            title_parts.append("未生成")
+        page_items.append(
+            f'<span class="{" ".join(classes)}" data-slide-number="{number}" '
+            f'title="{" · ".join(title_parts)}">{number}</span>'
+        )
+
+    return f"""
+    <style>
+      .study-asset-page-bar {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin: 4px 0 10px;
+        padding: 8px 0 2px;
+      }}
+      .study-asset-page {{
+        min-width: 28px;
+        height: 24px;
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+        background: #f6f8fa;
+        color: #57606a;
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 22px;
+        text-align: center;
+      }}
+      .study-asset-page.is-selected {{
+        border-color: #54aeef;
+        background: #ddf4ff;
+        color: #0969da;
+      }}
+      .study-asset-page.is-completed {{
+        border-color: #d4a72c;
+        background: #fff8c5;
+        color: #7d4e00;
+      }}
+      .study-asset-page.is-selected.is-completed {{
+        border-color: #8250df;
+        background: linear-gradient(135deg, #fff8c5 0 50%, #ddf4ff 50% 100%);
+        color: #6639ba;
+        box-shadow: inset 0 0 0 1px rgba(130, 80, 223, 0.35);
+      }}
+      .study-asset-page-legend {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin: 0 0 2px;
+        color: #6b7280;
+        font-size: 12px;
+      }}
+      .study-asset-page-legend span::before {{
+        content: "";
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        margin-right: 5px;
+        border-radius: 3px;
+        vertical-align: -1px;
+      }}
+      .study-asset-page-legend .legend-selected::before {{
+        background: #ddf4ff;
+        border: 1px solid #54aeef;
+      }}
+      .study-asset-page-legend .legend-completed::before {{
+        background: #fff8c5;
+        border: 1px solid #d4a72c;
+      }}
+      .study-asset-page-legend .legend-overlap::before {{
+        background: linear-gradient(135deg, #fff8c5 0 50%, #ddf4ff 50% 100%);
+        border: 1px solid #8250df;
+      }}
+    </style>
+    <div class="study-asset-page-legend">
+      <span class="legend-selected">当前选择</span>
+      <span class="legend-completed">已生成知识卡片</span>
+      <span class="legend-overlap">选择中且已生成</span>
+    </div>
+    <div class="study-asset-page-bar" aria-label="学习沉淀页码状态">
+      {''.join(page_items)}
+    </div>
+    """
+
+
+def _render_study_asset_page_status_bar(
+    slides: list[dict],
+    *,
+    selected_slides: list[dict],
+    completed_slide_numbers: set[int],
+) -> None:
+    markup = _study_asset_page_status_bar_html(
+        slides,
+        selected_slide_numbers=set(_study_asset_slide_numbers(selected_slides)),
+        completed_slide_numbers=completed_slide_numbers,
+    )
+    if markup:
+        st.markdown(markup, unsafe_allow_html=True)
+
+
 def _select_study_asset_scope(
     deck: dict,
     slides: list[dict],
     sections: list[dict],
     today_slides: list[dict],
+    *,
+    completed_slide_numbers: set[int] | None = None,
 ) -> tuple[list[dict], str, str]:
+    completed_slide_numbers = completed_slide_numbers or set()
     modes = ["手动选择今天学习页码范围"]
     if sections:
         modes.extend(["选择一个目录块", "全部目录块"])
@@ -1432,12 +1668,22 @@ def _select_study_asset_scope(
         )
         section = next(item for item in sections if int(item["section_index"]) == int(selected_index))
         selected = _filter_slides_by_page_range(slides, int(section["start_slide"]), int(section["end_slide"]))
+        _render_study_asset_page_status_bar(
+            slides,
+            selected_slides=selected,
+            completed_slide_numbers=completed_slide_numbers,
+        )
         return selected, _section_label(sections, int(selected_index)), mode
 
     if mode in {"全部目录块", "全部已识别页面"}:
         first_page = int(slides[0]["slide_number"])
         last_page = int(slides[-1]["slide_number"])
         label = "全部目录块" if sections else "全部已识别页面"
+        _render_study_asset_page_status_bar(
+            slides,
+            selected_slides=slides,
+            completed_slide_numbers=completed_slide_numbers,
+        )
         return slides, f"{label}（第 {first_page}-{last_page} 页）", mode
 
     first_page = int(slides[0]["slide_number"])
@@ -1460,6 +1706,11 @@ def _select_study_asset_scope(
         key=f"asset_manual_page_range_{deck['id']}",
     )
     selected = _filter_slides_by_page_range(slides, int(start_page), int(end_page))
+    _render_study_asset_page_status_bar(
+        slides,
+        selected_slides=selected,
+        completed_slide_numbers=completed_slide_numbers,
+    )
     if not selected:
         st.warning("这个页码范围内没有已识别文字或已生成讲解的页面。")
     return selected, f"今天手动页码范围：第 {start_page}-{end_page} 页", mode
@@ -1497,6 +1748,7 @@ def _build_study_asset_batches(
                 "used_pages": used_pages,
                 "truncated": truncated,
                 "section_index": None,
+                "slide_numbers": _study_asset_slide_numbers(slides[:used_pages]),
             }
         ]
 
@@ -1520,6 +1772,7 @@ def _build_study_asset_batches(
                 "used_pages": used_pages,
                 "truncated": truncated,
                 "section_index": int(section_key) if section else None,
+                "slide_numbers": _study_asset_slide_numbers(group[:used_pages]),
             }
         )
     return batches

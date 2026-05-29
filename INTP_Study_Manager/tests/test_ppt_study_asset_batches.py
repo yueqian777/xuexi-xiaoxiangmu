@@ -1,11 +1,122 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+import db
 from pages import ppt_tutor
 from services.ai_service import AIServiceError
 
 
 class PptStudyAssetBatchTest(unittest.TestCase):
+    def test_init_db_backfills_user_scope_for_existing_study_asset_page_table(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        data_dir = Path(tmp.name)
+        db_path = data_dir / "study_manager.db"
+        self.addCleanup(setattr, db, "_INITIALIZED_DATABASE_PATH", None)
+
+        with (
+            patch.object(db, "DATA_DIR", data_dir),
+            patch.object(db, "DATABASE_PATH", db_path),
+        ):
+            db._INITIALIZED_DATABASE_PATH = None
+            db.init_db()
+            with db.managed_connection() as conn:
+                deck_id = conn.execute(
+                    """
+                    INSERT INTO ppt_decks (user_id, filename, title, file_path, slide_count)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (7, "deck.pdf", "Deck", "deck.pdf", 3),
+                ).lastrowid
+                conn.execute("DROP TABLE ppt_study_asset_pages")
+                conn.execute(
+                    """
+                    CREATE TABLE ppt_study_asset_pages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        deck_id INTEGER NOT NULL,
+                        slide_number INTEGER NOT NULL,
+                        session_id INTEGER,
+                        knowledge_count INTEGER NOT NULL DEFAULT 0,
+                        range_label TEXT DEFAULT '',
+                        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO ppt_study_asset_pages (
+                        deck_id, slide_number, session_id, knowledge_count, range_label
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (deck_id, 3, None, 2, "page 3"),
+                )
+
+            db._INITIALIZED_DATABASE_PATH = None
+            db.init_db()
+            row = db.fetch_one(
+                "SELECT user_id FROM ppt_study_asset_pages WHERE deck_id = ? AND slide_number = ?",
+                (deck_id, 3),
+            )
+            completed_for_owner = ppt_tutor._completed_study_asset_slide_numbers(7, deck_id)
+            completed_for_local = ppt_tutor._completed_study_asset_slide_numbers(0, deck_id)
+
+        self.assertEqual(row["user_id"], 7)
+        self.assertEqual(completed_for_owner, {3})
+        self.assertEqual(completed_for_local, set())
+
+    def test_running_study_asset_status_keeps_refreshing_when_throttled(self):
+        class FakeColumn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class FakeStreamlit:
+            def __init__(self):
+                self.rerun_called = False
+                self.session_state = {}
+
+            def columns(self, _spec):
+                return [FakeColumn(), FakeColumn()]
+
+            def info(self, _message):
+                pass
+
+            def progress(self, _value, text=""):
+                pass
+
+            def caption(self, _message):
+                pass
+
+            def button(self, _label, key=None):
+                return False
+
+            def rerun(self):
+                self.rerun_called = True
+
+        fake_st = FakeStreamlit()
+        task = {
+            "status": "running",
+            "progress": 0.5,
+            "status_text": "Generating unchanged batch",
+            "completed_batches": 1,
+            "batch_count": 2,
+        }
+
+        with (
+            patch.object(ppt_tutor, "st", fake_st),
+            patch.object(ppt_tutor, "_should_refresh_task", return_value=False),
+            patch.object(ppt_tutor.time, "sleep") as sleep,
+        ):
+            ppt_tutor._render_study_asset_task_status(task, "task", "draft", "raw", "meta")
+
+        sleep.assert_called_once()
+        self.assertTrue(fake_st.rerun_called)
+
     def test_build_study_asset_batches_splits_by_sections(self):
         slides = [
             {"id": 1, "slide_number": 1, "section_index": 1, "title": "A", "slide_text": "内容 A"},
@@ -100,12 +211,14 @@ class PptStudyAssetBatchTest(unittest.TestCase):
                     "reading_content": "内容 A",
                     "used_pages": 2,
                     "truncated": False,
+                    "slide_numbers": [1, 2],
                 },
                 {
                     "range_label": "目录块 2",
                     "reading_content": "内容 B",
                     "used_pages": 1,
                     "truncated": False,
+                    "slide_numbers": [5],
                 },
             ],
             "provider_key": "provider-a",
@@ -141,6 +254,7 @@ class PptStudyAssetBatchTest(unittest.TestCase):
         self.assertEqual(task["completed_batches"], 2)
         self.assertEqual(len(task["raw_outputs"]), 2)
         self.assertEqual(len(task["draft"]["knowledge_cards"]), 2)
+        self.assertEqual(task["meta"]["slide_numbers"], [1, 2, 5])
         self.assertEqual(task["draft"]["study_session"]["mastery"], 65)
         self.assertEqual(generate_text.call_count, 2)
 

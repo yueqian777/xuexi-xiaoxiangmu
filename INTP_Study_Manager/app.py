@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -19,6 +21,11 @@ from pages import (
     study_sessions,
 )
 from services.ai_service import ensure_default_api_providers
+
+APP_ROOT = Path(__file__).resolve().parent
+ENTER_SUBMIT_SHORTCUT_SCRIPT = (
+    APP_ROOT / "components" / "enter_submit_shortcut.js"
+).read_text(encoding="utf-8")
 
 PAGES = {
     "首页 Dashboard": dashboard.render,
@@ -103,6 +110,11 @@ def _install_browser_dom_guard() -> None:
             rootWindow.document.addEventListener('keydown', stopStreamlitCacheShortcut, true);
           }
         })();
+        </script>
+        <script>
+        """
+        + ENTER_SUBMIT_SHORTCUT_SCRIPT
+        + """
         </script>
         """,
         height=1,
