@@ -119,6 +119,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "clipText",
             "applyLayoutState",
             "nearestScrollPanel",
+            "scrollChildPanelToQuestionTop",
             "childLayerScrollPositions",
             "renderChildQuestionStack",
             "sendQuestionThreadMerge",
@@ -728,6 +729,52 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             renderChildQuestionStack();
             if (newPanel.scrollTop !== 42) {
               throw new Error(String(newPanel.scrollTop));
+            }
+            """
+        )
+
+    def test_child_chat_stack_scrolls_new_answer_to_question_top(self):
+        self.run_js(
+            r"""
+            const newQuestionTurn = { offsetTop: 180 };
+            const newPanel = {
+              dataset: { childMessages: 'layer-a' },
+              scrollTop: 0,
+              scrollHeight: 800,
+              offsetTop: 20,
+              querySelector(selector) {
+                if (selector === '[data-question-id="3"]') return newQuestionTurn;
+                return null;
+              },
+            };
+            var childChatLayers = [{ layerId: 'layer-a', parentQuestionId: 1 }];
+            var childPanelScrollToBottomLayerId = 'layer-a';
+            var childChatStack = {
+              set innerHTML(value) {
+                this._html = value;
+              },
+              get innerHTML() {
+                return this._html || '';
+              },
+              querySelectorAll(selector) {
+                return selector === '.child-chat-messages' ? [newPanel] : [];
+              },
+            };
+            questionById = () => ({ question: '\u6839\u95ee\u9898' });
+            childQuestionsFor = () => [
+              { id: 2, parentQuestionId: 1, question: '\u65e7\u5b50\u95ee', answer: '\u65e7\u7b54' },
+              { id: 3, parentQuestionId: 1, question: '\u65b0\u5b50\u95ee', answer: '\u65b0\u7b54' },
+            ];
+            renderChatTurn = item => `<div class="chat-turn" data-question-id="${item.id}">child</div>`;
+            typesetTargets = () => Promise.resolve(false);
+            applyChatSourceMaps = () => {};
+
+            renderChildQuestionStack();
+            if (newPanel.scrollTop !== 160) {
+              throw new Error(String(newPanel.scrollTop));
+            }
+            if (childPanelScrollToBottomLayerId !== null) {
+              throw new Error(String(childPanelScrollToBottomLayerId));
             }
             """
         )

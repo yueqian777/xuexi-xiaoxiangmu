@@ -4212,6 +4212,23 @@
       container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
     }
 
+    function scrollChildPanelToQuestionTop(panel, questionId) {
+      const targetId = Number(questionId || 0);
+      if (!panel || !targetId) return false;
+      const turn = panel.querySelector?.(`[data-question-id="${targetId}"]`);
+      if (!turn) return false;
+      let top = 0;
+      if (typeof turn.getBoundingClientRect === 'function' && typeof panel.getBoundingClientRect === 'function') {
+        const turnRect = turn.getBoundingClientRect();
+        const panelRect = panel.getBoundingClientRect();
+        top = Number(panel.scrollTop || 0) + Number(turnRect.top || 0) - Number(panelRect.top || 0);
+      } else {
+        top = Number(turn.offsetTop || 0) - Number(panel.offsetTop || 0);
+      }
+      panel.scrollTop = Math.max(0, top);
+      return true;
+    }
+
     function shouldSubmitInputOnEnter(event) {
       return (
         event &&
@@ -4261,9 +4278,13 @@
       options = options || {};
       const scrollPositions = options.scrollPositions || childLayerScrollPositions();
       const forceBottomLayerId = String(options.forceBottomLayerId || childPanelScrollToBottomLayerId || '');
+      const focusQuestionIdsByLayer = new Map();
       childChatStack.innerHTML = childChatLayers.map(layer => {
         const parent = questionById(layer.parentQuestionId);
         const children = childQuestionsFor(layer.parentQuestionId);
+        if (forceBottomLayerId && String(layer.layerId) === forceBottomLayerId && children.length) {
+          focusQuestionIdsByLayer.set(String(layer.layerId), questionIdForItem(children[children.length - 1]));
+        }
         const messagesHtml = children.length
           ? children.map(item => renderChatTurn(item, { inChildPanel: true })).join('')
           : '<div class="canvas-empty">还没有子插问。</div>';
@@ -4292,7 +4313,8 @@
       childChatStack.querySelectorAll('.child-chat-messages').forEach(panel => {
         const layerId = String(panel.dataset.childMessages || '');
         if (forceBottomLayerId && layerId === forceBottomLayerId) {
-          panel.scrollTop = panel.scrollHeight;
+          const focused = scrollChildPanelToQuestionTop(panel, focusQuestionIdsByLayer.get(layerId));
+          if (!focused) panel.scrollTop = panel.scrollHeight;
         } else if (scrollPositions.has(layerId)) {
           panel.scrollTop = scrollPositions.get(layerId);
         } else {
