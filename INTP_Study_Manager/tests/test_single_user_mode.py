@@ -101,6 +101,12 @@ class SingleUserModeTest(unittest.TestCase):
         self.assertNotIn("_render_first_admin_setup", source)
         self.assertNotIn("_install_auth_session_browser_guard", source)
 
+    def test_app_uses_book_page_icon(self):
+        source = APP_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn('page_icon="📚"', source)
+        self.assertNotIn('page_icon="📎"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

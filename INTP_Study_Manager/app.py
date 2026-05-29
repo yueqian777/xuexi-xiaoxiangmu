@@ -113,7 +113,7 @@ def _install_browser_dom_guard() -> None:
 def main() -> None:
     st.set_page_config(
         page_title="INTP Study Manager",
-        page_icon="📎",
+        page_icon="📚",
         layout="wide",
         initial_sidebar_state="expanded",
     )
