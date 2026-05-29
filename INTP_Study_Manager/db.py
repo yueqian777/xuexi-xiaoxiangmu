@@ -58,7 +58,6 @@ def init_db() -> None:
 def _run_init_db() -> None:
     with managed_connection() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
-        _ensure_auth_tables(conn)
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS study_sessions (
@@ -447,8 +446,6 @@ def _run_init_db() -> None:
                 ON slide_questions(user_id, parent_question_id, sort_order ASC, created_at ASC, id ASC);
             CREATE INDEX IF NOT EXISTS idx_slide_questions_slide
                 ON slide_questions(slide_id);
-            CREATE INDEX IF NOT EXISTS idx_invites_created_by
-                ON invites(created_by);
             CREATE INDEX IF NOT EXISTS idx_daily_ai_review_plans_user_date
                 ON daily_ai_review_plans(user_id, review_date DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_api_parallel_benchmarks_provider
@@ -485,91 +482,12 @@ def _run_init_db() -> None:
             ON api_providers(user_id, sort_order ASC, provider_key ASC)
             """
         )
-        _migrate_default_users(conn)
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-
-def _ensure_auth_tables(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE,
-            display_name TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'user',
-            is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-            updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS invites (
-            code TEXT PRIMARY KEY,
-            role TEXT NOT NULL DEFAULT 'user',
-            created_by INTEGER,
-            max_uses INTEGER NOT NULL DEFAULT 1,
-            used_count INTEGER NOT NULL DEFAULT 0,
-            expires_at TEXT,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-            updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-            FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS auth_sessions (
-            token_hash TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            created_at INTEGER NOT NULL,
-            last_seen_at INTEGER NOT NULL,
-            revoked_at INTEGER,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_seen
-        ON auth_sessions(user_id, last_seen_at DESC)
-        """
-    )
-
-
-def _migrate_default_users(conn: sqlite3.Connection) -> None:
-    defaults = conn.execute("SELECT id FROM users ORDER BY id ASC LIMIT 1").fetchone()
-    if not defaults:
-        return
-    default_user_id = int(defaults["id"])
-    for table in (
-        "study_sessions",
-        "mainline_anchors",
-        "branch_questions",
-        "knowledge_cards",
-        "knowledge_links",
-        "mistakes",
-        "review_tasks",
-        "parking_lot",
-        "ppt_decks",
-        "ppt_slides",
-        "ppt_sections",
-        "slide_explanations",
-        "slide_questions",
-        "api_providers",
-        "app_settings",
-        "daily_review_logs",
-        "daily_ai_review_plans",
-    ):
-        conn.execute(f"UPDATE {table} SET user_id = COALESCE(NULLIF(user_id, 0), ?)", (default_user_id,))
 
 
 def _migrate_ppt_sections_user_scope(conn: sqlite3.Connection) -> None:
@@ -579,7 +497,6 @@ def _migrate_ppt_sections_user_scope(conn: sqlite3.Connection) -> None:
         SET user_id = COALESCE(
             (SELECT d.user_id FROM ppt_decks d WHERE d.id = ppt_sections.deck_id),
             NULLIF(user_id, 0),
-            (SELECT id FROM users ORDER BY id ASC LIMIT 1),
             0
         )
         WHERE COALESCE(user_id, 0) = 0
