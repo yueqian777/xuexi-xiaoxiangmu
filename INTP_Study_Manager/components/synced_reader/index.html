@@ -1441,7 +1441,7 @@
     let childPanelScrollToBottomLayerId = null;
     let restoreScrollAfterRender = null;
     let layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
-    let chatCollapsed = false;
+    let chatCollapsed = true;
     let activeResize = null;
     let readingMode = 'paged';
     let pageWheelDelta = 0;
@@ -2044,10 +2044,11 @@
             chat: clamp(saved.chat, 0.28, 2.4),
           };
         }
-        chatCollapsed = localStorage.getItem(globalStorageKey('chatCollapsed')) === 'true';
+        const savedChatCollapsed = localStorage.getItem(globalStorageKey('chatCollapsed'));
+        chatCollapsed = savedChatCollapsed === null ? true : savedChatCollapsed === 'true';
       } catch {
         layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
-        chatCollapsed = false;
+        chatCollapsed = true;
       }
       applyLayoutState();
     }

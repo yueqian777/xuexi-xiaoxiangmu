@@ -120,6 +120,8 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "clipText",
             "nodeElement",
             "rectFromRange",
+            "globalStorageKey",
+            "loadLayoutState",
             "applyLayoutState",
             "scrollAnchorCandidates",
             "visualRectForAnchor",
@@ -657,6 +659,66 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             applyLayoutState();
             if (readerGrid.style.gridTemplateColumns !== baseColumns) {
               throw new Error(readerGrid.style.gridTemplateColumns);
+            }
+            """
+        )
+
+    def test_canvas_chat_defaults_to_collapsed_without_saved_layout_choice(self):
+        self.run_js(
+            r"""
+            var childChatLayers = [];
+            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var chatCollapsed = false;
+            var readerGrid = {
+              style: { gridTemplateColumns: '' },
+              getBoundingClientRect: () => ({ width: 1200 }),
+            };
+            var canvasCollapsed = null;
+            var canvasChat = { classList: { toggle(name, value) { canvasCollapsed = value; } } };
+            var toggleCanvasButton = { textContent: '' };
+            var childChatStack = { style: { setProperty() {} } };
+            var localStorage = {
+              getItem(key) {
+                return String(key).includes('chatCollapsed') ? null : '{}';
+              },
+            };
+
+            loadLayoutState();
+            if (chatCollapsed !== true || canvasCollapsed !== true) {
+              throw new Error(JSON.stringify({ chatCollapsed, canvasCollapsed }));
+            }
+            if (toggleCanvasButton.textContent !== '展开') {
+              throw new Error(toggleCanvasButton.textContent);
+            }
+            """
+        )
+
+    def test_canvas_chat_saved_expanded_choice_overrides_collapsed_default(self):
+        self.run_js(
+            r"""
+            var childChatLayers = [];
+            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var chatCollapsed = true;
+            var readerGrid = {
+              style: { gridTemplateColumns: '' },
+              getBoundingClientRect: () => ({ width: 1200 }),
+            };
+            var canvasCollapsed = null;
+            var canvasChat = { classList: { toggle(name, value) { canvasCollapsed = value; } } };
+            var toggleCanvasButton = { textContent: '' };
+            var childChatStack = { style: { setProperty() {} } };
+            var localStorage = {
+              getItem(key) {
+                return String(key).includes('chatCollapsed') ? 'false' : '{}';
+              },
+            };
+
+            loadLayoutState();
+            if (chatCollapsed !== false || canvasCollapsed !== false) {
+              throw new Error(JSON.stringify({ chatCollapsed, canvasCollapsed }));
+            }
+            if (toggleCanvasButton.textContent !== '收起') {
+              throw new Error(toggleCanvasButton.textContent);
             }
             """
         )
