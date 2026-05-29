@@ -41,6 +41,7 @@ from services import api_parallel_benchmark_service as parallel_benchmark
 from services.api_key_ui import render_local_secret_unlock
 from services.api_runtime import ensure_active_provider, ensure_provider_model, provider_model_state_key, set_active_provider
 from services.auth_service import require_login
+from services.knowledge_card_service import knowledge_card_preview_markdown
 from services.ppt_context_service import (
     build_lightweight_explanation,
     build_slide_context_map,
@@ -1172,7 +1173,9 @@ def _render_study_asset_generator_inner(
             if coverage_report:
                 st.markdown("**覆盖率检查**")
                 st.dataframe(pd.DataFrame(coverage_report), use_container_width=True, hide_index=True)
-        st.json(draft)
+        _render_study_asset_draft_preview(draft)
+        with st.expander("查看原始 JSON", expanded=False):
+            st.json(draft)
         cols = st.columns(2)
         if cols[0].button("确认写入学习登记和知识卡片", key=f"save_assets_{deck['id']}"):
             try:
@@ -1203,6 +1206,31 @@ def _render_study_asset_generator_inner(
             st.session_state.pop(meta_key, None)
             st.session_state.pop(task_key, None)
             st.rerun()
+
+
+def _render_study_asset_draft_preview(draft: dict) -> None:
+    session = draft.get("study_session") or {}
+    cards = draft.get("knowledge_cards") or []
+    if session:
+        st.markdown("**学习登记预览**")
+        st.markdown(
+            "\n\n".join(
+                [
+                    f"### {session.get('title') or '未命名学习主题'}",
+                    f"**主线问题**\n\n{session.get('main_question') or '待补充'}",
+                    f"**总结**\n\n{session.get('summary') or '待补充'}",
+                    f"**卡点 / 待追问**\n\n{session.get('blockers') or '暂无'}",
+                ]
+            )
+        )
+    if not cards:
+        return
+
+    st.markdown("**知识卡片预览**")
+    for index, card in enumerate(cards, start=1):
+        with st.container(border=True):
+            st.caption(f"卡片 {index}")
+            st.markdown(knowledge_card_preview_markdown(card))
 
 
 def _start_study_asset_generation_task(

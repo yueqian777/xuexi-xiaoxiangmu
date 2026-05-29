@@ -1453,6 +1453,7 @@
     let viewportAnchorReleaseTimer = null;
     let layoutAnchorRestoreFrame = 0;
     let layoutAnchorRestoreFollowupFrame = 0;
+    let layoutAnchorRestoreTimers = [];
     let hasCenteredOnEntry = false;
     let parentCenterTimer = null;
     let lastFullscreenState = false;
@@ -1935,11 +1936,11 @@
     }
 
     function storageKey(name) {
-      return `intp_synced_reader_${deckId}_${name}`;
+      return 'intp_synced_reader_' + deckId + '_' + name;
     }
 
     function globalStorageKey(name) {
-      return `intp_synced_reader_global_${name}`;
+      return 'intp_synced_reader_global_' + name;
     }
 
     function clamp(value, min, max) {
@@ -2297,6 +2298,36 @@
       };
     }
 
+    function broadScrollAnchorPenalty(anchor) {
+      if (!anchor?.classList || typeof anchor.classList.contains !== 'function') return 0;
+      if (anchor.classList.contains('reader-source-fragment')) return 500;
+      const tagName = String(anchor.tagName || '').toLowerCase();
+      if (tagName === 'h1' || tagName === 'h2' || tagName === 'h3') return 400;
+      return (anchor.classList.contains('note') || anchor.classList.contains('page')) ? 200000 : 0;
+    }
+
+    function shouldCaptureTextRangeAnchor(anchor) {
+      const element = anchor?.nodeType === 1 ? anchor : anchor?.parentElement;
+      if (!element || typeof element.closest !== 'function') return false;
+      return Boolean(element.closest('.note-body p, .note-body li, .note-body pre, .chat-answer-body p, .chat-answer-body li, .chat-answer-body pre'));
+    }
+
+    function setPanelScroll(panel, top, left) {
+      const nextTop = Number(top || 0);
+      const nextLeft = Number(left || 0);
+      if (panel && typeof panel.scrollTo === 'function') {
+        const previousScrollBehavior = panel.style?.scrollBehavior || '';
+        if (panel.style) panel.style.scrollBehavior = 'auto';
+        panel.scrollTo({ top: nextTop, left: nextLeft, behavior: 'auto' });
+        if (panel.style) panel.style.scrollBehavior = previousScrollBehavior;
+        return;
+      }
+      if (panel) {
+        panel.scrollTop = nextTop;
+        panel.scrollLeft = nextLeft;
+      }
+    }
+
     function captureScrollPanelAnchor(panel, selectors) {
       if (!panel || typeof panel.getBoundingClientRect !== 'function') return null;
       const panelRect = panel.getBoundingClientRect();
@@ -2311,7 +2342,8 @@
         const bottom = Number(rect.bottom || top + Number(rect.height || 0));
         if (bottom < panelTop || top > panelBottom) return;
         const crossesTop = top <= topLine && bottom >= topLine;
-        const score = crossesTop ? -100000 + Math.abs(top - topLine) : Math.abs(top - topLine);
+        const score = broadScrollAnchorPenalty(anchor)
+          + (crossesTop ? -100000 + Math.abs(top - topLine) : Math.abs(top - topLine));
         if (!best || score < best.score) {
           best = {
             score,
@@ -2320,7 +2352,7 @@
           };
         }
       });
-      const rangeAnchor = best?.anchor
+      const rangeAnchor = best?.anchor && shouldCaptureTextRangeAnchor(best.anchor)
         ? captureTextRangeAnchor(panel, best.anchor, topLine)
         : null;
       return {
@@ -2346,8 +2378,7 @@
           const panelRect = panel.getBoundingClientRect();
           const delta = Number(rangeRect.top || 0) - Number(panelRect.top || 0) - Number(snapshot.rangeOffsetTop || 0);
           const maxTop = Math.max(0, Number(panel.scrollHeight || 0) - Number(panel.clientHeight || 0));
-          panel.scrollTop = clamp(Number(panel.scrollTop || 0) + delta, 0, maxTop);
-          panel.scrollLeft = Number(snapshot.scrollLeft || 0);
+          setPanelScroll(panel, clamp(Number(panel.scrollTop || 0) + delta, 0, maxTop), Number(snapshot.scrollLeft || 0));
           return true;
         }
       }
@@ -2361,12 +2392,10 @@
         const panelRect = panel.getBoundingClientRect();
         const delta = Number(anchorRect.top || 0) - Number(panelRect.top || 0) - Number(snapshot.offsetTop || 0);
         const maxTop = Math.max(0, Number(panel.scrollHeight || 0) - Number(panel.clientHeight || 0));
-        panel.scrollTop = clamp(Number(panel.scrollTop || 0) + delta, 0, maxTop);
-        panel.scrollLeft = Number(snapshot.scrollLeft || 0);
+        setPanelScroll(panel, clamp(Number(panel.scrollTop || 0) + delta, 0, maxTop), Number(snapshot.scrollLeft || 0));
         return true;
       }
-      panel.scrollTop = Number(snapshot.scrollTop || 0);
-      panel.scrollLeft = Number(snapshot.scrollLeft || 0);
+      setPanelScroll(panel, Number(snapshot.scrollTop || 0), Number(snapshot.scrollLeft || 0));
       return false;
     }
 
@@ -2421,15 +2450,31 @@
           window.cancelAnimationFrame(layoutAnchorRestoreFollowupFrame);
         }
       }
+      if (typeof window !== 'undefined' && typeof window.clearTimeout === 'function') {
+        layoutAnchorRestoreTimers.forEach(timer => window.clearTimeout(timer));
+      }
+      layoutAnchorRestoreTimers = [];
       layoutAnchorRestoreFrame = 0;
       layoutAnchorRestoreFollowupFrame = 0;
       const restore = () => restoreReaderViewportAnchors(snapshot);
       const hasAnimationFrame = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function';
+      const scheduleStabilizers = () => {
+        if (options.stabilize === false || typeof window === 'undefined' || typeof window.setTimeout !== 'function') return;
+        [80, 180, 360].forEach(delay => {
+          layoutAnchorRestoreTimers.push(window.setTimeout(() => {
+            restore();
+          }, delay));
+        });
+      };
       const scheduleFollowup = () => {
-        if (options.followup === false || !hasAnimationFrame) return;
+        if (options.followup === false || !hasAnimationFrame) {
+          scheduleStabilizers();
+          return;
+        }
         layoutAnchorRestoreFollowupFrame = window.requestAnimationFrame(() => {
           layoutAnchorRestoreFollowupFrame = 0;
           restore();
+          scheduleStabilizers();
         });
       };
       if (options.immediate === false && hasAnimationFrame) {

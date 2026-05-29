@@ -127,6 +127,9 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "stableScrollAnchorSelector",
             "measurableRangeForCaret",
             "captureTextRangeAnchor",
+            "broadScrollAnchorPenalty",
+            "shouldCaptureTextRangeAnchor",
+            "setPanelScroll",
             "captureScrollPanelAnchor",
             "restoreScrollPanelAnchor",
             "captureReaderViewportAnchors",
@@ -783,6 +786,49 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             restoreScrollPanelAnchor(snapshot);
             if (panel.scrollTop !== 375) {
               throw new Error(String(panel.scrollTop));
+            }
+            """
+        )
+
+    def test_scroll_panel_anchor_prefers_visible_text_over_note_container(self):
+        self.run_js(
+            r"""
+            const note = {
+              classList: { contains(name) { return name === 'note'; } },
+              getBoundingClientRect() {
+                return { top: 40, bottom: 800 };
+              },
+            };
+            const paragraph = {
+              classList: { contains() { return false; } },
+              getBoundingClientRect() {
+                return { top: 120, bottom: 168 };
+              },
+            };
+            const panel = {
+              scrollTop: 300,
+              scrollHeight: 1200,
+              clientHeight: 420,
+              getBoundingClientRect() {
+                return { top: 40, bottom: 460 };
+              },
+              querySelectorAll(selector) {
+                if (selector === '.note.active .note-body p') return [paragraph];
+                if (selector === '.note.active' || selector === '.note') return [note];
+                return [];
+              },
+            };
+
+            const snapshot = captureScrollPanelAnchor(panel, [
+              '.note.active .note-body p',
+              '.note.active',
+              '.note',
+            ]);
+            if (!snapshot || snapshot.anchor !== paragraph) {
+              throw new Error(JSON.stringify({
+                anchorWasParagraph: snapshot?.anchor === paragraph,
+                offsetTop: snapshot?.offsetTop,
+              }));
             }
             """
         )

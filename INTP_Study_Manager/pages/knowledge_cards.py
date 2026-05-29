@@ -7,6 +7,11 @@ import streamlit as st
 
 from db import execute, fetch_all, fetch_one, insert_and_get_id
 from services.auth_service import require_login
+from services.knowledge_card_service import (
+    compact_card_index_rows,
+    knowledge_card_preview_markdown,
+    mastery_level,
+)
 from services.review_service import ensure_initial_review_tasks
 
 RELATION_TYPES = [
@@ -24,8 +29,9 @@ RELATION_TYPES = [
 
 def render() -> None:
     user = require_login()
+    _install_knowledge_card_styles()
     st.title("知识点卡片")
-    st.caption("每张卡片都按“三层模型”组织：一句话解释、公式 / 逻辑推导、典型题 / 应用。")
+    st.caption("用于快速定位核心知识、闭卷回忆和间隔复习；公式请直接写标准 Markdown / LaTeX。")
 
     sessions = fetch_all(
         "SELECT id, date, subject, title FROM study_sessions WHERE user_id = ? ORDER BY date DESC, id DESC",
@@ -87,111 +93,210 @@ def render() -> None:
         st.info("暂无知识点卡片。")
         return
 
-    subjects = sorted({item["subject"] for item in cards})
-    selected_subject = st.selectbox("按科目筛选", ["全部"] + subjects)
-    filtered = cards if selected_subject == "全部" else [c for c in cards if c["subject"] == selected_subject]
-    st.dataframe(
-        pd.DataFrame(filtered)[["id", "subject", "topic", "core_question", "mastery", "need_review"]],
-        use_container_width=True,
-        hide_index=True,
-    )
+    filtered = _filter_cards(cards)
+    if not filtered:
+        st.warning("当前筛选条件下没有知识卡片。")
+        return
 
+    _render_card_index(filtered)
+
+    default_selected_id = int(filtered[0]["id"])
     selected_id = st.selectbox(
         "查看 / 编辑知识点",
-        [c["id"] for c in filtered],
-        format_func=lambda item_id: f"#{item_id} - {next(c['topic'] for c in filtered if c['id'] == item_id)}",
+        [int(c["id"]) for c in filtered],
+        index=0,
+        format_func=lambda item_id: f"#{item_id} - {next(c['topic'] for c in filtered if int(c['id']) == item_id)}",
     )
-    card = fetch_one("SELECT * FROM knowledge_cards WHERE id = ? AND user_id = ?", (selected_id, user.id))
+
+    card = fetch_one(
+        "SELECT * FROM knowledge_cards WHERE id = ? AND user_id = ?",
+        (selected_id or default_selected_id, user.id),
+    )
     if not card:
         return
 
-    left, right = st.columns([1.2, 1])
-    with left:
-        with st.form(f"edit_knowledge_card_{selected_id}"):
-            st.subheader("编辑知识点")
-            edit_subject = st.text_input("科目", value=card["subject"])
-            edit_topic = st.text_input("知识点", value=card["topic"])
-            edit_question = st.text_area("核心问题", value=card["core_question"] or "")
-            edit_one = st.text_area("一句话解释", value=card["one_sentence"] or "")
-            edit_logic = st.text_area("公式 / 逻辑推导", value=card["logic_or_formula"] or "")
-            edit_app = st.text_area("典型题 / 应用场景", value=card["application"] or "")
-            edit_mastery = st.slider("掌握度", 0, 100, int(card["mastery"]), key=f"card_mastery_{selected_id}")
-            edit_need_review = st.checkbox("需要复习", value=bool(card["need_review"]))
-            update_submitted = st.form_submit_button("更新知识点")
-        if update_submitted:
-            execute(
-                """
-                UPDATE knowledge_cards
-                SET subject = ?, topic = ?, core_question = ?, one_sentence = ?,
-                    logic_or_formula = ?, application = ?, mastery = ?, need_review = ?
-                WHERE id = ? AND user_id = ?
-                """,
-                (
-                    edit_subject.strip(),
-                    edit_topic.strip(),
-                    edit_question.strip(),
-                    edit_one.strip(),
-                    edit_logic.strip(),
-                    edit_app.strip(),
-                    edit_mastery,
-                    int(edit_need_review),
-                    selected_id,
-                    user.id,
-                ),
-            )
-            if edit_need_review:
-                ensure_initial_review_tasks(selected_id, card["created_at"], user_id=user.id)
-            st.success("知识点已更新。")
-            st.rerun()
+    preview_col, side_col = st.columns([1.35, 1])
+    with preview_col:
+        _render_card_preview(card)
+    with side_col:
+        _render_related_review_context(user.id, int(card["id"]), card)
 
-    with right:
-        st.subheader("关联复习计划")
-        tasks = fetch_all(
-            """
-            SELECT review_date, review_stage, status, result
-            FROM review_tasks
-            WHERE knowledge_id = ? AND user_id = ?
-            ORDER BY review_date ASC, id ASC
-            """,
-            (selected_id, user.id),
-        )
-        if tasks:
-            st.dataframe(pd.DataFrame(tasks), use_container_width=True, hide_index=True)
-        else:
-            st.caption("暂无复习任务。勾选需要复习并保存后会自动生成。")
-
-        st.subheader("关联错题")
-        mistakes = fetch_all(
-            """
-            SELECT cause_category, original_question, summary, created_at
-            FROM mistakes
-            WHERE user_id = ? AND (knowledge_id = ? OR (subject = ? AND topic = ?))
-            ORDER BY created_at DESC
-            """,
-            (user.id, selected_id, card["subject"], card["topic"]),
-        )
-        if mistakes:
-            st.dataframe(pd.DataFrame(mistakes), use_container_width=True, hide_index=True)
-        else:
-            st.caption("暂无关联错题。")
-
-        st.subheader("关联插问")
-        branches = fetch_all(
-            """
-            SELECT ma.anchor_code, bq.question, bq.answer_summary, bq.understood
-            FROM branch_questions bq
-            JOIN mainline_anchors ma ON ma.id = bq.anchor_id
-            WHERE bq.user_id = ? AND (bq.question LIKE ? OR bq.answer_summary LIKE ?)
-            ORDER BY bq.created_at DESC
-            """,
-            (user.id, f"%{card['topic']}%", f"%{card['topic']}%"),
-        )
-        if branches:
-            st.dataframe(pd.DataFrame(branches), use_container_width=True, hide_index=True)
-        else:
-            st.caption("暂无关联插问。")
+    edit_left, edit_right = st.columns([1.15, 1])
+    with edit_left:
+        _render_edit_form(user.id, card)
+    with edit_right:
+        _render_recall_panel(card)
 
     _render_knowledge_links(user.id, card, cards)
+
+
+def _filter_cards(cards: list[dict]) -> list[dict]:
+    subjects = sorted({item["subject"] for item in cards})
+    cols = st.columns([1, 1, 1.4])
+    selected_subject = cols[0].selectbox("按科目筛选", ["全部"] + subjects)
+    status_options = ["全部", "薄弱", "巩固中", "基本掌握", "迁移熟练"]
+    selected_status = cols[1].selectbox("按掌握状态筛选", status_options)
+    keyword = cols[2].text_input("搜索知识点 / 问题 / 公式 / 应用").strip().lower()
+
+    filtered = cards
+    if selected_subject != "全部":
+        filtered = [card for card in filtered if card["subject"] == selected_subject]
+    if selected_status != "全部":
+        filtered = [card for card in filtered if mastery_level(card.get("mastery"))["label"] == selected_status]
+    if keyword:
+        filtered = [
+            card
+            for card in filtered
+            if keyword
+            in "\n".join(
+                [
+                    str(card.get("subject") or ""),
+                    str(card.get("topic") or ""),
+                    str(card.get("core_question") or ""),
+                    str(card.get("one_sentence") or ""),
+                    str(card.get("logic_or_formula") or ""),
+                    str(card.get("application") or ""),
+                ]
+            ).lower()
+        ]
+    return filtered
+
+
+def _render_card_index(cards: list[dict]) -> None:
+    st.markdown("**快速索引**")
+    frame = pd.DataFrame(compact_card_index_rows(cards))
+    st.dataframe(
+        frame,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "id": st.column_config.NumberColumn("ID", width="small"),
+            "核心问题": st.column_config.TextColumn("核心问题", width="large"),
+            "掌握度": st.column_config.ProgressColumn("掌握度", min_value=0, max_value=100),
+            "创建时间": st.column_config.TextColumn("创建时间", width="medium"),
+        },
+    )
+
+
+def _render_card_preview(card: dict) -> None:
+    level = mastery_level(card.get("mastery"))
+    st.subheader("学习预览")
+    st.caption(f"{card['subject']} · {card['created_at']} · {level['hint']}")
+    with st.container(border=True):
+        st.markdown(knowledge_card_preview_markdown(card))
+
+
+def _render_edit_form(user_id: int, card: dict) -> None:
+    selected_id = int(card["id"])
+    with st.form(f"edit_knowledge_card_{selected_id}"):
+        st.subheader("编辑知识点")
+        edit_subject = st.text_input("科目", value=card["subject"])
+        edit_topic = st.text_input("知识点", value=card["topic"])
+        edit_question = st.text_area("核心问题", value=card["core_question"] or "")
+        edit_one = st.text_area("一句话解释", value=card["one_sentence"] or "")
+        edit_logic = st.text_area("公式 / 逻辑推导", value=card["logic_or_formula"] or "")
+        edit_app = st.text_area("典型题 / 应用场景", value=card["application"] or "")
+        edit_mastery = st.slider("掌握度", 0, 100, int(card["mastery"]), key=f"card_mastery_{selected_id}")
+        edit_need_review = st.checkbox("需要复习", value=bool(card["need_review"]))
+        update_submitted = st.form_submit_button("更新知识点")
+    if update_submitted:
+        execute(
+            """
+            UPDATE knowledge_cards
+            SET subject = ?, topic = ?, core_question = ?, one_sentence = ?,
+                logic_or_formula = ?, application = ?, mastery = ?, need_review = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (
+                edit_subject.strip(),
+                edit_topic.strip(),
+                edit_question.strip(),
+                edit_one.strip(),
+                edit_logic.strip(),
+                edit_app.strip(),
+                edit_mastery,
+                int(edit_need_review),
+                selected_id,
+                user_id,
+            ),
+        )
+        if edit_need_review:
+            ensure_initial_review_tasks(selected_id, card["created_at"], user_id=user_id)
+        st.success("知识点已更新。")
+        st.rerun()
+
+
+def _render_recall_panel(card: dict) -> None:
+    st.subheader("闭卷回忆")
+    st.markdown(f"**先不看答案，回答：**\n\n{card.get('core_question') or '这个知识点想解决什么问题？'}")
+    with st.expander("展开答案与定位线索", expanded=False):
+        st.markdown(f"**一句话：**\n\n{card.get('one_sentence') or '待补充'}")
+        st.markdown(f"**公式 / 推导：**\n\n{card.get('logic_or_formula') or '待补充'}")
+        st.markdown(f"**应用：**\n\n{card.get('application') or '待补充'}")
+
+
+def _render_related_review_context(user_id: int, selected_id: int, card: dict) -> None:
+    st.subheader("复习与证据")
+    tasks = fetch_all(
+        """
+        SELECT review_date, review_stage, status, result
+        FROM review_tasks
+        WHERE knowledge_id = ? AND user_id = ?
+        ORDER BY review_date ASC, id ASC
+        """,
+        (selected_id, user_id),
+    )
+    if tasks:
+        st.dataframe(pd.DataFrame(tasks), use_container_width=True, hide_index=True)
+    else:
+        st.caption("暂无复习任务。勾选需要复习并保存后会自动生成。")
+
+    st.markdown("**关联错题**")
+    mistakes = fetch_all(
+        """
+        SELECT cause_category, original_question, summary, created_at
+        FROM mistakes
+        WHERE user_id = ? AND (knowledge_id = ? OR (subject = ? AND topic = ?))
+        ORDER BY created_at DESC
+        """,
+        (user_id, selected_id, card["subject"], card["topic"]),
+    )
+    if mistakes:
+        st.dataframe(pd.DataFrame(mistakes), use_container_width=True, hide_index=True)
+    else:
+        st.caption("暂无关联错题。")
+
+    st.markdown("**关联插问**")
+    branches = fetch_all(
+        """
+        SELECT ma.anchor_code, bq.question, bq.answer_summary, bq.understood
+        FROM branch_questions bq
+        JOIN mainline_anchors ma ON ma.id = bq.anchor_id
+        WHERE bq.user_id = ? AND (bq.question LIKE ? OR bq.answer_summary LIKE ?)
+        ORDER BY bq.created_at DESC
+        """,
+        (user_id, f"%{card['topic']}%", f"%{card['topic']}%"),
+    )
+    if branches:
+        st.dataframe(pd.DataFrame(branches), use_container_width=True, hide_index=True)
+    else:
+        st.caption("暂无关联插问。")
+
+
+def _install_knowledge_card_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        .stMarkdown h3 {
+            margin-top: 0.2rem;
+        }
+        div[data-testid="stExpander"] details {
+            border-radius: 8px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _session_label(sessions: list[dict], session_id: int) -> str:

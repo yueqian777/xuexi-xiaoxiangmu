@@ -87,8 +87,9 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
     def run_js(self, body):
         script = self.js_helpers + "\n\n" + textwrap.dedent(body)
         result = subprocess.run(
-            [self.node, "-e", script],
+            [self.node, "-"],
             cwd=APP_ROOT,
+            input=script,
             text=True,
             encoding="utf-8",
             errors="replace",
