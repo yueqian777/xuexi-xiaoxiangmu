@@ -158,12 +158,16 @@ def _install_auth_session_browser_guard() -> None:
           }}
           const doc = rootWindow.document;
           const sameSite = rootWindow.location.protocol === 'https:' ? '; SameSite=Lax; Secure' : '; SameSite=Lax';
-          const setCookie = (value, maxAge) => {{
-            doc.cookie = `${{cookieName}}=${{encodeURIComponent(value)}}; Path=/; Max-Age=${{maxAge}}${{sameSite}}`;
+          const cookieValue = (sessionToken, activityAt) => `${{sessionToken}}:${{Math.floor(Number(activityAt || Date.now()))}}`;
+          const setCookie = (sessionToken, maxAge, activityAt) => {{
+            doc.cookie = `${{cookieName}}=${{encodeURIComponent(cookieValue(sessionToken, activityAt))}}; Path=/; Max-Age=${{maxAge}}${{sameSite}}`;
           }};
-          const clearCookie = () => setCookie('', 0);
+          const clearCookie = () => {{
+            doc.cookie = `${{cookieName}}=; Path=/; Max-Age=0${{sameSite}}`;
+          }};
           if (token && expiresAt > 0) {{
-            setCookie(token, {AUTH_SESSION_IDLE_SECONDS});
+            const activityAt = rootWindow.__intpAuthSessionLastActivity || Date.now();
+            setCookie(token, {AUTH_SESSION_IDLE_SECONDS}, activityAt);
           }} else if (expiresAt === 0) {{
             clearCookie();
             delete rootWindow.__intpAuthSessionLastActivity;
@@ -184,7 +188,7 @@ def _install_auth_session_browser_guard() -> None:
             const currentToken = rootWindow.__intpAuthSessionToken;
             if (!currentToken || expiring) return;
             rootWindow.__intpAuthSessionLastActivity = Date.now();
-            setCookie(currentToken, {AUTH_SESSION_IDLE_SECONDS});
+            setCookie(currentToken, {AUTH_SESSION_IDLE_SECONDS}, rootWindow.__intpAuthSessionLastActivity);
             const now = Date.now();
             if (now - lastPingAt < 15000) return;
             lastPingAt = now;

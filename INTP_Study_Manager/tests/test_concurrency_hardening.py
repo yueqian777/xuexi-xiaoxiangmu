@@ -241,6 +241,25 @@ class ConcurrencyHardeningTest(unittest.TestCase):
         self.assertIsNotNone(user)
         self.assertEqual(user.username, "alice")
 
+    def test_browser_cookie_activity_extends_existing_streamlit_session(self):
+        auth_service.create_user("alice", "pw")
+        auth_service.login("alice", "pw")
+        token = auth_service.st.session_state["auth_session_token"]
+        auth_service.st.context.cookies = {
+            auth_service.AUTH_SESSION_COOKIE_NAME: f"{token}:350000"
+        }
+
+        user = auth_service.refresh_device_session_activity(now=360)
+
+        self.assertIsNotNone(user)
+        self.assertEqual(user.username, "alice")
+        row = db.fetch_one(
+            "SELECT last_seen_at, revoked_at FROM auth_sessions WHERE token_hash = ?",
+            (auth_service._auth_token_hash(token),),
+        )
+        self.assertGreaterEqual(row["last_seen_at"], 350)
+        self.assertIsNone(row["revoked_at"])
+
 
 if __name__ == "__main__":
     unittest.main()

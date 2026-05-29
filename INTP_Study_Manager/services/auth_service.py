@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import streamlit as st
 
@@ -527,6 +528,7 @@ def restore_current_user_from_device_session(*, now: int | None = None) -> Curre
     token = _browser_auth_token()
     if not token:
         return None
+    _record_browser_cookie_activity(token, now=now)
     user = _validate_device_session(token, now=now)
     if not user:
         _expire_browser_device_session()
@@ -546,6 +548,7 @@ def refresh_device_session_activity(*, now: int | None = None) -> CurrentUser | 
         _expire_browser_device_session()
         return None
     now_value = _unix_now(now)
+    _record_browser_cookie_activity(token, now=now_value)
     token_hash = _auth_token_hash(token)
     with write_transaction() as conn:
         row = conn.execute(
@@ -724,9 +727,39 @@ def _browser_auth_token() -> str:
     if token:
         return token
     try:
-        return str(st.context.cookies.get(AUTH_SESSION_COOKIE_NAME) or "").strip()
+        raw_cookie = str(st.context.cookies.get(AUTH_SESSION_COOKIE_NAME) or "").strip()
     except Exception:
         return ""
+    return _split_browser_auth_cookie(raw_cookie)[0]
+
+
+def _record_browser_cookie_activity(token: str, *, now: int | None = None) -> bool:
+    cookie_token, activity_at = _browser_auth_cookie()
+    if not token or not cookie_token or cookie_token != token or activity_at is None:
+        return False
+    return record_browser_activity_ping(token, activity_at=activity_at, now=now)
+
+
+def _browser_auth_cookie() -> tuple[str, int | None]:
+    try:
+        raw_cookie = str(st.context.cookies.get(AUTH_SESSION_COOKIE_NAME) or "").strip()
+    except Exception:
+        return "", None
+    return _split_browser_auth_cookie(raw_cookie)
+
+
+def _split_browser_auth_cookie(raw_cookie: str) -> tuple[str, int | None]:
+    raw_cookie = unquote(str(raw_cookie or "").strip())
+    if not raw_cookie:
+        return "", None
+    token, separator, activity_text = raw_cookie.partition(":")
+    if not separator:
+        return token.strip(), None
+    try:
+        activity_at = int(activity_text)
+    except (TypeError, ValueError):
+        activity_at = None
+    return token.strip(), activity_at
 
 
 def _auth_token_hash(token: str) -> str:
