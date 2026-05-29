@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import textwrap
@@ -667,6 +668,23 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             }
             """
         )
+
+    def test_child_chat_stack_stays_above_fullscreen_frame(self):
+        source = READER_HTML.read_text(encoding="utf-8")
+
+        def max_z_index(selector):
+            escaped = re.escape(selector)
+            values = []
+            for block in re.findall(rf"{escaped}\s*\{{(.*?)\}}", source, flags=re.S):
+                values.extend(int(value) for value in re.findall(r"z-index\s*:\s*(\d+)", block))
+            return max(values) if values else None
+
+        frame_z = max_z_index("body.reader-fullscreen .frame")
+        stack_z = max_z_index("body.reader-fullscreen .child-chat-stack")
+
+        self.assertIsNotNone(frame_z)
+        self.assertIsNotNone(stack_z)
+        self.assertGreater(stack_z, frame_z)
 
     def test_child_chat_messages_are_independent_scroll_panels(self):
         self.run_js(
