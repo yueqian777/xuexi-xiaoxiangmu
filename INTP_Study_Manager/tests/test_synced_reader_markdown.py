@@ -123,6 +123,9 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "globalStorageKey",
             "loadLayoutState",
             "applyLayoutState",
+            "applyReaderLayoutChangeWithAnchors",
+            "openCanvasChat",
+            "toggleCanvasChat",
             "scrollAnchorCandidates",
             "visualRectForAnchor",
             "cssAttributeValue",
@@ -144,6 +147,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "renderChildQuestionStack",
             "sendQuestionThreadMerge",
             "closeChildLayersForSlideChange",
+            "openChildChatFromQuote",
             "closeChildLayer",
             "bookmarkTitleForPage",
             "bookmarkedPages",
@@ -1012,6 +1016,122 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             """
         )
 
+    def test_canvas_chat_open_and_toggle_preserve_reader_viewport_anchors(self):
+        self.run_js(
+            r"""
+            const restored = [];
+            let captureCount = 0;
+            var childChatLayers = [];
+            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var chatCollapsed = true;
+            var suppressObserverUntil = 0;
+            var VIEWPORT_ANCHOR_MS = 1400;
+            var readerGrid = {
+              style: { gridTemplateColumns: '' },
+              getBoundingClientRect: () => ({ width: 1200 }),
+            };
+            var canvasChat = { classList: { toggle() {} } };
+            var toggleCanvasButton = { textContent: '' };
+            var childChatStack = { style: { setProperty() {} } };
+            var saveCount = 0;
+            var saveLayoutState = () => { saveCount += 1; };
+            captureReaderViewportAnchors = () => ({ marker: `anchor-${++captureCount}` });
+            restoreReaderAnchorsAfterLayoutChange = (snapshot, options) => {
+              restored.push({ snapshot, options });
+            };
+
+            openCanvasChat(false);
+            toggleCanvasChat();
+
+            if (chatCollapsed !== true) {
+              throw new Error(`chatCollapsed=${chatCollapsed}`);
+            }
+            if (saveCount !== 2) {
+              throw new Error(`saveCount=${saveCount}`);
+            }
+            if (restored.length !== 2) {
+              throw new Error(JSON.stringify(restored));
+            }
+            if (restored[0].snapshot.marker !== 'anchor-1' || restored[1].snapshot.marker !== 'anchor-2') {
+              throw new Error(JSON.stringify(restored));
+            }
+            if (restored.some(item => item.options?.immediate !== false)) {
+              throw new Error(JSON.stringify(restored));
+            }
+            if (suppressObserverUntil <= 0) {
+              throw new Error(String(suppressObserverUntil));
+            }
+            """
+        )
+
+    def test_child_chat_open_and_close_preserve_reader_viewport_anchors(self):
+        self.run_js(
+            r"""
+            const restored = [];
+            const emitted = [];
+            let captureCount = 0;
+            var Streamlit = { setComponentValue: value => emitted.push(value) };
+            var deckId = 3;
+            var currentSlideNumber = 2;
+            var suppressObserverUntil = 0;
+            var VIEWPORT_ANCHOR_MS = 1400;
+            var childPanelScrollToBottomLayerId = null;
+            var childChatLayers = [];
+            var selectionHint = { textContent: '' };
+            var pageRoot = { scrollTop: 7 };
+            var canvasMessages = { scrollTop: 9 };
+            var renderCount = 0;
+            var layoutCount = 0;
+            noteAnchorForSlide = () => null;
+            questionById = questionId => ({ id: questionId, depth: 0, question: 'parent' });
+            childLayerScrollPositions = () => new Map();
+            renderChildQuestionStack = () => { renderCount += 1; };
+            applyLayoutState = () => { layoutCount += 1; };
+            restoreReaderScrollPositions = () => {
+              throw new Error('legacy absolute scroll restore should not be used for layout toggles');
+            };
+            captureReaderViewportAnchors = () => ({ marker: `child-anchor-${++captureCount}` });
+            restoreReaderAnchorsAfterLayoutChange = (snapshot, options) => {
+              restored.push({ snapshot, options });
+            };
+
+            const opened = openChildChatFromQuote({
+              sourceKind: 'question_answer',
+              questionId: 10,
+              depth: 0,
+              selectedText: 'answer',
+            });
+
+            if (!opened || childChatLayers.length !== 1) {
+              throw new Error(JSON.stringify(childChatLayers));
+            }
+            const layerId = childChatLayers[0].layerId;
+            closeChildLayer(layerId);
+
+            if (childChatLayers.length !== 0) {
+              throw new Error(JSON.stringify(childChatLayers));
+            }
+            if (renderCount !== 2 || layoutCount !== 2) {
+              throw new Error(JSON.stringify({ renderCount, layoutCount }));
+            }
+            if (restored.length !== 2) {
+              throw new Error(JSON.stringify(restored));
+            }
+            if (restored[0].snapshot.marker !== 'child-anchor-1' || restored[1].snapshot.marker !== 'child-anchor-2') {
+              throw new Error(JSON.stringify(restored));
+            }
+            if (restored.some(item => item.options?.immediate !== false)) {
+              throw new Error(JSON.stringify(restored));
+            }
+            if (suppressObserverUntil <= 0) {
+              throw new Error(String(suppressObserverUntil));
+            }
+            if (emitted.length !== 1 || emitted[0].action !== 'merge_question_thread' || emitted[0].questionId !== 10) {
+              throw new Error(JSON.stringify(emitted));
+            }
+            """
+        )
+
     def test_child_chat_messages_are_independent_scroll_panels(self):
         self.run_js(
             r"""
@@ -1130,6 +1250,8 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             var Streamlit = { setComponentValue: value => emitted.push(value) };
             var deckId = 3;
             var currentSlideNumber = 2;
+            var suppressObserverUntil = 0;
+            var VIEWPORT_ANCHOR_MS = 1400;
             var childChatLayers = [
               { layerId: 'l1', parentQuestionId: 10, depth: 1 },
               { layerId: 'l2', parentQuestionId: 20, depth: 2 },
@@ -1141,6 +1263,8 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             renderChildQuestionStack = () => {};
             applyLayoutState = () => {};
             restoreReaderScrollPositions = () => {};
+            captureReaderViewportAnchors = () => ({ marker: 'before-close' });
+            restoreReaderAnchorsAfterLayoutChange = () => {};
 
             closeChildLayer('l1');
             if (childChatLayers.length !== 0) {
@@ -1159,6 +1283,8 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             var Streamlit = { setComponentValue: value => emitted.push(value) };
             var deckId = 3;
             var currentSlideNumber = 2;
+            var suppressObserverUntil = 0;
+            var VIEWPORT_ANCHOR_MS = 1400;
             var childChatLayers = [
               { layerId: 'l1', parentQuestionId: 10, depth: 1 },
               { layerId: 'l2', parentQuestionId: 20, depth: 2 },

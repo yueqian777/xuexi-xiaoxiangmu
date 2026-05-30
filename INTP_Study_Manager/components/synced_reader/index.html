@@ -2110,6 +2110,21 @@
       if (toggleCanvasButton) toggleCanvasButton.textContent = chatCollapsed ? '展开' : '收起';
     }
 
+    function applyReaderLayoutChangeWithAnchors(mutator, options) {
+      options = options || {};
+      const anchors = captureReaderViewportAnchors();
+      suppressObserverUntil = Date.now() + VIEWPORT_ANCHOR_MS;
+      const result = typeof mutator === 'function' ? mutator() : undefined;
+      applyLayoutState();
+      restoreReaderAnchorsAfterLayoutChange(anchors, {
+        immediate: options.immediate === undefined ? false : options.immediate,
+        followup: options.followup,
+        stabilize: options.stabilize,
+      });
+      if (options.saveLayout) saveLayoutState();
+      return result;
+    }
+
     function setLayoutPreset(name) {
       const presets = {
         balanced: { pages: 1, notes: 1, chat: 0.72 },
@@ -2125,9 +2140,9 @@
 
     function openCanvasChat(focusInput = false) {
       if (chatCollapsed) {
-        chatCollapsed = false;
-        applyLayoutState();
-        saveLayoutState();
+        applyReaderLayoutChangeWithAnchors(() => {
+          chatCollapsed = false;
+        }, { saveLayout: true });
       }
       if (focusInput) {
         window.setTimeout(() => canvasInput?.focus(), 80);
@@ -2150,6 +2165,7 @@
     function closeChildLayersForSlideChange() {
       if (!childChatLayers.length) return;
       sendQuestionThreadMerge(childChatLayers[0]?.parentQuestionId);
+      suppressObserverUntil = Date.now() + VIEWPORT_ANCHOR_MS;
       childChatLayers = [];
       childPanelScrollToBottomLayerId = null;
       renderChildQuestionStack();
@@ -2157,9 +2173,9 @@
     }
 
     function toggleCanvasChat() {
-      chatCollapsed = !chatCollapsed;
-      applyLayoutState();
-      saveLayoutState();
+      applyReaderLayoutChangeWithAnchors(() => {
+        chatCollapsed = !chatCollapsed;
+      }, { saveLayout: true });
     }
 
     function syncFullscreenState(isFullscreen) {
@@ -4483,9 +4499,6 @@
         return true;
       }
       const anchorQuestionId = Number(payload.questionId);
-      const noteAnchor = noteAnchorForSlide(currentSlideNumber);
-      const pageScroll = pageRoot.scrollTop;
-      const chatScroll = canvasMessages.scrollTop;
       const childScrollPositions = childLayerScrollPositions();
       const keep = childChatLayers.filter(layer => Number(layer.depth || 0) < depth);
       const layer = {
@@ -4494,25 +4507,22 @@
         depth,
         quote: payload,
       };
-      childChatLayers = [...keep, layer].slice(-5);
-      renderChildQuestionStack({ scrollPositions: childScrollPositions });
-      applyLayoutState();
-      restoreReaderScrollPositions(noteAnchor, pageScroll, chatScroll);
+      applyReaderLayoutChangeWithAnchors(() => {
+        childChatLayers = [...keep, layer].slice(-5);
+        renderChildQuestionStack({ scrollPositions: childScrollPositions });
+      });
       return true;
     }
 
     function closeChildLayer(layerId) {
       const index = childChatLayers.findIndex(layer => layer.layerId === layerId);
       if (index < 0) return;
-      const noteAnchor = noteAnchorForSlide(currentSlideNumber);
-      const pageScroll = pageRoot.scrollTop;
-      const chatScroll = canvasMessages.scrollTop;
       const childScrollPositions = childLayerScrollPositions();
       const layer = childChatLayers[index];
-      childChatLayers = childChatLayers.slice(0, index);
-      renderChildQuestionStack({ scrollPositions: childScrollPositions });
-      applyLayoutState();
-      restoreReaderScrollPositions(noteAnchor, pageScroll, chatScroll);
+      applyReaderLayoutChangeWithAnchors(() => {
+        childChatLayers = childChatLayers.slice(0, index);
+        renderChildQuestionStack({ scrollPositions: childScrollPositions });
+      });
       sendQuestionThreadMerge(layer.parentQuestionId);
     }
 
