@@ -78,6 +78,12 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "typesetTargets",
             "readScrollState",
             "buildReaderStructureSignature",
+            "pageImageCacheKey",
+            "pruneExpiredImageRequests",
+            "cachedImageForPage",
+            "applyCachedPageImages",
+            "desiredImageWindowSlideNumbers",
+            "missingImageWindowSlides",
             "requestImageWindowIfNeeded",
         ]
         cls.js_helpers = "\n\n".join(
@@ -227,7 +233,12 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             let deckId = 9;
             let lastPositionNotifyKey = '';
             let positionNotifyTimer = null;
+            let pendingImageWindowRequest = null;
+            const pageImageCache = new Map();
+            const pendingImageRequests = new Map();
+            const IMAGE_PREFETCH_RADIUS = 0;
             const IMAGE_WINDOW_NOTIFY_IDLE_MS = 0;
+            const IMAGE_WINDOW_PENDING_TTL_MS = 10000;
             const notifications = [];
             const Streamlit = {
               setComponentValue: value => notifications.push(value),
@@ -250,6 +261,84 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             requestImageWindowIfNeeded(1);
             if (notifications.length !== 0) {
               throw new Error(`expected no stale notification, got ${notifications.length}`);
+            }
+            """
+        )
+
+    def test_received_page_images_are_reused_when_later_payload_omits_them(self):
+        self.run_js(
+            r"""
+            let deckId = 9;
+            const pageImageCache = new Map();
+            const pendingImageRequests = new Map();
+
+            const first = applyCachedPageImages([
+              { slideNumber: 2, imageAvailable: true, image: 'data:image/png;base64,two' },
+            ]);
+            if (first[0].image !== 'data:image/png;base64,two') {
+              throw new Error(JSON.stringify(first));
+            }
+
+            const second = applyCachedPageImages([
+              { slideNumber: 2, imageAvailable: true, image: '' },
+            ]);
+            if (second[0].image !== 'data:image/png;base64,two') {
+              throw new Error(JSON.stringify(second));
+            }
+            """
+        )
+
+    def test_image_window_request_sends_prefetch_window_and_dedupes_pending_slides(self):
+        self.run_js(
+            r"""
+            let pages = Array.from({ length: 9 }, (_, index) => ({
+              slideNumber: index + 1,
+              imageAvailable: true,
+              image: '',
+            }));
+            let deckId = 9;
+            let lastPositionNotifyKey = '';
+            let positionNotifyTimer = null;
+            let pendingImageWindowRequest = null;
+            const pageImageCache = new Map();
+            const pendingImageRequests = new Map();
+            const IMAGE_PREFETCH_RADIUS = 2;
+            const IMAGE_WINDOW_NOTIFY_IDLE_MS = 0;
+            const IMAGE_WINDOW_PENDING_TTL_MS = 10000;
+            const notifications = [];
+            const Streamlit = {
+              setComponentValue: value => notifications.push(value),
+            };
+            function pageForSlide(slideNumber) {
+              return pages.find(item => Number(item.slideNumber) === Number(slideNumber)) || null;
+            }
+            function createComponentToken() {
+              return 'token';
+            }
+            Date.now = () => 1000;
+            global.window = {
+              clearTimeout: () => {},
+              setTimeout: fn => {
+                fn();
+                return 1;
+              },
+            };
+
+            requestImageWindowIfNeeded(5);
+            requestImageWindowIfNeeded(5);
+
+            if (notifications.length !== 1) {
+              throw new Error(`expected one request, got ${notifications.length}`);
+            }
+            const payload = notifications[0];
+            if (payload.imageWindowRadius !== 2) {
+              throw new Error(JSON.stringify(payload));
+            }
+            if (payload.imageWindowSlideNumbers.join(',') !== '3,4,5,6,7') {
+              throw new Error(JSON.stringify(payload));
+            }
+            if (missingImageWindowSlides(5).length !== 0) {
+              throw new Error('pending slides were requested again');
             }
             """
         )

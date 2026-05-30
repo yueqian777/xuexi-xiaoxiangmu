@@ -75,7 +75,10 @@ from services.study_asset_service import parse_study_assets, save_study_assets
 
 SYNCED_READER_COMPONENT_PATH = BASE_DIR / "components" / "synced_reader"
 SYNCED_READER_COMPONENT = None
-READER_IMAGE_WINDOW_RADIUS = 2
+READER_IMAGE_WINDOW_RADIUS = 3
+READER_IMAGE_PREFETCH_RADIUS = 5
+READER_IMAGE_WINDOW_MAX_RADIUS = 8
+READER_IMAGE_CACHE_MAX_SLIDES = 36
 PPT_GENERATION_DEFAULT_PARALLELISM = parallel_benchmark.DEFAULT_PARALLELISM
 PPT_PARALLEL_BENCHMARK_MAX_PARALLELISM = parallel_benchmark.DEFAULT_MAX_PARALLELISM
 PPT_INLINE_BENCHMARK_MIN_SLIDES = parallel_benchmark.INLINE_BENCHMARK_MIN_SAMPLES
@@ -173,6 +176,111 @@ def _reader_active_slide_number(deck_id: int, slides: list[dict], initial_slide_
 
 def _reader_image_window_slide_numbers(slides: list[dict], active_slide_number: int) -> set[int]:
     return reader_image_window_slide_numbers(slides, active_slide_number, radius=READER_IMAGE_WINDOW_RADIUS)
+
+
+def _reader_image_cache_state_key(deck_id: int) -> str:
+    return f"ppt_reader_image_cache_{int(deck_id)}"
+
+
+def _reader_valid_slide_numbers(slides: list[dict]) -> set[int]:
+    return {int(slide["slide_number"]) for slide in slides}
+
+
+def _reader_cached_image_slide_numbers(deck_id: int, slides: list[dict]) -> set[int]:
+    valid_numbers = _reader_valid_slide_numbers(slides)
+    cache = st.session_state.get(_reader_image_cache_state_key(deck_id))
+    if not isinstance(cache, dict):
+        return set()
+    cached: set[int] = set()
+    for key in cache:
+        try:
+            slide_number = int(key)
+        except (TypeError, ValueError):
+            continue
+        if slide_number in valid_numbers:
+            cached.add(slide_number)
+    return cached
+
+
+def _coerce_reader_image_radius(value: object, default: int = READER_IMAGE_PREFETCH_RADIUS) -> int:
+    try:
+        radius = int(value)
+    except (TypeError, ValueError):
+        radius = default
+    return max(0, min(radius, READER_IMAGE_WINDOW_MAX_RADIUS))
+
+
+def _coerce_reader_image_slide_numbers(values: object, slides: list[dict]) -> set[int]:
+    if not isinstance(values, list):
+        return set()
+    valid_numbers = _reader_valid_slide_numbers(slides)
+    selected: set[int] = set()
+    for value in values[: READER_IMAGE_CACHE_MAX_SLIDES]:
+        try:
+            slide_number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if slide_number in valid_numbers:
+            selected.add(slide_number)
+    return selected
+
+
+def _remember_reader_image_window(
+    deck_id: int,
+    slides: list[dict],
+    active_slide_number: int,
+    *,
+    image_window_slide_numbers: object | None = None,
+    image_window_radius: object | None = None,
+) -> bool:
+    if not slides:
+        return False
+    requested = _coerce_reader_image_slide_numbers(image_window_slide_numbers, slides)
+    if requested:
+        window_numbers = requested
+    else:
+        window_numbers = reader_image_window_slide_numbers(
+            slides,
+            active_slide_number,
+            radius=_coerce_reader_image_radius(image_window_radius, READER_IMAGE_WINDOW_RADIUS),
+        )
+    if not window_numbers:
+        return False
+
+    key = _reader_image_cache_state_key(deck_id)
+    raw_cache = st.session_state.get(key)
+    valid_text_numbers = {str(number) for number in _reader_valid_slide_numbers(slides)}
+    cache: dict[str, float] = {}
+    if isinstance(raw_cache, dict):
+        for raw_key, raw_timestamp in raw_cache.items():
+            key_text = str(raw_key)
+            if key_text not in valid_text_numbers:
+                continue
+            try:
+                cache[key_text] = float(raw_timestamp)
+            except (TypeError, ValueError):
+                cache[key_text] = 0.0
+    previous = set(cache)
+    now = time.monotonic()
+    for slide_number in window_numbers:
+        cache[str(slide_number)] = now
+
+    if len(cache) > READER_IMAGE_CACHE_MAX_SLIDES:
+        protected = {str(number) for number in window_numbers}
+        kept = set(protected)
+        recent = sorted(
+            ((key_text, timestamp) for key_text, timestamp in cache.items() if key_text not in kept),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        for key_text, _ in recent:
+            if len(kept) >= READER_IMAGE_CACHE_MAX_SLIDES:
+                break
+            kept.add(key_text)
+        cache = {key_text: cache[key_text] for key_text in kept if key_text in cache}
+
+    st.session_state[key] = cache
+    return bool({str(number) for number in window_numbers} - previous)
 
 
 def render() -> None:
@@ -693,7 +801,8 @@ def _render_synced_reader(
     st.caption("提示：右侧固定插问栏会绑定当前页。你可以直接提问，或选中讲解文字后引用到插问。")
     initial_slide_number = _initial_reader_slide_number(int(deck["id"]), slides, last_position)
     active_slide_number = _reader_active_slide_number(int(deck["id"]), slides, initial_slide_number)
-    image_slide_numbers = _reader_image_window_slide_numbers(slides, active_slide_number)
+    _remember_reader_image_window(int(deck["id"]), slides, active_slide_number)
+    image_slide_numbers = _reader_cached_image_slide_numbers(int(deck["id"]), slides)
     active_slide_ids = [
         int(slide["id"])
         for slide in slides
@@ -764,7 +873,14 @@ def _handle_synced_reader_action(
 
     token = str(payload.get("token") or "").strip()
     if action == "reader_position":
-        if _handle_reader_position_update(deck, slide_number, token):
+        if _handle_reader_position_update(
+            deck,
+            slide_number,
+            token,
+            slides=slides,
+            image_window_slide_numbers=payload.get("imageWindowSlideNumbers"),
+            image_window_radius=payload.get("imageWindowRadius"),
+        ):
             st.rerun()
         return
 
@@ -904,7 +1020,15 @@ def _optional_positive_int(value: object) -> int | None:
     return parsed if parsed > 0 else None
 
 
-def _handle_reader_position_update(deck: dict, slide_number: int, token: str = "") -> bool:
+def _handle_reader_position_update(
+    deck: dict,
+    slide_number: int,
+    token: str = "",
+    *,
+    slides: list[dict] | None = None,
+    image_window_slide_numbers: object | None = None,
+    image_window_radius: object | None = None,
+) -> bool:
     deck_id = int(deck["id"])
     last_position_token_key = f"ppt_reader_position_last_token_{deck_id}"
     if token and st.session_state.get(last_position_token_key) == token:
@@ -915,8 +1039,17 @@ def _handle_reader_position_update(deck: dict, slide_number: int, token: str = "
         slide_number=int(slide_number),
         token=token,
     )
+    image_window_changed = False
+    if slides is not None:
+        image_window_changed = _remember_reader_image_window(
+            deck_id,
+            slides,
+            int(slide_number),
+            image_window_slide_numbers=image_window_slide_numbers,
+            image_window_radius=image_window_radius,
+        )
     _save_last_reader_position(require_login().id, deck_id, int(slide_number))
-    return changed
+    return changed or image_window_changed
 
 
 def _quote_from_component_payload(deck: dict, slide: dict, payload: dict) -> dict | None:

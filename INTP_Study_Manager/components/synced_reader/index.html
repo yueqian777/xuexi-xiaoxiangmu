@@ -1460,6 +1460,7 @@
     let readerStructureSignature = '';
     let positionNotifyTimer = null;
     let lastPositionNotifyKey = '';
+    let pendingImageWindowRequest = null;
     let nearbyContentTimer = null;
     let pendingNearbySlideNumber = null;
     let typesetFlushTimer = null;
@@ -1467,15 +1468,19 @@
     let typesetChain = Promise.resolve();
     const pendingTypesetTargets = new Set();
     const hydratingNotePromises = new Map();
+    const pageImageCache = new Map();
+    const pendingImageRequests = new Map();
     const pendingExplanationSaves = new Map();
     const noteBodySourceMaps = new WeakMap();
     const PENDING_SAVE_TTL_MS = 30000;
     const VIEWPORT_ANCHOR_MS = 1400;
     const NOTE_HYDRATE_RADIUS = 1;
+    const IMAGE_PREFETCH_RADIUS = 5;
     const TYPESET_BATCH_DELAY_MS = 40;
     const MATHJAX_RETRY_MS = 180;
     const NEARBY_CONTENT_IDLE_MS = 90;
-    const IMAGE_WINDOW_NOTIFY_IDLE_MS = 420;
+    const IMAGE_WINDOW_NOTIFY_IDLE_MS = 160;
+    const IMAGE_WINDOW_PENDING_TTL_MS = 6000;
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -2674,6 +2679,58 @@
       return pageIndexDistance(slideNumber, centerSlideNumber) <= NOTE_HYDRATE_RADIUS;
     }
 
+    function pageImageCacheKey(slideNumber) {
+      return `${deckId}:${Number(slideNumber)}`;
+    }
+
+    function desiredImageWindowSlideNumbers(slideNumber) {
+      const centerSlideNumber = Number(slideNumber);
+      const centerIndex = pages.findIndex(item => Number(item.slideNumber) === centerSlideNumber);
+      if (centerIndex < 0) return [];
+      const start = Math.max(0, centerIndex - IMAGE_PREFETCH_RADIUS);
+      const end = Math.min(pages.length, centerIndex + IMAGE_PREFETCH_RADIUS + 1);
+      return pages.slice(start, end).map(page => Number(page.slideNumber));
+    }
+
+    function pruneExpiredImageRequests(now = Date.now()) {
+      pendingImageRequests.forEach((expiresAt, key) => {
+        if (Number(expiresAt || 0) <= now) pendingImageRequests.delete(key);
+      });
+    }
+
+    function cachedImageForPage(page) {
+      const key = pageImageCacheKey(page.slideNumber);
+      return pageImageCache.get(key) || '';
+    }
+
+    function applyCachedPageImages(nextPages) {
+      return nextPages.map(page => {
+        const key = pageImageCacheKey(page.slideNumber);
+        const incomingImage = String(page.image || '');
+        if (incomingImage) {
+          pageImageCache.set(key, incomingImage);
+          pendingImageRequests.delete(key);
+          return page;
+        }
+        const cachedImage = cachedImageForPage(page);
+        if (cachedImage && page.imageAvailable) {
+          return { ...page, image: cachedImage };
+        }
+        return page;
+      });
+    }
+
+    function missingImageWindowSlides(slideNumber) {
+      const now = Date.now();
+      pruneExpiredImageRequests(now);
+      return desiredImageWindowSlideNumbers(slideNumber).filter(pageNumber => {
+        const page = pageForSlide(pageNumber);
+        if (!page || !page.imageAvailable || page.image || cachedImageForPage(page)) return false;
+        const pendingUntil = Number(pendingImageRequests.get(pageImageCacheKey(pageNumber)) || 0);
+        return pendingUntil <= now;
+      });
+    }
+
     function renderPageVisual(page) {
       if (page.image) {
         return `<img src="${page.image}" alt="第 ${page.slideNumber} 页原页面" loading="lazy" />`;
@@ -2716,20 +2773,34 @@
     }
 
     function requestImageWindowIfNeeded(slideNumber) {
-      const page = pageForSlide(slideNumber);
-      if (!page || !page.imageAvailable || page.image) return;
-      const key = `${deckId}:${Number(slideNumber)}`;
+      const missingSlides = missingImageWindowSlides(slideNumber);
+      if (!missingSlides.length) return;
+      const key = `${deckId}:${Number(slideNumber)}:${missingSlides.join(',')}`;
       if (key === lastPositionNotifyKey) return;
       lastPositionNotifyKey = key;
+      pendingImageWindowRequest = {
+        slideNumber: Number(slideNumber),
+        missingSlides,
+      };
       window.clearTimeout(positionNotifyTimer);
       positionNotifyTimer = window.setTimeout(() => {
-        const latestPage = pageForSlide(slideNumber);
-        if (!latestPage || !latestPage.imageAvailable || latestPage.image) return;
+        const request = pendingImageWindowRequest;
+        pendingImageWindowRequest = null;
+        if (key === lastPositionNotifyKey) lastPositionNotifyKey = '';
+        if (!request || !pageForSlide(request.slideNumber)) return;
+        const latestMissingSlides = missingImageWindowSlides(request.slideNumber);
+        if (!latestMissingSlides.length) return;
+        const pendingUntil = Date.now() + IMAGE_WINDOW_PENDING_TTL_MS;
+        latestMissingSlides.forEach(pageNumber => {
+          pendingImageRequests.set(pageImageCacheKey(pageNumber), pendingUntil);
+        });
         Streamlit.setComponentValue({
           action: 'reader_position',
           token: createComponentToken(),
           deckId,
-          slideNumber: Number(slideNumber),
+          slideNumber: Number(request.slideNumber),
+          imageWindowRadius: IMAGE_PREFETCH_RADIUS,
+          imageWindowSlideNumbers: latestMissingSlides,
         });
       }, IMAGE_WINDOW_NOTIFY_IDLE_MS);
     }
@@ -4020,11 +4091,17 @@
         pendingExplanationSaves.clear();
         hydratingNotePromises.clear();
         pendingTypesetTargets.clear();
+        pageImageCache.clear();
+        pendingImageRequests.clear();
         window.clearTimeout(nearbyContentTimer);
+        window.clearTimeout(positionNotifyTimer);
         nearbyContentTimer = null;
+        positionNotifyTimer = null;
         pendingNearbySlideNumber = null;
+        pendingImageWindowRequest = null;
+        lastPositionNotifyKey = '';
       }
-      const nextPages = applyPendingExplanationOverrides(incomingPages);
+      const nextPages = applyCachedPageImages(applyPendingExplanationOverrides(incomingPages));
       const nextStructureSignature = buildReaderStructureSignature(nextDeckId, nextPages, incomingSections);
       const canPatchRenderedReader = Boolean(
         nextDeckId

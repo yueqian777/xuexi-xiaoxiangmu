@@ -120,6 +120,32 @@ class PptReaderPositionTest(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(session_state["ppt_reader_active_slide_3"], 5)
 
+    def test_reader_position_update_refreshes_same_slide_when_image_window_expands(self):
+        slides = [{"slide_number": number} for number in range(1, 8)]
+        session_state = {
+            "ppt_reader_active_slide_3": 5,
+            "ppt_reader_image_cache_3": {"5": 10.0},
+        }
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 42})()),
+            patch.object(ppt_tutor, "_save_last_reader_position"),
+            patch.object(ppt_tutor.time, "monotonic", return_value=20.0),
+        ):
+            changed = ppt_tutor._handle_reader_position_update(
+                {"id": 3},
+                5,
+                "tok",
+                slides=slides,
+                image_window_slide_numbers=[4, 5, 6],
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            set(session_state["ppt_reader_image_cache_3"]),
+            {"4", "5", "6"},
+        )
+
     def test_auto_refresh_running_generation_skips_unchanged_recent_task(self):
         session_state = {
             ppt_tutor.PPT_GENERATION_REFRESH_STATE_KEY: {
