@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import base64
+import hashlib
 import html
 import json
 import os
 import re
+import shutil
 import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date
@@ -74,12 +75,14 @@ from services.ppt_reader_state import (
 from services.study_asset_service import parse_study_assets, save_study_assets
 
 SYNCED_READER_COMPONENT_PATH = BASE_DIR / "components" / "synced_reader"
+SYNCED_READER_IMAGE_CACHE_PATH = SYNCED_READER_COMPONENT_PATH / "_reader_image_cache"
+SYNCED_READER_IMAGE_URL_BASE = "_reader_image_cache"
 SYNCED_READER_COMPONENT = None
 READER_IMAGE_WINDOW_RADIUS = 3
-READER_IMAGE_PREFETCH_RADIUS = 5
+READER_IMAGE_PREFETCH_RADIUS = 3
 READER_IMAGE_WINDOW_MAX_RADIUS = 8
-READER_IMAGE_CACHE_MAX_SLIDES = 13
-READER_IMAGE_DATA_URI_CACHE_MAX_SLIDES = READER_IMAGE_CACHE_MAX_SLIDES * 2
+READER_IMAGE_CACHE_MAX_SLIDES = 15
+READER_IMAGE_URL_CACHE_MAX_SLIDES = READER_IMAGE_CACHE_MAX_SLIDES * 2
 PPT_GENERATION_DEFAULT_PARALLELISM = parallel_benchmark.DEFAULT_PARALLELISM
 PPT_PARALLEL_BENCHMARK_MAX_PARALLELISM = parallel_benchmark.DEFAULT_MAX_PARALLELISM
 PPT_INLINE_BENCHMARK_MIN_SLIDES = parallel_benchmark.INLINE_BENCHMARK_MIN_SAMPLES
@@ -3467,8 +3470,8 @@ def _build_reader_payload(
         bookmark_title = str(slide.get("bookmark_title") or "").strip() or slide_title
 
         image_available = image_path.exists() and image_path.is_file()
-        if image_available and int(slide["slide_number"]) in image_slide_numbers:
-            image_data = _image_data_uri(image_path)
+        if image_available:
+            image_data = _reader_image_url(image_path)
         else:
             image_data = ""
 
@@ -4053,20 +4056,28 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
 """
 
 
-def _image_data_uri(path: Path) -> str:
+def _reader_image_url(path: Path) -> str:
     if not path.exists() or not path.is_file():
         return ""
     stat = path.stat()
-    suffix = path.suffix.lower().lstrip(".") or "png"
-    mime = "jpeg" if suffix in {"jpg", "jpeg"} else "png"
-    return _cached_image_data_uri(str(path), stat.st_mtime_ns, stat.st_size, mime)
+    return _cached_reader_image_url(str(path), stat.st_mtime_ns, stat.st_size)
 
 
-@lru_cache(maxsize=READER_IMAGE_DATA_URI_CACHE_MAX_SLIDES)
-def _cached_image_data_uri(path_text: str, mtime_ns: int, size: int, mime: str) -> str:
-    del mtime_ns, size
-    encoded = base64.b64encode(Path(path_text).read_bytes()).decode("ascii")
-    return f"data:image/{mime};base64,{encoded}"
+@lru_cache(maxsize=READER_IMAGE_URL_CACHE_MAX_SLIDES)
+def _cached_reader_image_url(path_text: str, mtime_ns: int, size: int) -> str:
+    source = Path(path_text)
+    if not source.exists() or not source.is_file():
+        return ""
+    suffix = source.suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        suffix = ".png"
+    digest = hashlib.sha1(f"{path_text}|{mtime_ns}|{size}".encode("utf-8", "surrogatepass")).hexdigest()
+    target_dir = SYNCED_READER_IMAGE_CACHE_PATH / digest[:2]
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{digest}{suffix}"
+    if not target.exists() or target.stat().st_size != size:
+        shutil.copyfile(source, target)
+    return f"{SYNCED_READER_IMAGE_URL_BASE}/{digest[:2]}/{target.name}?v={mtime_ns}"
 
 
 def _image_exists(slide: dict) -> bool:

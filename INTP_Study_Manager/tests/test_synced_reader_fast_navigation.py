@@ -84,6 +84,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "buildReaderStructureSignature",
             "pageImageCacheKey",
             "touchPageImageCache",
+            "isInlinePageImage",
             "enforcePageImageCacheLimit",
             "prioritizeImageCacheAroundSlide",
             "pruneExpiredImageRequests",
@@ -361,6 +362,31 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             """
         )
 
+    def test_component_image_urls_are_not_evicted_from_page_payload(self):
+        self.run_js(
+            r"""
+            let deckId = 4;
+            const pageImageCache = new Map();
+            const pendingImageRequests = new Map();
+            const PAGE_IMAGE_CACHE_MAX_SLIDES = 1;
+            let currentSlideNumber = 2;
+            let pages = [
+              { slideNumber: 1, imageAvailable: true, image: '_reader_image_cache/one.png' },
+              { slideNumber: 2, imageAvailable: true, image: '_reader_image_cache/two.png' },
+              { slideNumber: 3, imageAvailable: true, image: '_reader_image_cache/three.png' },
+            ];
+
+            const merged = applyCachedPageImages(pages, 2);
+
+            if (merged.some(page => !String(page.image || '').startsWith('_reader_image_cache/'))) {
+              throw new Error(JSON.stringify(merged));
+            }
+            if (pageImageCache.size !== 0) {
+              throw new Error('component URLs should not consume inline image cache');
+            }
+            """
+        )
+
     def test_image_window_request_sends_prefetch_window_and_dedupes_pending_slides(self):
         self.run_js(
             r"""
@@ -432,14 +458,15 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
         )
 
     def test_page_visual_decodes_only_active_render_window(self):
+        self.assertIn("const PAGE_IMAGE_RENDER_RADIUS = 3;", self.source)
         self.run_js(
             r"""
-            const PAGE_IMAGE_RENDER_RADIUS = 2;
+            const PAGE_IMAGE_RENDER_RADIUS = 3;
             let deckId = 4;
             let pages = Array.from({ length: 9 }, (_, index) => ({
               slideNumber: index + 1,
               imageAvailable: true,
-              image: `data:image/png;base64,page${index + 1}`,
+              image: `_reader_image_cache/page${index + 1}.png`,
             }));
 
             if (!shouldRenderPageImage(pages[4], 5)) {
@@ -448,13 +475,19 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             if (!shouldRenderPageImage(pages[2], 5) || !shouldRenderPageImage(pages[6], 5)) {
               throw new Error('nearby images should render');
             }
-            if (shouldRenderPageImage(pages[1], 5) || shouldRenderPageImage(pages[7], 5)) {
+            if (!shouldRenderPageImage(pages[1], 5) || !shouldRenderPageImage(pages[7], 5)) {
+              throw new Error('reader must keep a wider decoded window during paging');
+            }
+            if (shouldRenderPageImage(pages[0], 5) || shouldRenderPageImage(pages[8], 5)) {
               throw new Error('far images should stay as placeholders');
             }
             if (!renderPageVisual(pages[4], 5).includes('<img')) {
               throw new Error('active image markup missing');
             }
-            if (renderPageVisual(pages[1], 5).includes('<img')) {
+            if (!renderPageVisual(pages[1], 5).includes('<img')) {
+              throw new Error('near edge of active window should still render');
+            }
+            if (renderPageVisual(pages[0], 5).includes('<img')) {
               throw new Error('far image should not be decoded into the DOM');
             }
             """
@@ -472,7 +505,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             let pages = [1, 2, 3, 4, 5].map(number => ({
               slideNumber: number,
               imageAvailable: true,
-              image: `data:image/png;base64,page${number}`,
+              image: `_reader_image_cache/page${number}.png`,
             }));
             const visuals = new Map();
             for (const page of pages) {
@@ -509,19 +542,19 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
     def test_page_visual_render_key_changes_for_same_length_image_content(self):
         self.run_js(
             r"""
-            const PAGE_IMAGE_RENDER_RADIUS = 2;
+            const PAGE_IMAGE_RENDER_RADIUS = 3;
             let deckId = 4;
             let currentSlideNumber = 1;
             let pages = [];
             const first = {
               slideNumber: 1,
               imageAvailable: true,
-              image: 'data:image/png;base64,AAAABBBBCCCC',
+              image: '_reader_image_cache/AAAABBBBCCCC.png',
             };
             const second = {
               slideNumber: 1,
               imageAvailable: true,
-              image: 'data:image/png;base64,ZZZZYYYYXXXX',
+              image: '_reader_image_cache/ZZZZYYYYXXXX.png',
             };
             pages = [first];
             if (first.image.length !== second.image.length) {
@@ -581,6 +614,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             self.source,
         )
         self.assertIn("const settledBehavior = readingMode === 'paged' ? 'auto' : behavior;", self.source)
+        self.assertIn("[80, 180, 360, 720].forEach(delay => window.setTimeout(recenter, delay));", self.source)
         self.assertIn("viewportAnchorState = null;", self.source)
 
     def test_patch_refresh_sets_target_before_image_window_update(self):
@@ -597,6 +631,20 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
         )
         self.assertIn("centeredScrollTopForElement(pageRoot.clientHeight, targetTop", self.source)
         self.assertIn("pageRoot.style.scrollBehavior = 'auto';", self.source)
+
+    def test_page_jump_recenters_even_when_observer_already_marked_current_slide(self):
+        self.assertIn(
+            "if (targetSlide === currentSlideNumber) {\n        updatePageJumpDisplay();\n        setActive(targetSlide, { scrollPage: true, behavior: 'auto', forceNoteScroll: true });\n        return;\n      }",
+            self.source,
+        )
+
+    def test_paged_observer_requires_centered_page_before_activation(self):
+        self.assertIn("const rootCenter = rootRect.top + rootRect.height / 2;", self.source)
+        self.assertIn(
+            ".filter(item => readingMode !== 'paged' || item.centerDistance <= Math.max(48, pageRoot.clientHeight * 0.18))",
+            self.source,
+        )
+        self.assertIn(".sort((a, b) => (a.centerDistance - b.centerDistance) || (b.entry.intersectionRatio - a.entry.intersectionRatio))", self.source)
 
     def test_resize_handles_have_wide_hit_area_and_hover_cursor(self):
         self.assertIn(

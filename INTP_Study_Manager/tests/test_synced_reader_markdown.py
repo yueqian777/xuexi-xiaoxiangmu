@@ -89,6 +89,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "renderFallbackCodeSegment",
             "renderFallbackMarkdown",
             "renderMarkdown",
+            "renderSafeExplanationMarkdown",
             "isGeneratedExplanationPreambleLine",
             "displayExplanationSourceInfo",
             "displayExplanationSource",
@@ -131,6 +132,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "rectFromRange",
             "globalStorageKey",
             "loadLayoutState",
+            "applyReaderWidthClass",
             "applyLayoutState",
             "applyReaderLayoutChangeWithAnchors",
             "openCanvasChat",
@@ -612,6 +614,78 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             }
             if (nearbySlide !== 5) {
               throw new Error(String(nearbySlide));
+            }
+            """
+        )
+
+    def test_safe_explanation_markdown_falls_back_when_renderer_throws(self):
+        self.run_js(
+            r"""
+            global.window = {};
+            const originalRenderMarkdown = renderMarkdown;
+            renderMarkdown = () => {
+              throw new RangeError('Invalid string length');
+            };
+
+            const rendered = renderSafeExplanationMarkdown('### 标题\n\n公式 $x=1$');
+            renderMarkdown = originalRenderMarkdown;
+
+            if (!rendered.includes('标题') || !rendered.includes('$x=1$')) {
+              throw new Error(rendered);
+            }
+            if (rendered.includes('<script')) {
+              throw new Error(rendered);
+            }
+            """
+        )
+
+    def test_restore_markdown_code_segments_skips_absent_tokens_in_large_html(self):
+        self.run_js(
+            r"""
+            const huge = 'x'.repeat(500001);
+            const restored = restoreMarkdownCodeSegments(huge, [
+              { token: 'MARKDOWNCODEPLACEHOLDER0TOKEN', segment: '`code`' },
+            ]);
+            if (restored !== huge) {
+              throw new Error(`unexpected rewrite length=${restored.length}`);
+            }
+            """
+        )
+
+    def test_apply_layout_state_marks_narrow_and_wide_reader_widths(self):
+        self.run_js(
+            r"""
+            var childChatLayers = [];
+            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var chatCollapsed = false;
+            const classes = new Set();
+            var document = {
+              body: {
+                classList: {
+                  toggle(name, enabled) {
+                    if (enabled) classes.add(name);
+                    else classes.delete(name);
+                  },
+                },
+              },
+            };
+            var readerGrid = {
+              style: { gridTemplateColumns: '' },
+              getBoundingClientRect() { return { width: 1040 }; },
+            };
+            var canvasChat = { classList: { toggle() {} } };
+            var toggleCanvasButton = null;
+            var childChatStack = { style: { setProperty() {} } };
+
+            applyLayoutState();
+            if (!classes.has('reader-layout-narrow') || classes.has('reader-layout-wide')) {
+              throw new Error(JSON.stringify([...classes]));
+            }
+
+            readerGrid.getBoundingClientRect = () => ({ width: 1600 });
+            applyLayoutState();
+            if (classes.has('reader-layout-narrow') || !classes.has('reader-layout-wide')) {
+              throw new Error(JSON.stringify([...classes]));
             }
             """
         )

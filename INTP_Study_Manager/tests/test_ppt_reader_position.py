@@ -1,5 +1,7 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from pages import ppt_tutor
@@ -172,21 +174,40 @@ class PptReaderPositionTest(unittest.TestCase):
         self.assertTrue(all(not str(value).startswith("data:image") for value in cached.values()))
 
     def test_reader_image_cache_budget_stays_near_prefetch_window(self):
-        self.assertLessEqual(ppt_tutor.READER_IMAGE_CACHE_MAX_SLIDES, 13)
+        self.assertEqual(ppt_tutor.READER_IMAGE_WINDOW_RADIUS, 3)
+        self.assertEqual(ppt_tutor.READER_IMAGE_PREFETCH_RADIUS, 3)
+        self.assertGreaterEqual(ppt_tutor.READER_IMAGE_CACHE_MAX_SLIDES, 15)
         self.assertGreaterEqual(
             ppt_tutor.READER_IMAGE_CACHE_MAX_SLIDES,
             (ppt_tutor.READER_IMAGE_PREFETCH_RADIUS * 2) + 1,
         )
 
-    def test_reader_data_uri_cache_stays_bounded_to_reader_window(self):
+    def test_reader_image_url_cache_stays_bounded_to_reader_window(self):
         self.assertLessEqual(
-            ppt_tutor.READER_IMAGE_DATA_URI_CACHE_MAX_SLIDES,
+            ppt_tutor.READER_IMAGE_URL_CACHE_MAX_SLIDES,
             ppt_tutor.READER_IMAGE_CACHE_MAX_SLIDES * 2,
         )
         self.assertEqual(
-            ppt_tutor._cached_image_data_uri.cache_info().maxsize,
-            ppt_tutor.READER_IMAGE_DATA_URI_CACHE_MAX_SLIDES,
+            ppt_tutor._cached_reader_image_url.cache_info().maxsize,
+            ppt_tutor.READER_IMAGE_URL_CACHE_MAX_SLIDES,
         )
+
+    def test_reader_image_url_uses_component_static_file_instead_of_data_uri(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "page.png"
+            image_path.write_bytes(b"png-bytes")
+            cache_path = Path(temp_dir) / "component_cache"
+            with (
+                patch.object(ppt_tutor, "SYNCED_READER_IMAGE_CACHE_PATH", cache_path),
+                patch.object(ppt_tutor, "SYNCED_READER_IMAGE_URL_BASE", "_reader_image_cache"),
+            ):
+                ppt_tutor._cached_reader_image_url.cache_clear()
+                url = ppt_tutor._reader_image_url(image_path)
+
+            self.assertTrue(url.startswith("_reader_image_cache/"))
+            self.assertIn("?v=", url)
+            self.assertFalse(url.startswith("data:image"))
+            self.assertEqual(len(list(cache_path.rglob("*.png"))), 1)
 
     def test_reader_first_payload_image_window_uses_remembered_slide_without_session_state(self):
         deck = {"id": 3, "title": "Deck", "subject": "Subject", "user_id": 42}
@@ -364,7 +385,7 @@ class PptReaderPositionTest(unittest.TestCase):
         self.assertEqual(payload[0]["slideRole"], "承接定义")
         self.assertEqual(payload[0]["keyPoints"], "边界条件")
 
-    def test_reader_payload_only_embeds_images_in_active_window(self):
+    def test_reader_payload_includes_lightweight_image_urls_for_available_pages(self):
         slides = [
             {"id": 1, "slide_number": 1, "title": "A", "slide_text": "", "image_path": "a.png"},
             {"id": 2, "slide_number": 2, "title": "B", "slide_text": "", "image_path": "b.png"},
@@ -372,7 +393,7 @@ class PptReaderPositionTest(unittest.TestCase):
         with (
             patch.object(ppt_tutor.Path, "exists", return_value=True),
             patch.object(ppt_tutor.Path, "is_file", return_value=True),
-            patch.object(ppt_tutor, "_image_data_uri", side_effect=lambda path: f"data:{path}"),
+            patch.object(ppt_tutor, "_reader_image_url", side_effect=lambda path: f"_reader_image_cache/{path}"),
         ):
             payload = ppt_tutor._build_reader_payload(
                 slides,
@@ -382,8 +403,8 @@ class PptReaderPositionTest(unittest.TestCase):
             )
 
         self.assertTrue(payload[0]["imageAvailable"])
-        self.assertEqual(payload[0]["image"], "")
-        self.assertEqual(payload[1]["image"], "data:b.png")
+        self.assertEqual(payload[0]["image"], "_reader_image_cache/a.png")
+        self.assertEqual(payload[1]["image"], "_reader_image_cache/b.png")
 
     def test_reader_sections_payload_uses_component_key_names(self):
         payload = ppt_tutor._reader_sections_payload(

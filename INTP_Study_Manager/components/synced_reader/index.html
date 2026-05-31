@@ -33,6 +33,16 @@
       --soft-blue: #edf8ff;
       --shadow: rgba(17, 89, 105, 0.13);
       --resize-handle-width: 14px;
+      --reader-font-ui: "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "PingFang SC", "Segoe UI", Arial, sans-serif;
+      --reader-font-body: "Microsoft YaHei", "Noto Sans SC", "PingFang SC", "Segoe UI", Arial, sans-serif;
+      --reader-font-mono: "Cascadia Code", "Consolas", "SFMono-Regular", monospace;
+      --reader-ui-size: 13px;
+      --reader-small-size: 12px;
+      --reader-note-size: 15px;
+      --reader-note-line: 1.72;
+      --reader-note-heading-1: 21px;
+      --reader-note-heading-2: 19px;
+      --reader-note-heading-3: 17px;
     }
     * { box-sizing: border-box; }
     html {
@@ -41,6 +51,9 @@
       height: 100dvh;
       overflow: hidden;
       overscroll-behavior: none;
+      font-size: 16px;
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
     }
     body {
       margin: 0;
@@ -48,7 +61,9 @@
       overflow: hidden;
       background: linear-gradient(135deg, #f5fffb, #eef8ff);
       color: var(--ink);
-      font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif;
+      font-family: var(--reader-font-ui);
+      font-size: var(--reader-ui-size);
+      line-height: 1.5;
       overscroll-behavior: none;
     }
     .frame {
@@ -79,7 +94,7 @@
     }
     .meta {
       color: var(--muted);
-      font-size: 13px;
+      font-size: var(--reader-ui-size);
     }
     .current {
       display: inline-flex;
@@ -420,6 +435,7 @@
       display: grid;
       grid-template-columns: minmax(260px, 1.15fr) var(--resize-handle-width) minmax(300px, 0.85fr) var(--resize-handle-width) minmax(330px, 0.55fr);
       transition: grid-template-columns .14s ease;
+      min-width: 0;
     }
     .resize-handle {
       position: relative;
@@ -464,6 +480,7 @@
     }
     .pages, .notes {
       height: 100%;
+      min-width: 0;
       overflow-y: auto;
       scroll-behavior: smooth;
       overscroll-behavior: contain;
@@ -516,9 +533,10 @@
       justify-content: space-between;
       gap: 10px;
       padding: 2px 46px 10px 4px;
-      font-size: 13px;
+      font-size: var(--reader-ui-size);
       color: var(--muted);
       font-weight: 700;
+      overflow-wrap: anywhere;
     }
     .page-bookmark-toggle {
       position: absolute;
@@ -583,7 +601,7 @@
       border-radius: 8px;
       background: #f8fffd;
       color: #5d7c86;
-      font-size: 13px;
+      font-size: var(--reader-ui-size);
       font-weight: 800;
       text-align: center;
     }
@@ -621,8 +639,9 @@
       background: #ffffff;
       box-shadow: 0 8px 18px rgba(19,87,101,.08);
       transition: border-color .18s, background .18s;
-      line-height: 1.72;
-      font-size: 15px;
+      font-family: var(--reader-font-body);
+      line-height: var(--reader-note-line);
+      font-size: var(--reader-note-size);
     }
     .note.active {
       border-left-color: var(--accent);
@@ -640,7 +659,7 @@
     .note h3 {
       margin: 0 0 10px;
       color: var(--accent);
-      font-size: 18px;
+      font-size: calc(var(--reader-note-size) + 3px);
     }
     .note-header h3 {
       flex: 1 1 auto;
@@ -700,7 +719,7 @@
     .note-meta {
       margin-bottom: 12px;
       color: var(--muted);
-      font-size: 12px;
+      font-size: var(--reader-small-size);
     }
     .note-context {
       display: grid;
@@ -711,7 +730,7 @@
       border-radius: 8px;
       background: #f3fffb;
       color: #2b6971;
-      font-size: 13px;
+      font-size: var(--reader-ui-size);
       line-height: 1.45;
     }
     .note-context-row {
@@ -729,7 +748,7 @@
       border-radius: 999px;
       background: #e5f7ff;
       color: #1e6882;
-      font-size: 12px;
+      font-size: var(--reader-small-size);
       font-weight: 900;
       overflow-wrap: anywhere;
     }
@@ -738,6 +757,7 @@
     }
     .note-body {
       overflow-wrap: anywhere;
+      word-break: break-word;
     }
     .note-body > :first-child {
       margin-top: 0;
@@ -754,7 +774,7 @@
       border-radius: 8px;
       background: #f8fffd;
       color: #5d7c86;
-      font-size: 13px;
+      font-size: var(--reader-ui-size);
       font-weight: 800;
       text-align: center;
     }
@@ -778,7 +798,7 @@
       background: #ffffff;
       color: var(--ink);
       font: inherit;
-      font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif;
+      font-family: var(--reader-font-body);
       line-height: 1.65;
       outline: none;
       overflow-y: auto;
@@ -805,9 +825,9 @@
       color: #0f7f78;
       line-height: 1.35;
     }
-    .note-body h1 { font-size: 21px; }
-    .note-body h2 { font-size: 19px; }
-    .note-body h3 { font-size: 17px; }
+    .note-body h1 { font-size: var(--reader-note-heading-1); }
+    .note-body h2 { font-size: var(--reader-note-heading-2); }
+    .note-body h3 { font-size: var(--reader-note-heading-3); }
     .note-body p { margin: 8px 0; }
     .note-body ul,
     .note-body ol {
@@ -836,7 +856,7 @@
       border-radius: 5px;
       background: #e7f7f4;
       color: #087b70;
-      font-family: "Cascadia Code", "Consolas", monospace;
+      font-family: var(--reader-font-mono);
       font-size: 0.92em;
     }
     .note-body pre code {
@@ -850,7 +870,7 @@
       border-collapse: collapse;
       display: block;
       overflow-x: auto;
-      font-size: 14px;
+      font-size: calc(var(--reader-note-size) - 1px);
     }
     .note-body th,
     .note-body td {
@@ -1295,6 +1315,55 @@
       opacity: .56;
       cursor: not-allowed;
     }
+    body.reader-layout-narrow {
+      --reader-ui-size: 12px;
+      --reader-small-size: 11px;
+      --reader-note-size: 14px;
+      --reader-note-heading-1: 19px;
+      --reader-note-heading-2: 17px;
+      --reader-note-heading-3: 16px;
+    }
+    body.reader-layout-narrow .topbar {
+      padding: 0 12px;
+      gap: 10px;
+    }
+    body.reader-layout-narrow .topbar-right,
+    body.reader-layout-narrow .layout-controls,
+    body.reader-layout-narrow .mode-controls {
+      gap: 5px;
+    }
+    body.reader-layout-narrow .layout-controls button,
+    body.reader-layout-narrow .mode-controls button,
+    body.reader-layout-narrow .bookmark-menu-button,
+    body.reader-layout-narrow .section-select {
+      padding-left: 8px;
+      padding-right: 8px;
+    }
+    body.reader-layout-narrow .pages,
+    body.reader-layout-narrow .notes {
+      padding-left: 14px;
+      padding-right: 14px;
+    }
+    body.reader-layout-narrow .note {
+      padding: 14px 14px 16px;
+      border-radius: 10px;
+    }
+    body.reader-layout-narrow .note-header {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 8px;
+    }
+    body.reader-layout-narrow .note-actions {
+      justify-content: flex-start;
+      flex-wrap: wrap;
+      white-space: normal;
+    }
+    body.reader-layout-wide {
+      --reader-note-size: 16px;
+      --reader-note-heading-1: 22px;
+      --reader-note-heading-2: 20px;
+      --reader-note-heading-3: 18px;
+    }
     @media (max-width: 900px) {
       .grid { grid-template-columns: 1fr !important; }
       .resize-handle { display: none; }
@@ -1497,7 +1566,7 @@
     const IMAGE_WINDOW_NOTIFY_IDLE_MS = 160;
     const IMAGE_WINDOW_PENDING_TTL_MS = 6000;
     const PAGE_IMAGE_CACHE_MAX_SLIDES = 13;
-    const PAGE_IMAGE_RENDER_RADIUS = 2;
+    const PAGE_IMAGE_RENDER_RADIUS = 3;
     const CHAT_BOTTOM_THRESHOLD = 56;
 
     function escapeHtml(value) {
@@ -1660,7 +1729,9 @@
 
     function restoreMarkdownCodeSegments(value, segments) {
       let output = String(value ?? '');
+      const sourceLength = output.length;
       segments.forEach(({ token, segment }) => {
+        if (sourceLength > 500000 && !output.includes(token)) return;
         output = output.replaceAll(token, segment);
       });
       return output;
@@ -1872,6 +1943,15 @@
 
     function renderExplanationMarkdown(value) {
       return renderMarkdown(displayExplanationSource(value));
+    }
+
+    function renderSafeExplanationMarkdown(value) {
+      try {
+        return renderExplanationMarkdown(value);
+      } catch (error) {
+        console.warn('synced reader markdown render failed; using escaped fallback', error);
+        return renderFallbackMarkdown(displayExplanationSource(value));
+      }
     }
 
     function connectedTypesetTargets(targets) {
@@ -2091,6 +2171,13 @@
       localStorage.setItem(globalStorageKey('readingMode'), readingMode);
     }
 
+    function applyReaderWidthClass(gridWidth) {
+      const classList = globalThis?.document?.body?.classList;
+      if (!classList) return;
+      classList.toggle('reader-layout-narrow', Number(gridWidth || 0) < 1180);
+      classList.toggle('reader-layout-wide', Number(gridWidth || 0) >= 1540);
+    }
+
     function applyReadingMode() {
       pageRoot.classList.toggle('paged', readingMode === 'paged');
       document.querySelectorAll('[data-reading-mode]').forEach(button => {
@@ -2112,9 +2199,10 @@
 
     function applyLayoutState() {
       if (!readerGrid) return;
+      const gridWidth = Number(readerGrid.getBoundingClientRect?.().width || window.innerWidth || 1200);
+      applyReaderWidthClass(gridWidth);
       const chatColumn = chatCollapsed ? '48px' : `minmax(330px, ${layoutState.chat}fr)`;
       const childCount = Array.isArray(childChatLayers) ? childChatLayers.length : 0;
-      const gridWidth = Number(readerGrid.getBoundingClientRect?.().width || window.innerWidth || 1200);
       const maxChildWidth = Math.max(300, gridWidth - 760);
       const childReserveWidth = childCount
         ? Math.floor(Math.min(childCount * 370, maxChildWidth, Math.max(300, gridWidth * 0.62)))
@@ -2737,6 +2825,10 @@
       pageImageCache.set(key, image);
     }
 
+    function isInlinePageImage(image) {
+      return String(image || '').startsWith('data:image');
+    }
+
     function enforcePageImageCacheLimit(limit = (typeof PAGE_IMAGE_CACHE_MAX_SLIDES === 'number' ? PAGE_IMAGE_CACHE_MAX_SLIDES : 13)) {
       const maxSlides = Math.max(1, Number(limit || 13));
       while (pageImageCache.size > maxSlides) {
@@ -2781,7 +2873,9 @@
         const key = pageImageCacheKey(page.slideNumber);
         const incomingImage = String(page.image || '');
         if (incomingImage) {
-          touchPageImageCache(key, incomingImage);
+          if (isInlinePageImage(incomingImage)) {
+            touchPageImageCache(key, incomingImage);
+          }
           pendingImageRequests.delete(key);
           return page;
         }
@@ -2794,6 +2888,7 @@
       prioritizeImageCacheAroundSlide(focusSlide, mergedPages);
       return mergedPages.map(page => {
         if (!page.image) return page;
+        if (!isInlinePageImage(page.image)) return page;
         const cachedImage = cachedImageForPage(page);
         return cachedImage ? { ...page, image: cachedImage } : { ...page, image: '' };
       });
@@ -2874,25 +2969,27 @@
           });
         }
       };
-      if (!image) {
+      const stabilizeRecenter = () => {
         recenter();
-        window.setTimeout(recenter, 120);
+        [80, 180, 360, 720].forEach(delay => window.setTimeout(recenter, delay));
+      };
+      if (!image) {
+        stabilizeRecenter();
         return;
       }
       if (image.complete && Number(image.naturalHeight || 0) > 0) {
-        recenter();
-        window.setTimeout(recenter, 120);
+        stabilizeRecenter();
         return;
       }
-      image.addEventListener('load', recenter, { once: true });
-      image.addEventListener('error', recenter, { once: true });
-      window.setTimeout(recenter, 240);
-      window.setTimeout(recenter, 520);
+      image.addEventListener('load', stabilizeRecenter, { once: true });
+      image.addEventListener('error', stabilizeRecenter, { once: true });
+      window.setTimeout(stabilizeRecenter, 240);
+      window.setTimeout(recenter, 720);
     }
 
     function renderNoteBody(page, hydrate = false) {
       if (hydrate) {
-        return `<div class="note-body" data-hydrated="1">${renderExplanationMarkdown(page.explanation)}</div>`;
+        return `<div class="note-body" data-hydrated="1">${renderSafeExplanationMarkdown(page.explanation)}</div>`;
       }
       return '<div class="note-body lazy" data-hydrated="0">讲解按需渲染</div>';
     }
@@ -2906,7 +3003,7 @@
       const hydrateKey = Number(slideNumber);
       const pending = hydratingNotePromises.get(hydrateKey);
       if (pending?.body === body) return pending.promise;
-      body.innerHTML = renderExplanationMarkdown(page.explanation);
+      body.innerHTML = renderSafeExplanationMarkdown(page.explanation);
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (editor) editor.value = String(page.explanation || '');
@@ -3017,6 +3114,7 @@
       pageJumpInput.value = String(targetSlide);
       if (targetSlide === currentSlideNumber) {
         updatePageJumpDisplay();
+        setActive(targetSlide, { scrollPage: true, behavior: 'auto', forceNoteScroll: true });
         return;
       }
       setActive(targetSlide, { scrollPage: true, behavior: 'smooth' });
@@ -3238,7 +3336,7 @@
       const previousNoteScroll = noteRoot.scrollTop;
       const previousPageScroll = pageRoot.scrollTop;
       page.explanation = explanation;
-      body.innerHTML = renderExplanationMarkdown(explanation);
+      body.innerHTML = renderSafeExplanationMarkdown(explanation);
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (editor) editor.value = explanation;
@@ -3331,7 +3429,7 @@
         const body = note.querySelector('.note-body');
         const editor = note.querySelector('.note-editor');
         if (!body) return;
-        body.innerHTML = renderExplanationMarkdown(page.explanation);
+        body.innerHTML = renderSafeExplanationMarkdown(page.explanation);
         body.classList.remove('lazy');
         body.dataset.hydrated = '1';
         if (editor) editor.value = String(page.explanation || '');
@@ -4217,7 +4315,7 @@
       if (!page || !body) return;
 
       const previousScrollTop = noteRoot.scrollTop;
-      body.innerHTML = renderExplanationMarkdown(page.explanation);
+      body.innerHTML = renderSafeExplanationMarkdown(page.explanation);
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (button) {
@@ -4433,9 +4531,17 @@
 
       observer = new IntersectionObserver((entries) => {
         if (Date.now() < suppressObserverUntil) return;
+        const rootRect = pageRoot.getBoundingClientRect();
+        const rootCenter = rootRect.top + rootRect.height / 2;
         const visible = entries
           .filter(entry => entry.isIntersecting)
-          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+          .map(entry => {
+            const rect = entry.target.getBoundingClientRect();
+            const centerDistance = Math.abs((rect.top + rect.height / 2) - rootCenter);
+            return { entry, centerDistance };
+          })
+          .filter(item => readingMode !== 'paged' || item.centerDistance <= Math.max(48, pageRoot.clientHeight * 0.18))
+          .sort((a, b) => (a.centerDistance - b.centerDistance) || (b.entry.intersectionRatio - a.entry.intersectionRatio))[0]?.entry;
         if (!visible) return;
         setActive(visible.target.dataset.page);
       }, {
