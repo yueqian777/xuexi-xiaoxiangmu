@@ -117,6 +117,12 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "wrapMarkdownSelection",
             "renderChatQuestion",
             "renderChatTurn",
+            "scrollChatQuestionToTop",
+            "isNearChatBottom",
+            "setChatBottomButtonVisible",
+            "updateChatBottomButton",
+            "bottomButtonForChatPanel",
+            "updateChatBottomButtons",
             "clipText",
             "nodeElement",
             "rectFromRange",
@@ -1241,6 +1247,88 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
               throw new Error(String(childPanelScrollToBottomLayerId));
             }
             """
+        )
+
+    def test_chat_question_top_scroll_helper_targets_question_start(self):
+        self.run_js(
+            r"""
+            const newQuestionTurn = { offsetTop: 220 };
+            const panel = {
+              scrollTop: 10,
+              scrollHeight: 1200,
+              clientHeight: 360,
+              offsetTop: 20,
+              querySelector(selector) {
+                if (selector === '[data-question-id="20"]') return newQuestionTurn;
+                return null;
+              },
+            };
+
+            if (typeof scrollChatQuestionToTop !== 'function') {
+              throw new Error('missing scrollChatQuestionToTop');
+            }
+            const focused = scrollChatQuestionToTop(panel, 20);
+            if (!focused || panel.scrollTop !== 200) {
+              throw new Error(JSON.stringify({ focused, scrollTop: panel.scrollTop }));
+            }
+            """
+        )
+
+    def test_canvas_chat_render_can_focus_latest_question_after_submit(self):
+        source = READER_HTML.read_text(encoding="utf-8")
+
+        self.assertIn("focusLatestQuestion", source)
+        self.assertIn("scrollChatQuestionToTop(canvasMessages", source)
+        self.assertRegex(
+            source,
+            r"renderChatForPage\(currentSlideNumber,\s*\{[^}]*focusLatestQuestion",
+        )
+
+    def test_chat_bottom_button_only_shows_when_scrolled_above_bottom(self):
+        self.run_js(
+            r"""
+            const classes = {};
+            const button = {
+              hidden: false,
+              classList: {
+                toggle(name, value) { classes[name] = value; },
+              },
+            };
+            const panel = {
+              scrollTop: 720,
+              clientHeight: 260,
+              scrollHeight: 1000,
+            };
+
+            updateChatBottomButton(panel, button);
+            if (button.hidden !== true || classes.hidden !== true) {
+              throw new Error(JSON.stringify({ hidden: button.hidden, classes }));
+            }
+
+            panel.scrollTop = 200;
+            updateChatBottomButton(panel, button);
+            if (button.hidden !== false || classes.hidden !== false) {
+              throw new Error(JSON.stringify({ hidden: button.hidden, classes }));
+            }
+            """
+        )
+
+    def test_scroll_bottom_buttons_are_not_header_actions(self):
+        source = READER_HTML.read_text(encoding="utf-8")
+        canvas_header = re.search(
+            r'<header class="canvas-chat-header">.*?</header>',
+            source,
+            re.S,
+        ).group(0)
+
+        self.assertNotIn("canvasScrollBottomButton", canvas_header)
+        self.assertRegex(
+            source,
+            r'<button[^>]+class="[^"]*chat-scroll-bottom[^"]*canvas-scroll-bottom',
+        )
+        self.assertRegex(
+            source,
+            r'<button[^>]+class="[^"]*chat-scroll-bottom[^"]*child-chat-bottom',
         )
 
     def test_closing_child_layer_sends_merge_for_closed_anchor(self):

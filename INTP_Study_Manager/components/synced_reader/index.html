@@ -915,7 +915,7 @@
     .canvas-chat {
       height: 100%;
       display: grid;
-      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      grid-template-rows: auto auto minmax(0, 1fr) auto auto;
       background:
         linear-gradient(180deg, rgba(250,255,253,.98), rgba(236,248,255,.98)),
         var(--panel);
@@ -931,6 +931,7 @@
     .canvas-chat.collapsed .canvas-chat-header,
     .canvas-chat.collapsed .canvas-context,
     .canvas-chat.collapsed .canvas-messages,
+    .canvas-chat.collapsed .chat-scroll-bottom,
     .canvas-chat.collapsed .canvas-compose {
       display: none;
     }
@@ -984,13 +985,15 @@
       font-weight: 800;
       cursor: pointer;
     }
-    .canvas-scroll-bottom,
-    .child-chat-bottom {
+    .chat-scroll-bottom {
       width: 34px;
       height: 34px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      justify-self: center;
+      align-self: center;
+      margin: -22px auto 8px;
       border: 1px solid rgba(30, 132, 150, .26);
       border-radius: 50%;
       background: #ffffff;
@@ -999,6 +1002,15 @@
       line-height: 1;
       cursor: pointer;
       box-shadow: 0 8px 18px rgba(30, 90, 110, .12);
+      z-index: 5;
+    }
+    .child-chat-panel .chat-scroll-bottom {
+      flex: 0 0 auto;
+      margin: -20px auto 8px;
+    }
+    .chat-scroll-bottom.hidden,
+    .chat-scroll-bottom[hidden] {
+      display: none;
     }
     .canvas-chat-meta {
       margin-top: 5px;
@@ -1343,13 +1355,13 @@
         <header class="canvas-chat-header">
           <div class="canvas-chat-header-row">
             <h3 class="canvas-chat-title">侧边插问</h3>
-            <button type="button" class="canvas-scroll-bottom" id="canvasScrollBottomButton" title="滚到最下">↓</button>
             <button type="button" class="canvas-toggle" id="toggleCanvasButton">收起</button>
           </div>
           <div class="canvas-chat-meta" id="canvasChatMeta">跟随当前页，不改变阅读位置</div>
         </header>
         <div class="canvas-context" id="canvasContext">当前上下文：第 1 页</div>
         <div class="canvas-messages" id="canvasMessages"></div>
+        <button type="button" class="chat-scroll-bottom canvas-scroll-bottom hidden" id="canvasScrollBottomButton" title="滚到最下" hidden>↓</button>
         <div class="canvas-compose">
           <div class="quote-preview" id="quotePreview">
             <button type="button" id="clearQuoteButton">×</button>
@@ -1439,6 +1451,7 @@
     let currentChatQuote = null;
     let childChatLayers = [];
     let childPanelScrollToBottomLayerId = null;
+    let canvasQuestionFocusPending = false;
     let restoreScrollAfterRender = null;
     let layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
     let chatCollapsed = true;
@@ -1481,6 +1494,7 @@
     const NEARBY_CONTENT_IDLE_MS = 90;
     const IMAGE_WINDOW_NOTIFY_IDLE_MS = 160;
     const IMAGE_WINDOW_PENDING_TTL_MS = 6000;
+    const CHAT_BOTTOM_THRESHOLD = 56;
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -4100,6 +4114,7 @@
         pendingNearbySlideNumber = null;
         pendingImageWindowRequest = null;
         lastPositionNotifyKey = '';
+        canvasQuestionFocusPending = false;
       }
       const nextPages = applyCachedPageImages(applyPendingExplanationOverrides(incomingPages));
       const nextStructureSignature = buildReaderStructureSignature(nextDeckId, nextPages, incomingSections);
@@ -4121,6 +4136,7 @@
       loadReadingMode();
       const stored = readScrollState();
       const targetSlide = initialReaderTargetSlide(args, stored, isSameDeckRefresh);
+      const focusSubmittedCanvasQuestion = canvasQuestionFocusPending;
 
       deckTitle.textContent = String(args.title || '学习资料');
       deckMeta.textContent = `${String(args.subject || '未分类')} · 原页面同步阅读`;
@@ -4148,7 +4164,10 @@
           : targetSlide;
         updatePageJumpDisplay();
         updateSectionSelect(currentSlideNumber);
-        renderChatForPage(currentSlideNumber);
+        renderChatForPage(currentSlideNumber, {
+          focusLatestQuestion: focusSubmittedCanvasQuestion,
+        });
+        if (focusSubmittedCanvasQuestion) canvasQuestionFocusPending = false;
         updateBookmarkControls();
         ensureNearbyContent(currentSlideNumber);
         pageRoot.scrollTop = previousPageScroll;
@@ -4250,7 +4269,10 @@
         } else if (storedMatchesTarget) {
           noteRoot.scrollTop = stored.noteScroll || 0;
         }
-        renderChatForPage(currentSlideNumber);
+        renderChatForPage(currentSlideNumber, {
+          focusLatestQuestion: focusSubmittedCanvasQuestion,
+        });
+        if (focusSubmittedCanvasQuestion) canvasQuestionFocusPending = false;
       }, 80);
       const hydratedBodies = Array.from(noteRoot.querySelectorAll('.note-body[data-hydrated="1"]'));
       typesetTargets([...hydratedBodies, canvasMessages]).then(typesetDone => {
@@ -4481,6 +4503,7 @@
       if (!page) {
         canvasContext.textContent = '当前上下文：未识别页面';
         canvasMessages.innerHTML = '<div class="canvas-empty">还没有可用上下文。</div>';
+        updateChatBottomButton(canvasMessages, canvasScrollBottomButton);
         return;
       }
       const section = sectionForSlide(slideNumber);
@@ -4499,9 +4522,12 @@
             本页还没有插问。你可以直接围绕当前 PPT 页面和右侧讲解提问；回答会保存到这一页，不会覆盖主线讲解。
           </div>
         `;
+        updateChatBottomButton(canvasMessages, canvasScrollBottomButton);
         return;
       }
       const previousScrollTop = canvasMessages.scrollTop;
+      const focusQuestionId = Number(options.focusQuestionId || 0)
+        || (options.focusLatestQuestion ? Number(questionIdForItem(rootMessages[rootMessages.length - 1]) || 0) : 0);
       canvasMessages.innerHTML = rootMessages.map(item => [
         renderChatTurn(item),
         ...messages
@@ -4511,12 +4537,19 @@
       ].join('')).join('');
       if (options.preserveScroll) {
         canvasMessages.scrollTop = previousScrollTop;
+      } else if (focusQuestionId) {
+        const focused = scrollChatQuestionToTop(canvasMessages, focusQuestionId);
+        if (!focused) canvasMessages.scrollTop = canvasMessages.scrollHeight;
       } else {
         canvasMessages.scrollTop = canvasMessages.scrollHeight;
       }
       typesetTargets([canvasMessages]).then(typesetDone => {
         if (typesetDone !== false) applyChatSourceMaps(canvasMessages);
+      }).finally(() => {
+        if (focusQuestionId) scrollChatQuestionToTop(canvasMessages, focusQuestionId);
+        updateChatBottomButton(canvasMessages, canvasScrollBottomButton);
       });
+      updateChatBottomButton(canvasMessages, canvasScrollBottomButton);
       renderChildQuestionStack();
     }
 
@@ -4536,6 +4569,7 @@
       canvasSendButton.disabled = true;
       canvasSendButton.textContent = '发送中...';
       canvasHint.textContent = `正在询问第 ${currentSlideNumber} 页`;
+      canvasQuestionFocusPending = true;
       Streamlit.setComponentValue({
         action: 'canvas_question',
         token: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
@@ -4603,12 +4637,62 @@
       sendQuestionThreadMerge(layer.parentQuestionId);
     }
 
-    function scrollChatToBottom(container) {
-      if (!container) return;
-      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    function isNearChatBottom(container, threshold = (typeof CHAT_BOTTOM_THRESHOLD === 'number' ? CHAT_BOTTOM_THRESHOLD : 56)) {
+      if (!container) return true;
+      const scrollHeight = Number(container.scrollHeight || 0);
+      const clientHeight = Number(container.clientHeight || 0);
+      if (scrollHeight <= clientHeight + Number(threshold || 0)) return true;
+      const remaining = scrollHeight - Number(container.scrollTop || 0) - clientHeight;
+      return remaining <= Number(threshold || 0);
     }
 
-    function scrollChildPanelToQuestionTop(panel, questionId) {
+    function setChatBottomButtonVisible(button, visible) {
+      if (!button) return;
+      button.hidden = !visible;
+      button.classList?.toggle?.('hidden', !visible);
+      if (visible) {
+        button.removeAttribute?.('aria-hidden');
+      } else {
+        button.setAttribute?.('aria-hidden', 'true');
+      }
+    }
+
+    function updateChatBottomButton(container, button) {
+      const visible = Boolean(container && button && !isNearChatBottom(container));
+      setChatBottomButtonVisible(button, visible);
+      return visible;
+    }
+
+    function bottomButtonForChatPanel(container) {
+      if (!container) return null;
+      if (typeof canvasMessages !== 'undefined' && container === canvasMessages) {
+        return typeof canvasScrollBottomButton !== 'undefined' ? canvasScrollBottomButton : null;
+      }
+      const layerId = String(container.dataset?.childMessages || '');
+      if (!layerId || !childChatStack) return null;
+      return childChatStack.querySelector?.(`[data-child-bottom="${cssAttributeValue(layerId)}"]`) || null;
+    }
+
+    function updateChatBottomButtons() {
+      updateChatBottomButton(canvasMessages, canvasScrollBottomButton);
+      if (!childChatStack) return;
+      childChatStack.querySelectorAll('.child-chat-messages').forEach(panel => {
+        updateChatBottomButton(panel, bottomButtonForChatPanel(panel));
+      });
+    }
+
+    function scrollChatToBottom(container, button) {
+      if (!container) return;
+      const targetButton = button || bottomButtonForChatPanel(container);
+      setChatBottomButtonVisible(targetButton, false);
+      if (typeof container.scrollTo === 'function') {
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+      } else {
+        container.scrollTop = container.scrollHeight;
+      }
+    }
+
+    function scrollChatQuestionToTop(panel, questionId) {
       const targetId = Number(questionId || 0);
       if (!panel || !targetId) return false;
       const turn = panel.querySelector?.(`[data-question-id="${targetId}"]`);
@@ -4623,6 +4707,10 @@
       }
       panel.scrollTop = Math.max(0, top);
       return true;
+    }
+
+    function scrollChildPanelToQuestionTop(panel, questionId) {
+      return scrollChatQuestionToTop(panel, questionId);
     }
 
     function shouldSubmitInputOnEnter(event) {
@@ -4689,12 +4777,12 @@
             <header class="child-chat-header">
               <div class="child-chat-header-row">
                 <h3 class="child-chat-title">子插问</h3>
-                <button type="button" class="child-chat-bottom" data-child-bottom="${layer.layerId}" title="滚到最下">↓</button>
                 <button type="button" class="child-chat-close" data-child-close="${layer.layerId}">关闭</button>
               </div>
               <div class="child-chat-meta">引用插问 #${escapeHtml(layer.parentQuestionId)} · ${escapeHtml(clipText(parent?.question || '', 42))}</div>
             </header>
             <div class="child-chat-messages" data-child-messages="${layer.layerId}">${messagesHtml}</div>
+            <button type="button" class="chat-scroll-bottom child-chat-bottom hidden" data-child-bottom="${layer.layerId}" title="滚到最下" hidden>↓</button>
             <div class="child-chat-compose">
               <div class="quote-preview show"><div>${escapeHtml(clipText(layer.quote?.selectedText || '', 160))}</div></div>
               <textarea class="child-chat-input" data-child-input="${layer.layerId}" placeholder="继续围绕这段回答提问"></textarea>
@@ -4716,6 +4804,7 @@
         } else {
           panel.scrollTop = panel.scrollHeight;
         }
+        updateChatBottomButton(panel, bottomButtonForChatPanel(panel));
       });
       if (forceBottomLayerId && childPanelScrollToBottomLayerId === forceBottomLayerId) {
         childPanelScrollToBottomLayerId = null;
@@ -4804,7 +4893,7 @@
     highlightSelectionButton.addEventListener('click', highlightCurrentSelection);
     copySelectionButton.addEventListener('click', copyCurrentSelection);
     canvasSendButton.addEventListener('click', sendCanvasQuestion);
-    canvasScrollBottomButton.addEventListener('click', () => scrollChatToBottom(canvasMessages));
+    canvasScrollBottomButton.addEventListener('click', () => scrollChatToBottom(canvasMessages, canvasScrollBottomButton));
     toggleCanvasButton.addEventListener('click', toggleCanvasChat);
     openCanvasButton.addEventListener('click', () => openCanvasChat(true));
     if (bookmarkMenuButton) {
@@ -4930,8 +5019,13 @@
     noteRoot.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
     canvasMessages.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
     canvasMessages.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
+    canvasMessages.addEventListener('scroll', () => updateChatBottomButton(canvasMessages, canvasScrollBottomButton), { passive: true });
     childChatStack.addEventListener('mouseup', () => window.setTimeout(showSelectionToolbar, 40));
     childChatStack.addEventListener('keyup', () => window.setTimeout(showSelectionToolbar, 40));
+    childChatStack.addEventListener('scroll', (event) => {
+      const panel = event.target?.closest?.('.child-chat-messages');
+      if (panel) updateChatBottomButton(panel, bottomButtonForChatPanel(panel));
+    }, true);
     childChatStack.addEventListener('keydown', (event) => {
       const input = event.target?.closest?.('.child-chat-input');
       if (!input) return;
@@ -4967,7 +5061,10 @@
       }
       const bottomButton = event.target?.closest?.('[data-child-bottom]');
       if (bottomButton) {
-        scrollChatToBottom(childChatStack.querySelector(`[data-child-messages="${bottomButton.dataset.childBottom}"]`));
+        scrollChatToBottom(
+          childChatStack.querySelector(`[data-child-messages="${cssAttributeValue(bottomButton.dataset.childBottom)}"]`),
+          bottomButton,
+        );
       }
     });
     document.addEventListener('mousedown', (event) => {
