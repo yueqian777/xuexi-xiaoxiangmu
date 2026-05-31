@@ -146,6 +146,31 @@ class PptReaderPositionTest(unittest.TestCase):
             {"4", "5", "6"},
         )
 
+    def test_reader_image_window_cache_caps_explicit_slide_requests(self):
+        slides = [{"slide_number": number} for number in range(1, 80)]
+        session_state = {
+            "ppt_reader_active_slide_3": 40,
+            "ppt_reader_image_cache_3": {str(number): float(number) for number in range(1, 20)},
+        }
+        requested = list(range(20, 70))
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 42})()),
+            patch.object(ppt_tutor, "_save_last_reader_position"),
+            patch.object(ppt_tutor.time, "monotonic", return_value=100.0),
+        ):
+            ppt_tutor._handle_reader_position_update(
+                {"id": 3},
+                40,
+                "tok",
+                slides=slides,
+                image_window_slide_numbers=requested,
+            )
+
+        cached = session_state["ppt_reader_image_cache_3"]
+        self.assertLessEqual(len(cached), ppt_tutor.READER_IMAGE_CACHE_MAX_SLIDES)
+        self.assertTrue(all(not str(value).startswith("data:image") for value in cached.values()))
+
     def test_auto_refresh_running_generation_skips_unchanged_recent_task(self):
         session_state = {
             ppt_tutor.PPT_GENERATION_REFRESH_STATE_KEY: {

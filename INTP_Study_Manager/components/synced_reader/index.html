@@ -1494,6 +1494,7 @@
     const NEARBY_CONTENT_IDLE_MS = 90;
     const IMAGE_WINDOW_NOTIFY_IDLE_MS = 160;
     const IMAGE_WINDOW_PENDING_TTL_MS = 6000;
+    const PAGE_IMAGE_CACHE_MAX_SLIDES = 36;
     const CHAT_BOTTOM_THRESHOLD = 56;
 
     function escapeHtml(value) {
@@ -2717,12 +2718,28 @@
       return pageImageCache.get(key) || '';
     }
 
+    function touchPageImageCache(key, image) {
+      if (!key || !image) return;
+      if (pageImageCache.has(key)) pageImageCache.delete(key);
+      pageImageCache.set(key, image);
+    }
+
+    function enforcePageImageCacheLimit(limit = (typeof PAGE_IMAGE_CACHE_MAX_SLIDES === 'number' ? PAGE_IMAGE_CACHE_MAX_SLIDES : 36)) {
+      const maxSlides = Math.max(1, Number(limit || 36));
+      while (pageImageCache.size > maxSlides) {
+        const oldestKey = pageImageCache.keys().next().value;
+        if (oldestKey === undefined) break;
+        pageImageCache.delete(oldestKey);
+        pendingImageRequests.delete(oldestKey);
+      }
+    }
+
     function applyCachedPageImages(nextPages) {
-      return nextPages.map(page => {
+      const mergedPages = nextPages.map(page => {
         const key = pageImageCacheKey(page.slideNumber);
         const incomingImage = String(page.image || '');
         if (incomingImage) {
-          pageImageCache.set(key, incomingImage);
+          touchPageImageCache(key, incomingImage);
           pendingImageRequests.delete(key);
           return page;
         }
@@ -2731,6 +2748,12 @@
           return { ...page, image: cachedImage };
         }
         return page;
+      });
+      enforcePageImageCacheLimit();
+      return mergedPages.map(page => {
+        if (!page.image) return page;
+        const cachedImage = cachedImageForPage(page);
+        return cachedImage ? { ...page, image: cachedImage } : { ...page, image: '' };
       });
     }
 

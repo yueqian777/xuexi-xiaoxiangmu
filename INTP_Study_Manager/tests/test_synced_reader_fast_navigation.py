@@ -79,6 +79,8 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "readScrollState",
             "buildReaderStructureSignature",
             "pageImageCacheKey",
+            "touchPageImageCache",
+            "enforcePageImageCacheLimit",
             "pruneExpiredImageRequests",
             "cachedImageForPage",
             "applyCachedPageImages",
@@ -284,6 +286,38 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             ]);
             if (second[0].image !== 'data:image/png;base64,two') {
               throw new Error(JSON.stringify(second));
+            }
+            """
+        )
+
+    def test_page_image_cache_prunes_evicted_images_from_render_payload(self):
+        self.run_js(
+            r"""
+            let deckId = 9;
+            const pageImageCache = new Map();
+            const pendingImageRequests = new Map();
+            const PAGE_IMAGE_CACHE_MAX_SLIDES = 2;
+
+            const first = applyCachedPageImages([
+              { slideNumber: 1, imageAvailable: true, image: 'data:image/png;base64,one' },
+              { slideNumber: 2, imageAvailable: true, image: 'data:image/png;base64,two' },
+              { slideNumber: 3, imageAvailable: true, image: 'data:image/png;base64,three' },
+            ]);
+
+            if (pageImageCache.size !== 2) {
+              throw new Error(`expected bounded cache, got ${pageImageCache.size}`);
+            }
+            if (first[0].image !== '' || first[1].image === '' || first[2].image === '') {
+              throw new Error(JSON.stringify(first.map(page => page.image)));
+            }
+
+            const second = applyCachedPageImages([
+              { slideNumber: 1, imageAvailable: true, image: '' },
+              { slideNumber: 2, imageAvailable: true, image: '' },
+              { slideNumber: 3, imageAvailable: true, image: '' },
+            ]);
+            if (second[0].image !== '' || second[1].image === '' || second[2].image === '') {
+              throw new Error(JSON.stringify(second.map(page => page.image)));
             }
             """
         )
