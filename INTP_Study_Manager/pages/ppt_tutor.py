@@ -56,6 +56,7 @@ from services.ppt_context_service import (
 )
 from services.ppt_generation_state import apply_stop_request, generation_progress_patch
 from services.ppt_service import import_deck, refresh_pdf_slide_text, render_missing_page_images
+from services.pdf_extraction_service import MinerUStatus, get_mineru_status
 from services.prompt_service import render_template
 from services.ppt_reader_state import (
     LAST_READER_DECK_STATE_KEY,
@@ -494,10 +495,32 @@ def _render_deck_actions(
             st.error(f"生成原页面图片失败：{exc}")
 
     if _is_pdf_deck(deck):
+        mineru_status = get_mineru_status()
+        method_key = f"ppt_pdf_extraction_method_{deck['id']}"
+        extraction_options = _pdf_extraction_method_options(mineru_status)
+        option_labels = dict(extraction_options)
+        option_values = [value for value, _label in extraction_options]
+        if st.session_state.get(method_key) not in option_values:
+            st.session_state[method_key] = "local"
+        with st.expander("PDF 识别增强设置", expanded=False):
+            st.radio(
+                "重新提取方式",
+                option_values,
+                format_func=lambda value: option_labels[value],
+                key=method_key,
+                help="默认使用本地增强抽取。安装并配置 MinerU 后，才会出现 MinerU 高精度抽取选项。",
+            )
+            st.caption(mineru_status.message)
+            if not mineru_status.available:
+                st.caption("MinerU 是自愿安装的辅助配置，不会随 requirements.txt 自动安装。")
+                st.code('setx INTP_MINERU_COMMAND "D:\\MinerU\\.venv\\Scripts\\mineru.exe"', language="powershell")
+
+        extraction_method = st.session_state.get(method_key, "local")
         if st.button("重新提取 PDF 文字"):
             try:
-                with st.spinner("正在重新提取 PDF 文字..."):
-                    updated = refresh_pdf_slide_text(deck, slides)
+                spinner_text = "正在使用 MinerU 高精度提取 PDF..." if extraction_method == "mineru" else "正在重新提取 PDF 文字..."
+                with st.spinner(spinner_text):
+                    updated = refresh_pdf_slide_text(deck, slides, method=extraction_method)
                 st.success(f"PDF 文字已刷新：{updated} 页提取到文本。")
                 st.rerun()
             except Exception as exc:
@@ -4248,6 +4271,13 @@ def _is_pdf_deck(deck: dict) -> bool:
     filename = str(deck.get("filename") or "")
     file_path = str(deck.get("file_path") or "")
     return filename.lower().endswith(".pdf") or file_path.lower().endswith(".pdf")
+
+
+def _pdf_extraction_method_options(mineru_status: MinerUStatus) -> list[tuple[str, str]]:
+    options = [("local", "本地增强抽取（默认）")]
+    if mineru_status.available:
+        options.append(("mineru", "MinerU 高精度抽取（可选）"))
+    return options
 
 
 def _active_api_key() -> str:

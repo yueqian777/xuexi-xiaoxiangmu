@@ -147,7 +147,38 @@ output_text
 6. 在同步阅读器左侧滚动原页面，右侧讲解会自动同步到当前可见页。
 7. 点击“打开插问浮窗”，提问不会覆盖主线讲解，而是单独保存为对应页的插问记录。
 
-当前版本优先保证本地可运行和学习流不中断。PPTX 会通过本机 PowerPoint 导出原始页面图片；PDF 会通过 PyMuPDF 渲染为页面图片并提取文字。如果 PDF 是扫描版图片，页面会保留原图，并可在“PDF 无法提取文字时，把当前页原图直接发给支持视觉的 API”开启后把页面图片传给支持视觉输入的 OpenAI 兼容模型。
+当前版本优先保证本地可运行和学习流不中断。PPTX 会通过本机 PowerPoint 导出原始页面图片；PDF 会通过 PyMuPDF 渲染为页面图片，并通过本地增强抽取链路提取文字：优先使用 `pdfplumber` / `pdfminer.six` 保留更好的阅读顺序、表格和版面结构，再回退到 `pypdf` 与 PyMuPDF 文本提取。如果 PDF 是扫描版图片，页面会保留原图，并可在“PDF 无法提取文字时，把当前页原图直接发给支持视觉的 API”开启后把页面图片传给支持视觉输入的 OpenAI 兼容模型。
+
+### PDF 高精度识别：MinerU 可选辅助配置
+
+MinerU 适合扫描件、公式、表格、多栏版式和复杂论文类 PDF。它会尝试把公式转为 LaTeX、表格转为 HTML，并按阅读顺序输出 Markdown / JSON。由于 MinerU 依赖模型、PyTorch / ONNX 等推理组件，安装体积、首次模型下载、CPU/GPU 推理耗时和内存占用都会明显高于默认本地增强抽取；长文档或 OCR 模式可能运行数分钟到数十分钟。
+
+MinerU 是自愿安装的辅助配置，不会随 `requirements.txt` 自动安装，也不要把 MinerU 包、模型或虚拟环境提交到本仓库。建议安装在 D 盘外部目录，例如：
+
+```powershell
+D:\SoftwareDownload\python.exe -m venv D:\MinerU\.venv
+D:\MinerU\.venv\Scripts\python.exe -m pip install -U pip
+D:\MinerU\.venv\Scripts\python.exe -m pip install "mineru[pipeline]" six
+setx INTP_MINERU_COMMAND "D:\MinerU\.venv\Scripts\mineru.exe"
+```
+
+如果 MinerU 运行时报 `ModuleNotFoundError: No module named 'six'`，在该虚拟环境里补装：
+
+```powershell
+D:\MinerU\.venv\Scripts\python.exe -m pip install six
+```
+
+可选环境变量：
+
+```powershell
+setx INTP_MINERU_BACKEND "pipeline"
+setx INTP_MINERU_METHOD "auto"
+setx INTP_MINERU_LANG "ch"
+setx INTP_MINERU_OUTPUT_DIR "D:\MinerU\outputs"
+setx INTP_MINERU_TIMEOUT_SECONDS "3600"
+```
+
+进入“PPT 逐页讲解”并选择 PDF 资料后，打开“PDF 识别增强设置”。只有检测到 `INTP_MINERU_COMMAND` 指向的命令可运行，或系统 `PATH` / `D:\MinerU\.venv\Scripts\mineru.exe` 中的 MinerU 能通过轻量命令探测时，页面才会显示“MinerU 高精度抽取（可选）”。未检测到或命令依赖损坏时只能选择默认本地增强抽取。
 
 ## 每日学习流程示例
 

@@ -10,6 +10,7 @@ from typing import BinaryIO
 
 from db import DATA_DIR, execute_many, write_transaction
 from services.auth_service import require_login
+from services.pdf_extraction_service import extract_pdf_pages as extract_pdf_pages_from_pdf
 
 UPLOAD_DIR = DATA_DIR / "uploads"
 PAGE_IMAGE_DIR = DATA_DIR / "page_images"
@@ -133,47 +134,8 @@ def extract_pptx_slides(path: Path) -> list[dict[str, str | int]]:
     return slides
 
 
-def extract_pdf_pages(path: Path) -> list[dict[str, str | int]]:
-    try:
-        from pypdf import PdfReader
-    except ImportError as exc:
-        raise RuntimeError("未安装 pypdf，请先运行 pip install -r requirements.txt。") from exc
-
-    reader = PdfReader(str(path))
-    fitz_text_by_page = _extract_pdf_text_with_fitz(path)
-    slides: list[dict[str, str | int]] = []
-    for index, page in enumerate(reader.pages, start=1):
-        text = (page.extract_text() or "").strip()
-        if not text:
-            text = fitz_text_by_page.get(index, "")
-        title = _first_text_line(text) or f"PDF 第 {index} 页"
-        slides.append(
-            {
-                "slide_number": index,
-                "title": title[:80],
-                "slide_text": text,
-                "notes": "source=pdf",
-            }
-        )
-    return slides
-
-
-def _extract_pdf_text_with_fitz(path: Path) -> dict[int, str]:
-    try:
-        import fitz
-    except ImportError:
-        return {}
-
-    result: dict[int, str] = {}
-    document = fitz.open(path)
-    try:
-        for index, page in enumerate(document, start=1):
-            text = (page.get_text("text") or "").strip()
-            if text:
-                result[index] = text
-    finally:
-        document.close()
-    return result
+def extract_pdf_pages(path: Path, *, method: str = "local") -> list[dict[str, str | int]]:
+    return extract_pdf_pages_from_pdf(path, method=method)
 
 
 def render_deck_page_images(path: Path) -> dict[int, Path]:
@@ -393,12 +355,12 @@ def render_missing_page_images(deck: dict, slides: list[dict]) -> dict[int, Path
     return image_paths
 
 
-def refresh_pdf_slide_text(deck: dict, slides: list[dict]) -> int:
+def refresh_pdf_slide_text(deck: dict, slides: list[dict], *, method: str = "local") -> int:
     path = Path(deck["file_path"])
     if path.suffix.lower() != ".pdf":
         raise RuntimeError("只有 PDF 资料需要重新提取文字。")
 
-    extracted = {int(item["slide_number"]): item for item in extract_pdf_pages(path)}
+    extracted = {int(item["slide_number"]): item for item in extract_pdf_pages(path, method=method)}
     updated = 0
     rows = []
     for slide in slides:

@@ -5,5 +5,14 @@ python-pptx>=1.0
 requests>=2.31
 pypdf>=5.0
 pymupdf>=1.24
+pdfplumber>=0.11
+pdfminer.six>=20231228
 cryptography>=42.0
 Pillow>=10.0
+
+# Optional PDF high-accuracy extraction:
+# MinerU is intentionally NOT installed by this requirements file.
+# Install it voluntarily in an external D-drive environment.
+# If MinerU pipeline reports "No module named 'six'", install six in that venv.
+# Then set:
+# INTP_MINERU_COMMAND=D:\MinerU\.venv\Scripts\mineru.exe
