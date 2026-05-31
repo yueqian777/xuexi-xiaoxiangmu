@@ -1494,7 +1494,7 @@
     const NEARBY_CONTENT_IDLE_MS = 90;
     const IMAGE_WINDOW_NOTIFY_IDLE_MS = 160;
     const IMAGE_WINDOW_PENDING_TTL_MS = 6000;
-    const PAGE_IMAGE_CACHE_MAX_SLIDES = 36;
+    const PAGE_IMAGE_CACHE_MAX_SLIDES = 13;
     const CHAT_BOTTOM_THRESHOLD = 56;
 
     function escapeHtml(value) {
@@ -2638,10 +2638,20 @@
       localStorage.setItem(storageKey('currentSlide'), String(currentSlideNumber));
     }
 
-    function scheduleScrollStateSave() {
+    function saveCurrentSlideState() {
+      if (!deckId) return;
+      localStorage.setItem(storageKey('currentSlide'), String(currentSlideNumber));
+    }
+
+    function scheduleScrollStateSave(delayMs = 140) {
       if (viewportAnchorState) return;
       window.clearTimeout(scrollStateSaveTimer);
-      scrollStateSaveTimer = window.setTimeout(saveScrollState, 140);
+      scrollStateSaveTimer = window.setTimeout(saveScrollState, Math.max(0, Number(delayMs) || 0));
+    }
+
+    function scheduleProgrammaticScrollStateSave(behavior = 'auto') {
+      saveCurrentSlideState();
+      scheduleScrollStateSave(behavior === 'smooth' ? 650 : 180);
     }
 
     function readScrollState() {
@@ -2724,8 +2734,8 @@
       pageImageCache.set(key, image);
     }
 
-    function enforcePageImageCacheLimit(limit = (typeof PAGE_IMAGE_CACHE_MAX_SLIDES === 'number' ? PAGE_IMAGE_CACHE_MAX_SLIDES : 36)) {
-      const maxSlides = Math.max(1, Number(limit || 36));
+    function enforcePageImageCacheLimit(limit = (typeof PAGE_IMAGE_CACHE_MAX_SLIDES === 'number' ? PAGE_IMAGE_CACHE_MAX_SLIDES : 13)) {
+      const maxSlides = Math.max(1, Number(limit || 13));
       while (pageImageCache.size > maxSlides) {
         const oldestKey = pageImageCache.keys().next().value;
         if (oldestKey === undefined) break;
@@ -2734,7 +2744,36 @@
       }
     }
 
-    function applyCachedPageImages(nextPages) {
+    function prioritizeImageCacheAroundSlide(slideNumber, nextPages, limit = (typeof PAGE_IMAGE_CACHE_MAX_SLIDES === 'number' ? PAGE_IMAGE_CACHE_MAX_SLIDES : 13)) {
+      const maxSlides = Math.max(1, Number(limit || 13));
+      const center = Number(slideNumber || 0);
+      if (!center || pageImageCache.size <= maxSlides) {
+        enforcePageImageCacheLimit(maxSlides);
+        return;
+      }
+      const ranked = nextPages
+        .map((page, index) => {
+          const pageNumber = Number(page.slideNumber || 0);
+          return {
+            key: pageImageCacheKey(pageNumber),
+            distance: Math.abs(pageNumber - center),
+            index,
+          };
+        })
+        .filter(item => pageImageCache.has(item.key))
+        .sort((a, b) => (a.distance - b.distance) || (a.index - b.index));
+      const keep = new Set(ranked.slice(0, maxSlides).map(item => item.key));
+      pageImageCache.forEach((_, key) => {
+        if (!keep.has(key)) {
+          pageImageCache.delete(key);
+          pendingImageRequests.delete(key);
+        }
+      });
+      enforcePageImageCacheLimit(maxSlides);
+    }
+
+    function applyCachedPageImages(nextPages, focusSlideNumber) {
+      const focusSlide = Number(focusSlideNumber || (typeof currentSlideNumber !== 'undefined' ? currentSlideNumber : 0));
       const mergedPages = nextPages.map(page => {
         const key = pageImageCacheKey(page.slideNumber);
         const incomingImage = String(page.image || '');
@@ -2749,7 +2788,7 @@
         }
         return page;
       });
-      enforcePageImageCacheLimit();
+      prioritizeImageCacheAroundSlide(focusSlide, mergedPages);
       return mergedPages.map(page => {
         if (!page.image) return page;
         const cachedImage = cachedImageForPage(page);
@@ -2774,6 +2813,36 @@
       }
       const text = page.imageAvailable ? '原页面按需加载中' : '暂无原页面图片';
       return `<div class="page-placeholder">${escapeHtml(text)}</div>`;
+    }
+
+    function shouldRecenterAfterActiveImagePatch(imageChangedSlides, slideNumber, wasSameSlide) {
+      return Boolean(
+        wasSameSlide
+        && Array.isArray(imageChangedSlides)
+        && imageChangedSlides.includes(Number(slideNumber))
+      );
+    }
+
+    function centerPageAfterImageSettles(slideNumber, behavior = 'auto') {
+      const targetSlide = Number(slideNumber || 0);
+      const page = document.getElementById(`page-${targetSlide}`);
+      const image = page?.querySelector?.('.page-visual img');
+      const recenter = () => {
+        if (Number(currentSlideNumber) === targetSlide) {
+          window.requestAnimationFrame(() => centerPage(targetSlide, behavior));
+        }
+      };
+      if (!image) {
+        recenter();
+        return;
+      }
+      if (image.complete && Number(image.naturalHeight || 0) > 0) {
+        recenter();
+        return;
+      }
+      image.addEventListener('load', recenter, { once: true });
+      image.addEventListener('error', recenter, { once: true });
+      window.setTimeout(recenter, 240);
     }
 
     function renderNoteBody(page, hydrate = false) {
@@ -3162,6 +3231,7 @@
         previousPages.map(page => [Number(page.slideNumber), page])
       );
       const typesetQueue = [];
+      const imageChangedSlides = [];
 
       pages.forEach(page => {
         const slideNumber = Number(page.slideNumber);
@@ -3172,6 +3242,7 @@
         if (String(previous.image || '') !== String(page.image || '')) {
           const visual = pageArticle?.querySelector?.('.page-visual');
           if (visual) visual.innerHTML = renderPageVisual(page);
+          imageChangedSlides.push(slideNumber);
         }
         if (pageArticle) {
           const section = sectionForSlide(page.slideNumber);
@@ -3224,7 +3295,7 @@
         typesetQueue.push(body);
       });
 
-      return typesetQueue;
+      return { typesetQueue, imageChangedSlides };
     }
 
     function renderSectionSelect() {
@@ -3247,9 +3318,17 @@
       if (section) sectionSelect.value = String(Number(section.sectionIndex));
     }
 
+    function suppressReaderObserver(durationMs = VIEWPORT_ANCHOR_MS) {
+      suppressObserverUntil = Math.max(
+        suppressObserverUntil,
+        Date.now() + Math.max(0, Number(durationMs) || 0)
+      );
+    }
+
     function centerPage(slideNumber, behavior = 'smooth') {
       const page = document.getElementById(`page-${Number(slideNumber)}`);
       if (!page) return;
+      suppressReaderObserver();
       const top = page.offsetTop - Math.max(0, (pageRoot.clientHeight - page.offsetHeight) / 2);
       pageRoot.scrollTo({ top, behavior });
     }
@@ -3317,7 +3396,13 @@
       } else {
         scheduleNearbyContent(currentSlideNumber);
       }
-      if (!options.skipSave) saveScrollState();
+      if (!options.skipSave) {
+        if (options.scrollPage) {
+          scheduleProgrammaticScrollStateSave(options.behavior || 'smooth');
+        } else {
+          saveScrollState();
+        }
+      }
     }
 
     function startEditExplanation(slideNumber) {
@@ -3801,6 +3886,10 @@
       return clamp(targetCenter - visibleHeight / 2, 0, boundedMax);
     }
 
+    function shouldRestoreStoredPageScroll(isSameDeckRefresh, storedMatchesTarget) {
+      return Boolean(isSameDeckRefresh && storedMatchesTarget);
+    }
+
     function firstTextNode(root) {
       if (!root || typeof document === 'undefined') return null;
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -4139,7 +4228,12 @@
         lastPositionNotifyKey = '';
         canvasQuestionFocusPending = false;
       }
-      const nextPages = applyCachedPageImages(applyPendingExplanationOverrides(incomingPages));
+      deckId = nextDeckId;
+      const rawNextPages = applyPendingExplanationOverrides(incomingPages);
+      pages = rawNextPages;
+      const stored = readScrollState();
+      const targetSlide = initialReaderTargetSlide(args, stored, isSameDeckRefresh);
+      const nextPages = applyCachedPageImages(rawNextPages, targetSlide);
       const nextStructureSignature = buildReaderStructureSignature(nextDeckId, nextPages, incomingSections);
       const canPatchRenderedReader = Boolean(
         nextDeckId
@@ -4148,7 +4242,6 @@
         && pageRoot.children.length
         && noteRoot.children.length
       );
-      deckId = nextDeckId;
       pages = nextPages;
       sections = incomingSections;
       activeModel = String(args.active_model || '');
@@ -4157,8 +4250,6 @@
       Streamlit.setFrameHeight(height);
       loadLayoutState();
       loadReadingMode();
-      const stored = readScrollState();
-      const targetSlide = initialReaderTargetSlide(args, stored, isSameDeckRefresh);
       const focusSubmittedCanvasQuestion = canvasQuestionFocusPending;
 
       deckTitle.textContent = String(args.title || '学习资料');
@@ -4181,10 +4272,16 @@
       if (canPatchRenderedReader) {
         const previousPageScroll = restoreScrollAfterRender.pageScroll;
         const previousNoteAnchor = restoreScrollAfterRender.noteAnchor;
-        const typesetQueue = patchRenderedReader(previousPages);
-        currentSlideNumber = pageForSlide(currentSlideNumber)
-          ? currentSlideNumber
-          : targetSlide;
+        const { typesetQueue, imageChangedSlides } = patchRenderedReader(previousPages);
+        const previousCurrentSlide = currentSlideNumber;
+        currentSlideNumber = pageForSlide(targetSlide)
+          ? targetSlide
+          : previousCurrentSlide;
+        const shouldRecenterPatchedImage = shouldRecenterAfterActiveImagePatch(
+          imageChangedSlides,
+          currentSlideNumber,
+          Number(previousCurrentSlide) === Number(currentSlideNumber)
+        );
         updatePageJumpDisplay();
         updateSectionSelect(currentSlideNumber);
         renderChatForPage(currentSlideNumber, {
@@ -4193,14 +4290,28 @@
         if (focusSubmittedCanvasQuestion) canvasQuestionFocusPending = false;
         updateBookmarkControls();
         ensureNearbyContent(currentSlideNumber);
-        pageRoot.scrollTop = previousPageScroll;
-        restoreNoteAnchor(previousNoteAnchor);
+        if (shouldRecenterPatchedImage) {
+          centerPageAfterImageSettles(currentSlideNumber, 'auto');
+          restoreNoteAnchor(previousNoteAnchor);
+        } else if (Number(previousCurrentSlide) === Number(currentSlideNumber)) {
+          pageRoot.scrollTop = previousPageScroll;
+          restoreNoteAnchor(previousNoteAnchor);
+        } else {
+          centerPage(currentSlideNumber, 'auto');
+          noteRoot.scrollTop = 0;
+        }
         if (typesetQueue.length) {
           typesetTargets(typesetQueue).then(typesetDone => {
             if (typesetDone !== false) applyMarkdownSourceMapsForBodies(typesetQueue);
           }).finally(() => {
-            pageRoot.scrollTop = previousPageScroll;
-            restoreNoteAnchor(previousNoteAnchor);
+            if (shouldRecenterPatchedImage) {
+              centerPageAfterImageSettles(currentSlideNumber, 'auto');
+            } else if (Number(previousCurrentSlide) === Number(currentSlideNumber)) {
+              pageRoot.scrollTop = previousPageScroll;
+              restoreNoteAnchor(previousNoteAnchor);
+            } else {
+              centerPage(currentSlideNumber, 'auto');
+            }
           });
         }
         return;
@@ -4282,10 +4393,10 @@
       }
       window.setTimeout(() => {
         const storedMatchesTarget = Boolean(stored && Number(stored.currentSlide || 0) === Number(targetSlide));
-        if (readingMode === 'paged' || !storedMatchesTarget) {
-          centerPage(targetSlide, 'auto');
-        } else {
+        if (shouldRestoreStoredPageScroll(isSameDeckRefresh, storedMatchesTarget)) {
           pageRoot.scrollTop = stored.pageScroll || 0;
+        } else {
+          centerPageAfterImageSettles(targetSlide, 'auto');
         }
         if (isSameDeckRefresh) {
           restoreNoteAnchor(restoreScrollAfterRender.noteAnchor);

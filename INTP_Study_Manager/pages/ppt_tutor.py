@@ -78,7 +78,8 @@ SYNCED_READER_COMPONENT = None
 READER_IMAGE_WINDOW_RADIUS = 3
 READER_IMAGE_PREFETCH_RADIUS = 5
 READER_IMAGE_WINDOW_MAX_RADIUS = 8
-READER_IMAGE_CACHE_MAX_SLIDES = 36
+READER_IMAGE_CACHE_MAX_SLIDES = 13
+READER_IMAGE_DATA_URI_CACHE_MAX_SLIDES = READER_IMAGE_CACHE_MAX_SLIDES * 2
 PPT_GENERATION_DEFAULT_PARALLELISM = parallel_benchmark.DEFAULT_PARALLELISM
 PPT_PARALLEL_BENCHMARK_MAX_PARALLELISM = parallel_benchmark.DEFAULT_MAX_PARALLELISM
 PPT_INLINE_BENCHMARK_MIN_SLIDES = parallel_benchmark.INLINE_BENCHMARK_MIN_SAMPLES
@@ -800,7 +801,13 @@ def _render_synced_reader(
     st.subheader("同步阅读器")
     st.caption("提示：右侧固定插问栏会绑定当前页。你可以直接提问，或选中讲解文字后引用到插问。")
     initial_slide_number = _initial_reader_slide_number(int(deck["id"]), slides, last_position)
-    active_slide_number = _reader_active_slide_number(int(deck["id"]), slides, initial_slide_number)
+    active_state_key = _reader_active_slide_state_key(int(deck["id"]))
+    session_active_slide = st.session_state.get(active_state_key)
+    active_slide_number = (
+        initial_slide_number
+        if session_active_slide is None
+        else _reader_active_slide_number(int(deck["id"]), slides, initial_slide_number)
+    )
     _remember_reader_image_window(int(deck["id"]), slides, active_slide_number)
     image_slide_numbers = _reader_cached_image_slide_numbers(int(deck["id"]), slides)
     active_slide_ids = [
@@ -4055,7 +4062,7 @@ def _image_data_uri(path: Path) -> str:
     return _cached_image_data_uri(str(path), stat.st_mtime_ns, stat.st_size, mime)
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=READER_IMAGE_DATA_URI_CACHE_MAX_SLIDES)
 def _cached_image_data_uri(path_text: str, mtime_ns: int, size: int, mime: str) -> str:
     del mtime_ns, size
     encoded = base64.b64encode(Path(path_text).read_bytes()).decode("ascii")

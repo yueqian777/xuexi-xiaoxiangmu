@@ -112,6 +112,9 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "quoteLocationForCentering",
             "searchLocationForRawLocation",
             "centeredScrollTopForElement",
+            "shouldRestoreStoredPageScroll",
+            "suppressReaderObserver",
+            "scheduleProgrammaticScrollStateSave",
             "questionIdForItem",
             "removeMarkdownHighlight",
             "wrapMarkdownSelection",
@@ -469,6 +472,62 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             const clampedEnd = centeredScrollTopForElement(400, 1500, 80, 1200);
             if (clampedEnd !== 1200) {
               throw new Error(String(clampedEnd));
+            }
+            """
+        )
+
+    def test_page_scroll_restores_only_during_same_deck_refresh(self):
+        self.run_js(
+            r"""
+            if (shouldRestoreStoredPageScroll(false, true) !== false) {
+              throw new Error('first entry must center the target slide');
+            }
+            if (shouldRestoreStoredPageScroll(true, true) !== true) {
+              throw new Error('same deck refresh should preserve reading position');
+            }
+            if (shouldRestoreStoredPageScroll(true, false) !== false) {
+              throw new Error('target mismatch should not restore stale scroll');
+            }
+            """
+        )
+
+    def test_suppress_reader_observer_extends_existing_window(self):
+        self.run_js(
+            r"""
+            const originalNow = Date.now;
+            const VIEWPORT_ANCHOR_MS = 1400;
+            let suppressObserverUntil = 5000;
+            Date.now = () => 1000;
+            suppressReaderObserver(200);
+            if (suppressObserverUntil !== 5000) {
+              throw new Error(String(suppressObserverUntil));
+            }
+            suppressReaderObserver(7000);
+            if (suppressObserverUntil !== 8000) {
+              throw new Error(String(suppressObserverUntil));
+            }
+            Date.now = originalNow;
+            """
+        )
+
+    def test_programmatic_scroll_save_delays_smooth_scroll_position(self):
+        self.run_js(
+            r"""
+            let currentSlideSaved = false;
+            let scheduledDelay = null;
+            function saveCurrentSlideState() { currentSlideSaved = true; }
+            function scheduleScrollStateSave(delayMs) { scheduledDelay = delayMs; }
+
+            scheduleProgrammaticScrollStateSave('smooth');
+            if (!currentSlideSaved || scheduledDelay < 600) {
+              throw new Error(JSON.stringify({ currentSlideSaved, scheduledDelay }));
+            }
+
+            currentSlideSaved = false;
+            scheduledDelay = null;
+            scheduleProgrammaticScrollStateSave('auto');
+            if (!currentSlideSaved || scheduledDelay > 250) {
+              throw new Error(JSON.stringify({ currentSlideSaved, scheduledDelay }));
             }
             """
         )

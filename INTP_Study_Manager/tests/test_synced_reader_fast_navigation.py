@@ -81,9 +81,11 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "pageImageCacheKey",
             "touchPageImageCache",
             "enforcePageImageCacheLimit",
+            "prioritizeImageCacheAroundSlide",
             "pruneExpiredImageRequests",
             "cachedImageForPage",
             "applyCachedPageImages",
+            "shouldRecenterAfterActiveImagePatch",
             "desiredImageWindowSlideNumbers",
             "missingImageWindowSlides",
             "requestImageWindowIfNeeded",
@@ -302,7 +304,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
               { slideNumber: 1, imageAvailable: true, image: 'data:image/png;base64,one' },
               { slideNumber: 2, imageAvailable: true, image: 'data:image/png;base64,two' },
               { slideNumber: 3, imageAvailable: true, image: 'data:image/png;base64,three' },
-            ]);
+            ], 3);
 
             if (pageImageCache.size !== 2) {
               throw new Error(`expected bounded cache, got ${pageImageCache.size}`);
@@ -315,9 +317,36 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
               { slideNumber: 1, imageAvailable: true, image: '' },
               { slideNumber: 2, imageAvailable: true, image: '' },
               { slideNumber: 3, imageAvailable: true, image: '' },
-            ]);
+            ], 3);
             if (second[0].image !== '' || second[1].image === '' || second[2].image === '') {
               throw new Error(JSON.stringify(second.map(page => page.image)));
+            }
+            """
+        )
+
+    def test_page_image_cache_preserves_target_window_images(self):
+        self.run_js(
+            r"""
+            let deckId = 9;
+            const pageImageCache = new Map();
+            const pendingImageRequests = new Map();
+            const PAGE_IMAGE_CACHE_MAX_SLIDES = 3;
+
+            const pages = [1, 2, 3, 4, 5].map(slideNumber => ({
+              slideNumber,
+              imageAvailable: true,
+              image: `data:image/png;base64,${slideNumber}`,
+            }));
+
+            const first = applyCachedPageImages(pages, 3);
+            if (first[1].image === '' || first[2].image === '' || first[3].image === '') {
+              throw new Error(JSON.stringify(first.map(page => page.image)));
+            }
+            if (first[0].image !== '' || first[4].image !== '') {
+              throw new Error(JSON.stringify(first.map(page => page.image)));
+            }
+            if ([...pageImageCache.keys()].join(',') !== '9:2,9:3,9:4') {
+              throw new Error([...pageImageCache.keys()].join(','));
             }
             """
         )
@@ -373,6 +402,21 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             }
             if (missingImageWindowSlides(5).length !== 0) {
               throw new Error('pending slides were requested again');
+            }
+            """
+        )
+
+    def test_active_image_patch_recenters_same_slide_only(self):
+        self.run_js(
+            r"""
+            if (!shouldRecenterAfterActiveImagePatch([3], 3, true)) {
+              throw new Error('active patched image should recenter after load');
+            }
+            if (shouldRecenterAfterActiveImagePatch([2], 3, true)) {
+              throw new Error('other slide image patch should not move reader');
+            }
+            if (shouldRecenterAfterActiveImagePatch([3], 3, false)) {
+              throw new Error('slide change already has explicit centering');
             }
             """
         )

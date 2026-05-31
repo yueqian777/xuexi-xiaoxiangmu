@@ -171,6 +171,44 @@ class PptReaderPositionTest(unittest.TestCase):
         self.assertLessEqual(len(cached), ppt_tutor.READER_IMAGE_CACHE_MAX_SLIDES)
         self.assertTrue(all(not str(value).startswith("data:image") for value in cached.values()))
 
+    def test_reader_image_cache_budget_stays_near_prefetch_window(self):
+        self.assertLessEqual(ppt_tutor.READER_IMAGE_CACHE_MAX_SLIDES, 13)
+        self.assertGreaterEqual(
+            ppt_tutor.READER_IMAGE_CACHE_MAX_SLIDES,
+            (ppt_tutor.READER_IMAGE_PREFETCH_RADIUS * 2) + 1,
+        )
+
+    def test_reader_data_uri_cache_stays_bounded_to_reader_window(self):
+        self.assertLessEqual(
+            ppt_tutor.READER_IMAGE_DATA_URI_CACHE_MAX_SLIDES,
+            ppt_tutor.READER_IMAGE_CACHE_MAX_SLIDES * 2,
+        )
+        self.assertEqual(
+            ppt_tutor._cached_image_data_uri.cache_info().maxsize,
+            ppt_tutor.READER_IMAGE_DATA_URI_CACHE_MAX_SLIDES,
+        )
+
+    def test_reader_first_payload_image_window_uses_remembered_slide_without_session_state(self):
+        deck = {"id": 3, "title": "Deck", "subject": "Subject", "user_id": 42}
+        slides = [{"id": number, "slide_number": number} for number in range(1, 8)]
+        with (
+            patch.object(ppt_tutor.st, "session_state", {}),
+            patch.object(ppt_tutor, "_remember_reader_image_window") as remember_window,
+            patch.object(ppt_tutor, "_reader_cached_image_slide_numbers", return_value={3}),
+            patch.object(ppt_tutor, "_questions_by_slide_ids", return_value={}),
+            patch.object(ppt_tutor, "_build_reader_payload", return_value=[]),
+            patch.object(ppt_tutor, "_get_synced_reader_component", return_value=None),
+        ):
+            ppt_tutor._render_synced_reader(
+                deck,
+                slides,
+                {},
+                {"deck_id": 3, "slide_number": 3},
+                [],
+            )
+
+        remember_window.assert_called_once_with(3, slides, 3)
+
     def test_auto_refresh_running_generation_skips_unchanged_recent_task(self):
         session_state = {
             ppt_tutor.PPT_GENERATION_REFRESH_STATE_KEY: {
