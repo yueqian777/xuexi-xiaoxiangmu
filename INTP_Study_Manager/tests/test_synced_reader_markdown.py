@@ -601,6 +601,8 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             }
             function ensureNearbyContent(slideNumber) { nearbySlide = Number(slideNumber); }
             function scheduleNearbyContent(slideNumber) { nearbySlide = Number(slideNumber); }
+            function updateRenderedPageImageWindow() {}
+            function syncActivePageDom() {}
             function centerPage() {}
             function saveScrollState() {}
 

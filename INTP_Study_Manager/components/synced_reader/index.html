@@ -576,7 +576,9 @@
       align-items: center;
       justify-content: center;
       width: 100%;
+      aspect-ratio: 4 / 3;
       min-height: 220px;
+      box-sizing: border-box;
       border: 1px dashed #b9dde6;
       border-radius: 8px;
       background: #f8fffd;
@@ -1495,6 +1497,7 @@
     const IMAGE_WINDOW_NOTIFY_IDLE_MS = 160;
     const IMAGE_WINDOW_PENDING_TTL_MS = 6000;
     const PAGE_IMAGE_CACHE_MAX_SLIDES = 13;
+    const PAGE_IMAGE_RENDER_RADIUS = 2;
     const CHAT_BOTTOM_THRESHOLD = 56;
 
     function escapeHtml(value) {
@@ -2807,12 +2810,47 @@
       });
     }
 
-    function renderPageVisual(page) {
-      if (page.image) {
+    function shouldRenderPageImage(page, centerSlideNumber = currentSlideNumber) {
+      return Boolean(
+        page?.image
+        && pageIndexDistance(Number(page.slideNumber), Number(centerSlideNumber || currentSlideNumber || 1)) <= PAGE_IMAGE_RENDER_RADIUS
+      );
+    }
+
+    function pageVisualRenderKey(page, centerSlideNumber = currentSlideNumber) {
+      if (shouldRenderPageImage(page, centerSlideNumber)) {
+        const image = String(page.image || '');
+        return `image:${pageImageCacheKey(page.slideNumber)}:${image.length}:${image.slice(0, 32)}:${image.slice(-32)}`;
+      }
+      return `placeholder:${page.imageAvailable ? 'loading' : 'missing'}`;
+    }
+
+    function renderPageVisual(page, centerSlideNumber = currentSlideNumber) {
+      if (shouldRenderPageImage(page, centerSlideNumber)) {
         return `<img src="${page.image}" alt="第 ${page.slideNumber} 页原页面" loading="lazy" />`;
       }
       const text = page.imageAvailable ? '原页面按需加载中' : '暂无原页面图片';
       return `<div class="page-placeholder">${escapeHtml(text)}</div>`;
+    }
+
+    function syncActivePageDom(slideNumber) {
+      const targetSlide = Number(slideNumber || currentSlideNumber || 1);
+      document.querySelectorAll('.page.active,.note.active').forEach(el => el.classList.remove('active'));
+      document.getElementById(`page-${targetSlide}`)?.classList.add('active');
+      document.getElementById(`note-${targetSlide}`)?.classList.add('active');
+    }
+
+    function updateRenderedPageImageWindow(centerSlideNumber = currentSlideNumber) {
+      const center = Number(centerSlideNumber || currentSlideNumber || 1);
+      pages.forEach(page => {
+        const pageArticle = document.getElementById(`page-${Number(page.slideNumber)}`);
+        const visual = pageArticle?.querySelector?.('.page-visual');
+        if (!visual) return;
+        const nextKey = pageVisualRenderKey(page, center);
+        if (visual.dataset.renderKey === nextKey) return;
+        visual.innerHTML = renderPageVisual(page, center);
+        visual.dataset.renderKey = nextKey;
+      });
     }
 
     function shouldRecenterAfterActiveImagePatch(imageChangedSlides, slideNumber, wasSameSlide) {
@@ -2827,22 +2865,29 @@
       const targetSlide = Number(slideNumber || 0);
       const page = document.getElementById(`page-${targetSlide}`);
       const image = page?.querySelector?.('.page-visual img');
+      const settledBehavior = readingMode === 'paged' ? 'auto' : behavior;
       const recenter = () => {
         if (Number(currentSlideNumber) === targetSlide) {
-          window.requestAnimationFrame(() => centerPage(targetSlide, behavior));
+          window.requestAnimationFrame(() => {
+            centerPage(targetSlide, settledBehavior);
+            window.requestAnimationFrame(() => centerPage(targetSlide, 'auto'));
+          });
         }
       };
       if (!image) {
         recenter();
+        window.setTimeout(recenter, 120);
         return;
       }
       if (image.complete && Number(image.naturalHeight || 0) > 0) {
         recenter();
+        window.setTimeout(recenter, 120);
         return;
       }
       image.addEventListener('load', recenter, { once: true });
       image.addEventListener('error', recenter, { once: true });
       window.setTimeout(recenter, 240);
+      window.setTimeout(recenter, 520);
     }
 
     function renderNoteBody(page, hydrate = false) {
@@ -3240,8 +3285,6 @@
         const pageArticle = document.getElementById(`page-${slideNumber}`);
 
         if (String(previous.image || '') !== String(page.image || '')) {
-          const visual = pageArticle?.querySelector?.('.page-visual');
-          if (visual) visual.innerHTML = renderPageVisual(page);
           imageChangedSlides.push(slideNumber);
         }
         if (pageArticle) {
@@ -3295,6 +3338,7 @@
         typesetQueue.push(body);
       });
 
+      updateRenderedPageImageWindow(currentSlideNumber);
       return { typesetQueue, imageChangedSlides };
     }
 
@@ -3329,7 +3373,18 @@
       const page = document.getElementById(`page-${Number(slideNumber)}`);
       if (!page) return;
       suppressReaderObserver();
-      const top = page.offsetTop - Math.max(0, (pageRoot.clientHeight - page.offsetHeight) / 2);
+      const maxTop = Math.max(0, pageRoot.scrollHeight - pageRoot.clientHeight);
+      const rootRect = pageRoot.getBoundingClientRect();
+      const pageRect = page.getBoundingClientRect();
+      const targetTop = pageRect.top - rootRect.top + pageRoot.scrollTop;
+      const top = centeredScrollTopForElement(pageRoot.clientHeight, targetTop, pageRect.height || page.offsetHeight, maxTop);
+      if (readingMode === 'paged') {
+        const previousScrollBehavior = pageRoot.style.scrollBehavior;
+        pageRoot.style.scrollBehavior = 'auto';
+        pageRoot.scrollTop = top;
+        pageRoot.style.scrollBehavior = previousScrollBehavior;
+        return;
+      }
       pageRoot.scrollTo({ top, behavior });
     }
 
@@ -3349,6 +3404,12 @@
       options = options || {};
       const nextSlideNumber = Number(pageNumber || 1);
       if (!pageForSlide(nextSlideNumber)) return;
+      if (options.scrollPage) {
+        viewportAnchorState = null;
+        viewportAnchorTimers.forEach(timer => window.clearTimeout(timer));
+        viewportAnchorTimers = [];
+        window.clearTimeout(viewportAnchorReleaseTimer);
+      }
       const sameSlide = nextSlideNumber === currentSlideNumber;
       if (!sameSlide) closeChildLayersForSlideChange();
       const currentPage = document.getElementById(`page-${nextSlideNumber}`);
@@ -3368,12 +3429,10 @@
         return;
       }
       currentSlideNumber = nextSlideNumber;
-      document.querySelectorAll('.page.active,.note.active').forEach(el => el.classList.remove('active'));
+      syncActivePageDom(currentSlideNumber);
       const page = document.getElementById(`page-${currentSlideNumber}`);
       const note = document.getElementById(`note-${currentSlideNumber}`);
-      if (page) page.classList.add('active');
       if (note) {
-        note.classList.add('active');
         const body = note.querySelector?.('.note-body');
         if (body?.dataset?.hydrated !== '1') {
           hydrateNote(currentSlideNumber);
@@ -3387,9 +3446,10 @@
       }
       updatePageJumpDisplay();
       updateSectionSelect(currentSlideNumber);
+      updateRenderedPageImageWindow(currentSlideNumber);
       if (!options.skipChatRender) renderChatForPage(currentSlideNumber);
       if (options.scrollPage) {
-        centerPage(currentSlideNumber, options.behavior || 'smooth');
+        centerPageAfterImageSettles(currentSlideNumber, options.behavior || 'smooth');
       }
       if (options.immediateNearbyContent) {
         ensureNearbyContent(currentSlideNumber);
@@ -4272,11 +4332,12 @@
       if (canPatchRenderedReader) {
         const previousPageScroll = restoreScrollAfterRender.pageScroll;
         const previousNoteAnchor = restoreScrollAfterRender.noteAnchor;
-        const { typesetQueue, imageChangedSlides } = patchRenderedReader(previousPages);
         const previousCurrentSlide = currentSlideNumber;
         currentSlideNumber = pageForSlide(targetSlide)
           ? targetSlide
           : previousCurrentSlide;
+        const { typesetQueue, imageChangedSlides } = patchRenderedReader(previousPages);
+        syncActivePageDom(currentSlideNumber);
         const shouldRecenterPatchedImage = shouldRecenterAfterActiveImagePatch(
           imageChangedSlides,
           currentSlideNumber,
@@ -4297,7 +4358,7 @@
           pageRoot.scrollTop = previousPageScroll;
           restoreNoteAnchor(previousNoteAnchor);
         } else {
-          centerPage(currentSlideNumber, 'auto');
+          centerPageAfterImageSettles(currentSlideNumber, 'auto');
           noteRoot.scrollTop = 0;
         }
         if (typesetQueue.length) {
@@ -4310,7 +4371,7 @@
               pageRoot.scrollTop = previousPageScroll;
               restoreNoteAnchor(previousNoteAnchor);
             } else {
-              centerPage(currentSlideNumber, 'auto');
+              centerPageAfterImageSettles(currentSlideNumber, 'auto');
             }
           });
         }
@@ -4340,8 +4401,8 @@
               <span>${escapeHtml(page.title)}</span>
               ${pageMeta ? `<span>${escapeHtml(pageMeta)}</span>` : ''}
             </div>
-            <div class="page-visual">
-              ${renderPageVisual(page)}
+            <div class="page-visual" data-render-key="${escapeHtml(pageVisualRenderKey(page, targetSlide))}">
+              ${renderPageVisual(page, targetSlide)}
             </div>
           </article>
         `;

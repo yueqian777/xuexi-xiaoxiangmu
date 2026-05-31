@@ -71,11 +71,15 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             raise unittest.SkipTest("Node.js is not available for synced-reader JS tests")
         cls.source = READER_HTML.read_text(encoding="utf-8")
         helper_names = [
+            "escapeHtml",
             "storageKey",
             "connectedTypesetTargets",
             "scheduleMathJaxRetry",
             "flushTypesetQueue",
             "typesetTargets",
+            "pageForSlide",
+            "pageIndexForSlide",
+            "pageIndexDistance",
             "readScrollState",
             "buildReaderStructureSignature",
             "pageImageCacheKey",
@@ -86,6 +90,12 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "cachedImageForPage",
             "applyCachedPageImages",
             "shouldRecenterAfterActiveImagePatch",
+            "centerPageAfterImageSettles",
+            "shouldRenderPageImage",
+            "pageVisualRenderKey",
+            "renderPageVisual",
+            "syncActivePageDom",
+            "updateRenderedPageImageWindow",
             "desiredImageWindowSlideNumbers",
             "missingImageWindowSlides",
             "requestImageWindowIfNeeded",
@@ -420,6 +430,173 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             }
             """
         )
+
+    def test_page_visual_decodes_only_active_render_window(self):
+        self.run_js(
+            r"""
+            const PAGE_IMAGE_RENDER_RADIUS = 2;
+            let deckId = 4;
+            let pages = Array.from({ length: 9 }, (_, index) => ({
+              slideNumber: index + 1,
+              imageAvailable: true,
+              image: `data:image/png;base64,page${index + 1}`,
+            }));
+
+            if (!shouldRenderPageImage(pages[4], 5)) {
+              throw new Error('active page image should render');
+            }
+            if (!shouldRenderPageImage(pages[2], 5) || !shouldRenderPageImage(pages[6], 5)) {
+              throw new Error('nearby images should render');
+            }
+            if (shouldRenderPageImage(pages[1], 5) || shouldRenderPageImage(pages[7], 5)) {
+              throw new Error('far images should stay as placeholders');
+            }
+            if (!renderPageVisual(pages[4], 5).includes('<img')) {
+              throw new Error('active image markup missing');
+            }
+            if (renderPageVisual(pages[1], 5).includes('<img')) {
+              throw new Error('far image should not be decoded into the DOM');
+            }
+            """
+        )
+
+    def test_page_placeholder_preserves_image_aspect_ratio(self):
+        self.assertIn("aspect-ratio: 4 / 3;", self.source)
+
+    def test_update_rendered_page_image_window_evicts_far_dom_images(self):
+        self.run_js(
+            r"""
+            const PAGE_IMAGE_RENDER_RADIUS = 1;
+            let deckId = 4;
+            let currentSlideNumber = 3;
+            let pages = [1, 2, 3, 4, 5].map(number => ({
+              slideNumber: number,
+              imageAvailable: true,
+              image: `data:image/png;base64,page${number}`,
+            }));
+            const visuals = new Map();
+            for (const page of pages) {
+              visuals.set(`page-${page.slideNumber}`, {
+                querySelector(selector) {
+                  return selector === '.page-visual' ? this.visual : null;
+                },
+                visual: {
+                  dataset: {},
+                  innerHTML: '<img src="old" />',
+                },
+              });
+            }
+            var document = {
+              getElementById(id) {
+                return visuals.get(id) || null;
+              },
+            };
+
+            updateRenderedPageImageWindow(3);
+
+            const decoded = pages
+              .filter(page => visuals.get(`page-${page.slideNumber}`).visual.innerHTML.includes('<img'))
+              .map(page => page.slideNumber);
+            if (JSON.stringify(decoded) !== JSON.stringify([2, 3, 4])) {
+              throw new Error(JSON.stringify(decoded));
+            }
+            if (visuals.get('page-1').visual.innerHTML.includes('<img') || visuals.get('page-5').visual.innerHTML.includes('<img')) {
+              throw new Error('far DOM images were not evicted');
+            }
+            """
+        )
+
+    def test_page_visual_render_key_changes_for_same_length_image_content(self):
+        self.run_js(
+            r"""
+            const PAGE_IMAGE_RENDER_RADIUS = 2;
+            let deckId = 4;
+            let currentSlideNumber = 1;
+            let pages = [];
+            const first = {
+              slideNumber: 1,
+              imageAvailable: true,
+              image: 'data:image/png;base64,AAAABBBBCCCC',
+            };
+            const second = {
+              slideNumber: 1,
+              imageAvailable: true,
+              image: 'data:image/png;base64,ZZZZYYYYXXXX',
+            };
+            pages = [first];
+            if (first.image.length !== second.image.length) {
+              throw new Error('test data must keep equal length');
+            }
+            if (pageVisualRenderKey(first, 1) === pageVisualRenderKey(second, 1)) {
+              throw new Error('same-length image content must not reuse DOM render key');
+            }
+            """
+        )
+
+    def test_sync_active_page_dom_moves_active_classes_after_patch_target_change(self):
+        self.run_js(
+            r"""
+            const elements = new Map();
+            function makeElement(id) {
+              const classes = new Set(['active']);
+              const element = {
+                id,
+                classList: {
+                  add(value) { classes.add(value); },
+                  remove(value) { classes.delete(value); },
+                  contains(value) { return classes.has(value); },
+                },
+              };
+              elements.set(id, element);
+              return element;
+            }
+            makeElement('page-1');
+            makeElement('note-1');
+            makeElement('page-5').classList.remove('active');
+            makeElement('note-5').classList.remove('active');
+            var document = {
+              querySelectorAll(selector) {
+                if (selector !== '.page.active,.note.active') return [];
+                return Array.from(elements.values()).filter(element => element.classList.contains('active'));
+              },
+              getElementById(id) {
+                return elements.get(id) || null;
+              },
+            };
+
+            syncActivePageDom(5);
+
+            if (elements.get('page-1').classList.contains('active') || elements.get('note-1').classList.contains('active')) {
+              throw new Error('old active classes remained');
+            }
+            if (!elements.get('page-5').classList.contains('active') || !elements.get('note-5').classList.contains('active')) {
+              throw new Error('target active classes missing');
+            }
+            """
+        )
+
+    def test_scroll_page_activation_waits_for_image_settle(self):
+        self.assertIn(
+            "centerPageAfterImageSettles(currentSlideNumber, options.behavior || 'smooth');",
+            self.source,
+        )
+        self.assertIn("const settledBehavior = readingMode === 'paged' ? 'auto' : behavior;", self.source)
+        self.assertIn("viewportAnchorState = null;", self.source)
+
+    def test_patch_refresh_sets_target_before_image_window_update(self):
+        self.assertIn(
+            "currentSlideNumber = pageForSlide(targetSlide)\n          ? targetSlide\n          : previousCurrentSlide;\n        const { typesetQueue, imageChangedSlides } = patchRenderedReader(previousPages);",
+            self.source,
+        )
+        self.assertIn("syncActivePageDom(currentSlideNumber);", self.source)
+
+    def test_center_page_uses_clamped_center_calculation(self):
+        self.assertIn(
+            "const targetTop = pageRect.top - rootRect.top + pageRoot.scrollTop;",
+            self.source,
+        )
+        self.assertIn("centeredScrollTopForElement(pageRoot.clientHeight, targetTop", self.source)
+        self.assertIn("pageRoot.style.scrollBehavior = 'auto';", self.source)
 
     def test_resize_handles_have_wide_hit_area_and_hover_cursor(self):
         self.assertIn(
