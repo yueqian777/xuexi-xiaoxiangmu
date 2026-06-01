@@ -3505,6 +3505,7 @@ def _build_reader_payload(
                 "image": image_data,
                 "imageAvailable": image_available,
                 "explanation": latest["explanation"] if latest else "本页还没有 AI 讲解。",
+                "hasExplanation": bool(latest),
                 "slideText": slide_text,
                 "model": latest["model"] if latest else "",
                 "createdAt": latest["created_at"] if latest else "",

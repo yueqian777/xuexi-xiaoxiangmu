@@ -322,6 +322,7 @@ class PptCanvasQuestionTest(unittest.TestCase):
         result = ppt_tutor._build_reader_payload(slides, {}, {}, image_slide_numbers=set())
 
         self.assertEqual(result[0]["explanation"], "本页还没有 AI 讲解。")
+        self.assertFalse(result[0]["hasExplanation"])
         self.assertIn(r"$\int_0^1 x dx$", result[0]["slideText"])
         self.assertNotIn("...", result[0]["slideText"])
 

@@ -3095,9 +3095,10 @@
     function noteDisplayMarkdown(page) {
       const explanation = String(page?.explanation || '').trim();
       const slideText = String(page?.slideText || page?.slide_text || '').trim();
+      if (page?.hasExplanation === true && explanation) return explanation;
       if (!slideText) return explanation;
       const sourceSection = `### PPT/PDF 识别文字\n\n${slideText}`;
-      return explanation ? `${explanation}\n\n---\n\n${sourceSection}` : sourceSection;
+      return sourceSection;
     }
 
     function renderNoteBody(page, hydrate = false) {
@@ -3418,9 +3419,9 @@
         }
         if (String(page.explanation || '') === pending.explanation) {
           pendingExplanationSaves.delete(slideNumber);
-          return page;
+          return { ...page, hasExplanation: true };
         }
-        return { ...page, explanation: pending.explanation };
+        return { ...page, explanation: pending.explanation, hasExplanation: true };
       });
     }
 
@@ -3450,6 +3451,7 @@
       const previousNoteScroll = noteRoot.scrollTop;
       const previousPageScroll = pageRoot.scrollTop;
       page.explanation = explanation;
+      page.hasExplanation = true;
       body.innerHTML = renderSafeExplanationMarkdown(noteDisplayMarkdown(page));
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
@@ -3537,7 +3539,10 @@
           context.remove();
         }
 
-        if (String(previous.explanation || '') === String(page.explanation || '')) return;
+        if (
+          String(previous.explanation || '') === String(page.explanation || '')
+          && Boolean(previous.hasExplanation) === Boolean(page.hasExplanation)
+        ) return;
         if (note.classList.contains('editing')) return;
 
         const body = note.querySelector('.note-body');

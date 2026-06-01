@@ -98,6 +98,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "renderMarkdown",
             "renderSafeExplanationMarkdown",
             "noteDisplayMarkdown",
+            "applyPendingExplanationOverrides",
             "isGeneratedExplanationPreambleLine",
             "displayExplanationSourceInfo",
             "displayExplanationSource",
@@ -752,14 +753,35 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             """
         )
 
-    def test_note_display_markdown_includes_full_slide_text_after_explanation(self):
+    def test_note_display_markdown_prefers_explanation_over_slide_text(self):
         self.run_js(
             r"""
             const source = noteDisplayMarkdown({
               explanation: 'AI explanation',
+              hasExplanation: true,
               slideText: 'Extracted ' + 'prefix '.repeat(40) + '$$\\Omega _ { p } = 2\\pi f _ { p }$$',
             });
             if (!source.includes('AI explanation')) {
+              throw new Error(source);
+            }
+            if (source.includes('PPT/PDF')) {
+              throw new Error(source);
+            }
+            if (source.includes('$$\\Omega _ { p } = 2\\pi f _ { p }$$')) {
+              throw new Error(source);
+            }
+            """
+        )
+
+    def test_note_display_markdown_uses_slide_text_without_explanation(self):
+        self.run_js(
+            r"""
+            const source = noteDisplayMarkdown({
+              explanation: '本页还没有 AI 讲解。',
+              hasExplanation: false,
+              slideText: 'Extracted ' + 'prefix '.repeat(40) + '$$\\Omega _ { p } = 2\\pi f _ { p }$$',
+            });
+            if (source.includes('本页还没有 AI 讲解。')) {
               throw new Error(source);
             }
             if (!source.includes('PPT/PDF')) {
@@ -769,6 +791,33 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
               throw new Error(source);
             }
             if (source.includes('...')) {
+              throw new Error(source);
+            }
+            """
+        )
+
+    def test_pending_explanation_override_marks_page_as_explained(self):
+        self.run_js(
+            r"""
+            const pendingExplanationSaves = new Map();
+            pendingExplanationSaves.set(3, {
+              explanation: 'AI explanation',
+              startedAt: Date.now(),
+            });
+            const PENDING_SAVE_TTL_MS = 10000;
+
+            const result = applyPendingExplanationOverrides([{
+              slideNumber: 3,
+              explanation: '本页还没有 AI 讲解。',
+              hasExplanation: false,
+              slideText: 'Extracted OCR text',
+            }]);
+
+            if (result[0].hasExplanation !== true) {
+              throw new Error(JSON.stringify(result[0]));
+            }
+            const source = noteDisplayMarkdown(result[0]);
+            if (source !== 'AI explanation') {
               throw new Error(source);
             }
             """
