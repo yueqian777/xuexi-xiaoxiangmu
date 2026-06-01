@@ -83,6 +83,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "findDollarRun",
             "mathLineEnd",
             "looksLikeLatexSource",
+            "repairSplitLeftRightMathSegments",
             "normalizeDollarMathDelimiters",
             "normalizeMathDelimiters",
             "findMathSegmentAt",
@@ -728,6 +729,24 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
               throw new Error(rendered);
             }
             if (rendered.includes('$$$$') || rendered.includes('MATHJAXPLACEHOLDER')) {
+              throw new Error(rendered);
+            }
+            """
+        )
+
+    def test_render_markdown_repairs_split_left_right_math_delimiters(self):
+        self.run_js(
+            r"""
+            global.window = {};
+
+            const rendered = renderMarkdown('Stored formula ==$\\left$| z $\\right$| < 1== after.');
+            if (!rendered.includes('\\(\\left| z \\right|\\)')) {
+              throw new Error(rendered);
+            }
+            if (rendered.includes('$\\left$') || rendered.includes('$\\right$')) {
+              throw new Error(rendered);
+            }
+            if (rendered.includes('MATHJAXPLACEHOLDER')) {
               throw new Error(rendered);
             }
             """

@@ -287,6 +287,24 @@ class PptCanvasQuestionTest(unittest.TestCase):
             result[0]["slideText"],
         )
 
+    def test_build_reader_payload_repairs_stored_mineru_left_right_fragments(self):
+        slides = [
+            {
+                "id": 9,
+                "slide_number": 2,
+                "title": "Signals",
+                "slide_text": r"stable $\left$| z $\right$| < 1",
+                "notes": "source=pdf;extractor=mineru",
+                "image_path": "",
+            }
+        ]
+
+        result = ppt_tutor._build_reader_payload(slides, {}, {}, image_slide_numbers=set())
+
+        self.assertIn(r"$\left| z \right|$", result[0]["slideText"])
+        self.assertNotIn(r"$\left$", result[0]["slideText"])
+        self.assertNotIn(r"$\right$", result[0]["slideText"])
+
     def test_build_reader_payload_keeps_full_mineru_text_separate_from_explanation(self):
         long_prefix = "prefix " * 40
         formula = r"\int_0^1 x dx"

@@ -151,6 +151,10 @@ class PdfExtractionServiceTest(unittest.TestCase):
             normalize_mineru_math_text(r"Known $x$ and bare \Omega _ { p }"),
             r"Known $x$ and bare $\Omega _ { p }$",
         )
+        self.assertEqual(
+            normalize_mineru_math_text(r"stored $\left$| z $\right$| value"),
+            r"stored $\left| z \right|$ value",
+        )
 
     def test_parse_mineru_content_list_normalizes_repeated_and_unclosed_formula_delimiters(self):
         content = [
@@ -244,6 +248,35 @@ class PdfExtractionServiceTest(unittest.TestCase):
             pages[0]["slide_text"],
             r"$$\omega _ { p } = \Omega _ { p } / T$$",
         )
+
+    def test_parse_mineru_content_list_v2_preserves_left_right_delimiters(self):
+        content = [
+            [
+                {
+                    "type": "paragraph",
+                    "content": {
+                        "paragraph_content": (
+                            r"where \left| H ( e ^ { j \Omega } ) \right| = 1"
+                        )
+                    },
+                },
+                {
+                    "type": "paragraph",
+                    "content": {
+                        "paragraph_content": (
+                            r"\Omega _ { s t } \leq \left| \Omega \right| \leq \pi"
+                        )
+                    },
+                },
+            ]
+        ]
+        pages = parse_mineru_content_list(content)
+
+        text = pages[0]["slide_text"]
+        self.assertIn(r"\left| H ( e ^ { j \Omega } ) \right|", text)
+        self.assertIn(r"$$\Omega _ { s t } \leq \left| \Omega \right| \leq \pi$$", text)
+        self.assertNotIn(r"$\left$", text)
+        self.assertNotIn(r"$\right$", text)
 
     def test_parse_mineru_content_list_v2_imports_page_header_and_footer(self):
         content = [

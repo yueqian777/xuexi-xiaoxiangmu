@@ -1657,6 +1657,26 @@
         || /[=<>]/.test(source);
     }
 
+    function repairSplitLeftRightMathSegments(value) {
+      const source = String(value ?? '');
+      if (!source.includes('\\left') && !source.includes('\\right')) return source;
+      const delimiterPattern = String.raw`(?:[|.()[\]{}<>/]|\\[{}|()[\]]|\\(?:backslash|downarrow|Downarrow|langle|lbrace|lceil|lfloor|lvert|rangle|rbrace|rceil|rfloor|rvert|uparrow|Uparrow|updownarrow|Updownarrow|vert|Vert))`;
+      const pairPattern = new RegExp(
+        String.raw`\$(\\left\.?)\$(${delimiterPattern})?([\s\S]*?)\$(\\right\.?)\$(${delimiterPattern})?`,
+        'g'
+      );
+      const stripNestedMath = body => String(body ?? '').replace(/\${1,2}([^$]+?)\${1,2}/g, '$1');
+      const repairedPairs = source.replace(
+        pairPattern,
+        (_match, leftCommand, leftDelimiter = '', body = '', rightCommand, rightDelimiter = '') => {
+          const left = leftCommand.endsWith('.') ? leftCommand : `${leftCommand}${leftDelimiter || '.'}`;
+          const right = rightCommand.endsWith('.') ? rightCommand : `${rightCommand}${rightDelimiter || '.'}`;
+          return `$${left}${stripNestedMath(body)}${right}$`;
+        }
+      );
+      return repairedPairs.replace(/\$(\\(?:left|right)\.?)\$/g, '$1');
+    }
+
     function normalizeDollarMathDelimiters(source) {
       let output = '';
       let index = 0;
@@ -1700,7 +1720,9 @@
     }
 
     function normalizeMathDelimiters(value) {
-      return normalizeDollarMathDelimiters(String(value ?? '').replace(/\\\\([()[\]])/g, '\\$1'));
+      return normalizeDollarMathDelimiters(
+        repairSplitLeftRightMathSegments(String(value ?? '').replace(/\\\\([()[\]])/g, '\\$1'))
+      );
     }
 
     function findMathSegmentAt(source, index) {

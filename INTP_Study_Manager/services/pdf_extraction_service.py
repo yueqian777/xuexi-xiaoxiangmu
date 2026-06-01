@@ -600,13 +600,73 @@ _LATEX_INLINE_SEGMENT_PATTERN = re.compile(
     r"(?:\s*(?:[_^]\s*\{[^{}]*\}|[_^]\s*[A-Za-z0-9]+|\{[^{}]*\}|[=+\-*/(),.\[\]A-Za-z0-9])+)*"
 )
 _LATEX_SYMBOL_PATTERN = re.compile(r"(?:\\[A-Za-z]+|[_^]\s*\{|[=<>])")
+_LEFT_RIGHT_SINGLE_CHAR_DELIMITERS = set("|.()[]{}<>/")
+_LEFT_RIGHT_NAMED_DELIMITERS = {
+    r"\backslash",
+    r"\downarrow",
+    r"\Downarrow",
+    r"\langle",
+    r"\lbrace",
+    r"\lceil",
+    r"\lfloor",
+    r"\lvert",
+    r"\rangle",
+    r"\rbrace",
+    r"\rceil",
+    r"\rfloor",
+    r"\rvert",
+    r"\uparrow",
+    r"\Uparrow",
+    r"\updownarrow",
+    r"\Updownarrow",
+    r"\vert",
+    r"\Vert",
+}
+_LEFT_RIGHT_DELIMITER_PATTERN = (
+    r"(?:[|.()\[\]{}<>/]"
+    r"|\\[{}|()\[\]]"
+    r"|\\(?:backslash|downarrow|Downarrow|langle|lbrace|lceil|lfloor|lvert|"
+    r"rangle|rbrace|rceil|rfloor|rvert|uparrow|Uparrow|updownarrow|Updownarrow|vert|Vert))"
+)
+_SPLIT_LEFT_RIGHT_MATH_PATTERN = re.compile(
+    rf"\$(\\left\.?)\$({_LEFT_RIGHT_DELIMITER_PATTERN})?(.*?)"
+    rf"\$(\\right\.?)\$({_LEFT_RIGHT_DELIMITER_PATTERN})?",
+    flags=re.S,
+)
+_SPLIT_LEFT_RIGHT_TOKEN_PATTERN = re.compile(r"\$(\\(?:left|right)\.?)\$")
 
 
 def normalize_mineru_math_text(value: str) -> str:
-    text = value.strip()
+    text = _repair_split_left_right_math(value.strip())
     if not text:
         return text
     return _normalize_latex_outside_existing_math(text)
+
+
+def _repair_split_left_right_math(text: str) -> str:
+    if r"\left" not in text and r"\right" not in text:
+        return text
+
+    def replace_pair(match: re.Match[str]) -> str:
+        left_command = match.group(1)
+        left_delimiter = match.group(2) or ""
+        body = _strip_math_delimiters_inside_left_right(match.group(3) or "")
+        right_command = match.group(4)
+        right_delimiter = match.group(5) or ""
+        left = left_command if left_command.endswith(".") else left_command + (left_delimiter or ".")
+        right = right_command if right_command.endswith(".") else right_command + (right_delimiter or ".")
+        return _mathjax_inline_formula(f"{left}{body}{right}")
+
+    repaired = _SPLIT_LEFT_RIGHT_MATH_PATTERN.sub(replace_pair, text)
+    return _SPLIT_LEFT_RIGHT_TOKEN_PATTERN.sub(lambda match: match.group(1), repaired)
+
+
+def _strip_math_delimiters_inside_left_right(text: str) -> str:
+    return re.sub(
+        r"(?<!\\)\${1,2}([^$]+?)(?<!\\)\${1,2}",
+        lambda match: match.group(1),
+        text,
+    )
 
 
 def _normalize_latex_outside_existing_math(text: str) -> str:
@@ -660,6 +720,7 @@ def _normalized_math_span_at(text: str, index: int) -> tuple[int, str] | None:
 
 
 def _wrap_bare_latex_segments(text: str) -> str:
+    text = _repair_split_left_right_math(text)
     if not _LATEX_COMMAND_PATTERN.search(text):
         return text
     stripped = text.strip()
@@ -667,10 +728,87 @@ def _wrap_bare_latex_segments(text: str) -> str:
         leading = text[: len(text) - len(text.lstrip())]
         trailing = text[len(text.rstrip()) :]
         return f"{leading}{_mathjax_display_formula(stripped)}{trailing}"
+    return _wrap_inline_latex_segments(text)
+
+
+def _wrap_inline_latex_segments(text: str) -> str:
+    output: list[str] = []
+    index = 0
+    plain_start = 0
+    while index < len(text):
+        left_index = text.find(r"\left", index)
+        if left_index < 0:
+            break
+        span = _left_right_span_at(text, left_index)
+        if not span:
+            index = left_index + len(r"\left")
+            continue
+        end_index, segment = span
+        output.append(_wrap_latex_inline_commands(text[plain_start:left_index]))
+        output.append(_mathjax_inline_formula(segment))
+        index = end_index
+        plain_start = end_index
+    output.append(_wrap_latex_inline_commands(text[plain_start:]))
+    return "".join(output)
+
+
+def _wrap_latex_inline_commands(text: str) -> str:
     return _LATEX_INLINE_SEGMENT_PATTERN.sub(
         lambda match: _mathjax_inline_formula(match.group(0).strip()),
         text,
     )
+
+
+def _left_right_span_at(text: str, index: int) -> tuple[int, str] | None:
+    if not text.startswith(r"\left", index):
+        return None
+    left_delimiter = _read_left_right_delimiter(text, index + len(r"\left"))
+    if not left_delimiter:
+        return None
+
+    depth = 1
+    cursor = left_delimiter[1]
+    while cursor < len(text):
+        next_left = text.find(r"\left", cursor)
+        next_right = text.find(r"\right", cursor)
+        if next_right < 0:
+            return None
+        if 0 <= next_left < next_right:
+            nested_left = _read_left_right_delimiter(text, next_left + len(r"\left"))
+            if nested_left:
+                depth += 1
+                cursor = nested_left[1]
+            else:
+                cursor = next_left + len(r"\left")
+            continue
+
+        right_delimiter = _read_left_right_delimiter(text, next_right + len(r"\right"))
+        if not right_delimiter:
+            cursor = next_right + len(r"\right")
+            continue
+        depth -= 1
+        if depth == 0:
+            return right_delimiter[1], text[index : right_delimiter[1]]
+        cursor = right_delimiter[1]
+    return None
+
+
+def _read_left_right_delimiter(text: str, index: int) -> tuple[str, int] | None:
+    cursor = index
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    if cursor >= len(text):
+        return None
+    if text[cursor] == "\\":
+        if cursor + 1 < len(text) and text[cursor + 1] in "{}|()[]":
+            return text[cursor : cursor + 2], cursor + 2
+        match = re.match(r"\\[A-Za-z]+", text[cursor:])
+        if match and match.group(0) in _LEFT_RIGHT_NAMED_DELIMITERS:
+            return match.group(0), cursor + len(match.group(0))
+        return None
+    if text[cursor] in _LEFT_RIGHT_SINGLE_CHAR_DELIMITERS:
+        return text[cursor], cursor + 1
+    return None
 
 
 def _contains_latex(text: str) -> bool:
@@ -734,9 +872,12 @@ def _looks_like_standalone_latex(text: str) -> bool:
         "=" in text
         or r"\begin" in text
         or r"\frac" in text
+        or r"\left" in text
         or r"\sqrt" in text
         or r"\sum" in text
         or r"\prod" in text
+        or r"\leq" in text
+        or r"\geq" in text
     )
 
 
