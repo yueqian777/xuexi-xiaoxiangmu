@@ -185,19 +185,27 @@ def _extract_pdf_pages_with_mineru(path: Path) -> list[dict[str, str | int]]:
             str(path),
             "-o",
             temp_dir,
-            "-b",
-            os.getenv("INTP_MINERU_BACKEND", "pipeline"),
-            "-m",
-            os.getenv("INTP_MINERU_METHOD", "auto"),
-            "-l",
-            os.getenv("INTP_MINERU_LANG", "ch"),
         ]
+        backend = os.getenv("INTP_MINERU_BACKEND", "").strip()
+        if backend:
+            command.extend(["-b", backend])
+        method = os.getenv("INTP_MINERU_METHOD", "").strip()
+        if method:
+            command.extend(["-m", method])
+        lang = os.getenv("INTP_MINERU_LANG", "").strip()
+        if lang:
+            command.extend(["-l", lang])
+        environment = os.environ.copy()
+        cuda_visible_devices = os.getenv("INTP_MINERU_CUDA_VISIBLE_DEVICES", "").strip()
+        if cuda_visible_devices:
+            environment["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
         completed = subprocess.run(
             command,
             capture_output=True,
             text=True,
             timeout=int(os.getenv("INTP_MINERU_TIMEOUT_SECONDS", "3600")),
             shell=False,
+            env=environment,
         )
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()

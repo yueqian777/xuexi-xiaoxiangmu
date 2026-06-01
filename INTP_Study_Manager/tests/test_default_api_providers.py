@@ -39,6 +39,59 @@ class DefaultApiProvidersTest(unittest.TestCase):
         self.assertEqual(inserted[0][4], "mimo-v2.5-pro")
         self.assertEqual(inserted[0][5], "MIMO_TOKEN_PLAN_API_KEY")
         self.assertEqual(inserted[0][6], "api-key")
+        self.assertEqual(inserted[0][10], "auto")
+
+    def test_save_api_provider_persists_vision_capability_override(self):
+        calls = []
+
+        def fake_execute(query, params=()):
+            calls.append((query, params))
+
+        with (
+            patch.object(ai_service, "execute", side_effect=fake_execute),
+            patch.object(ai_service, "_place_api_provider"),
+        ):
+            ai_service.save_api_provider(
+                {
+                    "name": "MiniMax M3",
+                    "provider_type": "openai_chat",
+                    "base_url": "https://api.minimax.chat/v1",
+                    "model": "MiniMax-M3",
+                    "api_key_env": "MINIMAX_API_KEY",
+                    "auth_type": "bearer",
+                    "extra_headers_json": "{}",
+                    "request_template_json": "",
+                    "response_path": "choices.0.message.content",
+                    "vision_capability": "supported",
+                    "enabled": True,
+                },
+                provider_key="minimax",
+            )
+
+        update = next(params for query, params in calls if "UPDATE api_providers" in query)
+        self.assertEqual(update[9], "supported")
+
+    def test_invalid_vision_capability_falls_back_to_auto(self):
+        calls = []
+
+        def fake_execute(query, params=()):
+            calls.append((query, params))
+
+        with (
+            patch.object(ai_service, "execute", side_effect=fake_execute),
+            patch.object(ai_service, "_place_api_provider"),
+        ):
+            ai_service.save_api_provider(
+                {
+                    "name": "Unknown",
+                    "provider_type": "openai_chat",
+                    "vision_capability": "maybe",
+                },
+                provider_key="unknown",
+            )
+
+        update = next(params for query, params in calls if "UPDATE api_providers" in query)
+        self.assertEqual(update[9], "auto")
 
 
 if __name__ == "__main__":

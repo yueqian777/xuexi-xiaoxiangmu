@@ -4290,6 +4290,12 @@ def _is_text_empty(slide: dict) -> bool:
 
 
 def _provider_supports_image_input(provider: dict, model: str | None = None) -> bool:
+    override = str(provider.get("vision_capability") or "auto").strip().lower()
+    if override == "supported":
+        return True
+    if override == "unsupported":
+        return False
+
     if provider.get("provider_type") != "openai_chat":
         return False
 

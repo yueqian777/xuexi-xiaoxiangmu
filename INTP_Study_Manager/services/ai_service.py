@@ -48,6 +48,12 @@ PROVIDER_TYPES = {
     "minimax_chat": "MiniMax Chat API",
 }
 
+VISION_CAPABILITIES = {
+    "auto": "自动判断",
+    "supported": "支持视觉输入",
+    "unsupported": "不支持视觉输入",
+}
+
 DEFAULT_PROVIDERS = [
     {
         "name": "OpenAI Responses",
@@ -282,6 +288,7 @@ class AIProvider:
     extra_headers_json: str
     request_template_json: str
     response_path: str
+    vision_capability: str = "auto"
     enabled: bool = True
 
 
@@ -314,6 +321,7 @@ def ensure_default_api_providers() -> None:
                 provider["extra_headers_json"],
                 provider["request_template_json"],
                 provider["response_path"],
+                provider.get("vision_capability", "auto"),
             )
         )
 
@@ -321,9 +329,9 @@ def ensure_default_api_providers() -> None:
         """
         INSERT OR IGNORE INTO api_providers (
             provider_key, name, provider_type, base_url, model, api_key_env, auth_type,
-            extra_headers_json, request_template_json, response_path, enabled
+            extra_headers_json, request_template_json, response_path, vision_capability, enabled
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         """,
         default_rows,
     )
@@ -365,6 +373,7 @@ def get_api_provider(provider_key: str | None) -> AIProvider:
         extra_headers_json=row["extra_headers_json"] or "{}",
         request_template_json=row["request_template_json"] or "",
         response_path=row["response_path"] or "",
+        vision_capability=_normalize_vision_capability(row["vision_capability"] if "vision_capability" in row.keys() else "auto"),
         enabled=bool(row["enabled"]),
     )
 
@@ -381,6 +390,7 @@ def save_api_provider(data: dict[str, Any], provider_key: str | None = None) -> 
         _normalize_json_text(data.get("extra_headers_json", "{}"), "{}"),
         data.get("request_template_json", "").strip(),
         data.get("response_path", "").strip(),
+        _normalize_vision_capability(data.get("vision_capability", "auto")),
         int(bool(data.get("enabled", True))),
     )
     if provider_key:
@@ -389,7 +399,7 @@ def save_api_provider(data: dict[str, Any], provider_key: str | None = None) -> 
             UPDATE api_providers
             SET name = ?, provider_type = ?, base_url = ?, model = ?, api_key_env = ?,
                 auth_type = ?, extra_headers_json = ?, request_template_json = ?,
-                response_path = ?, enabled = ?, updated_at = datetime('now', 'localtime')
+                response_path = ?, vision_capability = ?, enabled = ?, updated_at = datetime('now', 'localtime')
             WHERE provider_key = ?
             """,
             values + (provider_key,),
@@ -401,9 +411,9 @@ def save_api_provider(data: dict[str, Any], provider_key: str | None = None) -> 
             """
             INSERT INTO api_providers (
                 provider_key, name, provider_type, base_url, model, api_key_env, auth_type,
-                extra_headers_json, request_template_json, response_path, enabled
+                extra_headers_json, request_template_json, response_path, vision_capability, enabled
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (saved_key,) + values,
         )
@@ -557,6 +567,11 @@ def _positive_int(value: Any, default: int) -> int:
     return result if result > 0 else default
 
 
+def _normalize_vision_capability(value: Any) -> str:
+    normalized = str(value or "auto").strip().lower()
+    return normalized if normalized in VISION_CAPABILITIES else "auto"
+
+
 def _mark_default_api_providers_seeded() -> None:
     execute(
         """
@@ -585,9 +600,9 @@ def _ensure_default_provider_row(provider_key: str, provider: dict[str, str]) ->
         """
         INSERT INTO api_providers (
             provider_key, name, provider_type, base_url, model, api_key_env, auth_type,
-            extra_headers_json, request_template_json, response_path, enabled, sort_order
+            extra_headers_json, request_template_json, response_path, vision_capability, enabled, sort_order
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
         """,
         (
             provider_key,
@@ -600,6 +615,7 @@ def _ensure_default_provider_row(provider_key: str, provider: dict[str, str]) ->
             provider["extra_headers_json"],
             provider["request_template_json"],
             provider["response_path"],
+            provider.get("vision_capability", "auto"),
             sort_order,
         ),
     )

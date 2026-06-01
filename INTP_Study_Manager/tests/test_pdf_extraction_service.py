@@ -135,6 +135,71 @@ class PdfExtractionServiceTest(unittest.TestCase):
         self.assertEqual(pages[0]["title"], "Nested Title")
         self.assertIn("Nested body", pages[0]["slide_text"])
 
+    def test_mineru_command_omits_backend_when_not_configured(self):
+        content_dir = Path(self.tmp.name) / "out" / "doc"
+        content_dir.mkdir(parents=True)
+        (content_dir / "doc_content_list.json").write_text(
+            json.dumps([{"type": "text", "text": "GPU default", "page_idx": 0}]),
+            encoding="utf-8",
+        )
+        captured = {}
+
+        def fake_run(command, **_kwargs):
+            captured["command"] = command
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        env = {
+            "INTP_MINERU_COMMAND": "D:\\MinerU\\.venv\\Scripts\\mineru.exe",
+            "INTP_MINERU_OUTPUT_DIR": str(Path(self.tmp.name) / "out"),
+        }
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch("services.pdf_extraction_service._resolve_command", return_value=env["INTP_MINERU_COMMAND"]),
+            patch("services.pdf_extraction_service._probe_mineru_command", return_value=(True, "ok")),
+            patch("services.pdf_extraction_service.tempfile.TemporaryDirectory") as temporary_directory,
+            patch("services.pdf_extraction_service.subprocess.run", side_effect=fake_run),
+        ):
+            temporary_directory.return_value.__enter__.return_value = str(content_dir.parent)
+            pages = extract_pdf_pages(self.pdf_path, method="mineru")
+
+        self.assertEqual(pages[0]["title"], "GPU default")
+        self.assertNotIn("-b", captured["command"])
+
+    def test_mineru_command_uses_configured_backend_and_cuda_visible_devices(self):
+        content_dir = Path(self.tmp.name) / "out" / "doc"
+        content_dir.mkdir(parents=True)
+        (content_dir / "doc_content_list.json").write_text(
+            json.dumps([{"type": "text", "text": "Configured backend", "page_idx": 0}]),
+            encoding="utf-8",
+        )
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["env"] = kwargs["env"]
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        env = {
+            "INTP_MINERU_COMMAND": "D:\\MinerU\\.venv\\Scripts\\mineru.exe",
+            "INTP_MINERU_BACKEND": "pipeline",
+            "INTP_MINERU_CUDA_VISIBLE_DEVICES": "0",
+            "INTP_MINERU_OUTPUT_DIR": str(Path(self.tmp.name) / "out"),
+        }
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch("services.pdf_extraction_service._resolve_command", return_value=env["INTP_MINERU_COMMAND"]),
+            patch("services.pdf_extraction_service._probe_mineru_command", return_value=(True, "ok")),
+            patch("services.pdf_extraction_service.tempfile.TemporaryDirectory") as temporary_directory,
+            patch("services.pdf_extraction_service.subprocess.run", side_effect=fake_run),
+        ):
+            temporary_directory.return_value.__enter__.return_value = str(content_dir.parent)
+            pages = extract_pdf_pages(self.pdf_path, method="mineru")
+
+        self.assertEqual(pages[0]["title"], "Configured backend")
+        self.assertIn("-b", captured["command"])
+        self.assertIn("pipeline", captured["command"])
+        self.assertEqual(captured["env"]["CUDA_VISIBLE_DEVICES"], "0")
+
     def test_mineru_status_requires_configured_command_to_exist(self):
         with patch.dict("os.environ", {"INTP_MINERU_COMMAND": str(Path(self.tmp.name) / "missing.exe")}, clear=False):
             status = get_mineru_status()

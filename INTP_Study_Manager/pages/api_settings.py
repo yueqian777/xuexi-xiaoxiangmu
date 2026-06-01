@@ -9,6 +9,7 @@ from services.ai_service import (
     AIServiceError,
     DEFAULT_MODEL,
     PROVIDER_TYPES,
+    VISION_CAPABILITIES,
     delete_api_provider,
     delete_api_providers,
     generate_text,
@@ -69,6 +70,7 @@ def render() -> None:
                 "provider_type",
                 "base_url",
                 "model",
+                "vision_capability",
                 "api_key_env",
                 "auth_type",
                 "enabled",
@@ -82,6 +84,7 @@ def render() -> None:
                 "provider_type": st.column_config.TextColumn("类型", disabled=True),
                 "base_url": st.column_config.TextColumn("Base URL / Endpoint", disabled=True),
                 "model": st.column_config.TextColumn("模型", disabled=True),
+                "vision_capability": st.column_config.TextColumn("视觉能力", disabled=True),
                 "api_key_env": st.column_config.TextColumn("环境变量", disabled=True),
                 "auth_type": st.column_config.TextColumn("鉴权", disabled=True),
                 "enabled": st.column_config.CheckboxColumn("启用", disabled=True),
@@ -559,6 +562,7 @@ def _render_create_provider() -> None:
         "extra_headers_json": "{}",
         "request_template_json": _default_custom_template(),
         "response_path": "choices.0.message.content",
+        "vision_capability": "auto",
         "enabled": 1,
         "sort_order": len(list_api_providers()) + 1,
     }
@@ -617,6 +621,13 @@ def _provider_form(title: str, provider: dict, provider_key: str | None) -> None
             value=provider.get("response_path", ""),
             help="例如 choices.0.message.content 或 candidates.0.content.parts.0.text",
         )
+        vision_capability = st.selectbox(
+            "视觉输入能力",
+            list(VISION_CAPABILITIES.keys()),
+            index=_index_or_zero(list(VISION_CAPABILITIES.keys()), provider.get("vision_capability") or "auto"),
+            format_func=lambda value: VISION_CAPABILITIES[value],
+            help="模型升级或供应商变更能力时可手动覆盖；自动判断会按 Provider 类型和模型名推断。",
+        )
         enabled = st.checkbox("启用", value=bool(provider.get("enabled", 1)))
         submitted = st.form_submit_button(title)
 
@@ -637,6 +648,7 @@ def _provider_form(title: str, provider: dict, provider_key: str | None) -> None
                 "extra_headers_json": extra_headers_json,
                 "request_template_json": request_template_json,
                 "response_path": response_path,
+                "vision_capability": vision_capability,
                 "enabled": enabled,
                 "sort_order": sort_order,
             },

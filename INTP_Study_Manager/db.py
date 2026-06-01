@@ -283,6 +283,7 @@ def _run_init_db() -> None:
                 extra_headers_json TEXT DEFAULT '{}',
                 request_template_json TEXT DEFAULT '',
                 response_path TEXT DEFAULT '',
+                vision_capability TEXT NOT NULL DEFAULT 'auto',
                 balance_query_enabled INTEGER NOT NULL DEFAULT 0,
                 balance_query_type TEXT NOT NULL DEFAULT 'auto_wallet',
                 balance_query_config_json TEXT NOT NULL DEFAULT '{}',
@@ -377,6 +378,7 @@ def _run_init_db() -> None:
         _ensure_column(conn, "slide_questions", "quote_source", "TEXT DEFAULT 'slide'")
         _ensure_column(conn, "slide_questions", "quote_source_question_id", "INTEGER")
         _ensure_column(conn, "api_providers", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "api_providers", "vision_capability", "TEXT NOT NULL DEFAULT 'auto'")
         _ensure_column(conn, "app_settings", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "daily_review_logs", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "daily_ai_review_plans", "user_id", "INTEGER NOT NULL DEFAULT 0")
@@ -746,6 +748,7 @@ def _api_providers_schema_sql() -> str:
         extra_headers_json TEXT DEFAULT '{}',
         request_template_json TEXT DEFAULT '',
         response_path TEXT DEFAULT '',
+        vision_capability TEXT NOT NULL DEFAULT 'auto',
         balance_query_enabled INTEGER NOT NULL DEFAULT 0,
         balance_query_type TEXT NOT NULL DEFAULT 'auto_wallet',
         balance_query_config_json TEXT NOT NULL DEFAULT '{}',
