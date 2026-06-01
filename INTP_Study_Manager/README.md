@@ -162,6 +162,12 @@ D:\MinerU\.venv\Scripts\python.exe -m pip install "mineru[pipeline]" six
 setx INTP_MINERU_COMMAND "D:\MinerU\.venv\Scripts\mineru.exe"
 ```
 
+如果要使用 NVIDIA GPU，MinerU venv 里的 PyTorch 必须是 CUDA 版，并且本机驱动需要支持该 CUDA runtime。可以用下面的命令验证 MinerU 是否能看到显卡：
+
+```powershell
+D:\MinerU\.venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no cuda')"
+```
+
 如果 MinerU 运行时报 `ModuleNotFoundError: No module named 'six'`，在该虚拟环境里补装：
 
 ```powershell
@@ -172,11 +178,33 @@ D:\MinerU\.venv\Scripts\python.exe -m pip install six
 
 ```powershell
 setx INTP_MINERU_BACKEND "pipeline"
+setx INTP_MINERU_DEVICE_MODE "cuda"
+setx INTP_MINERU_CUDA_VISIBLE_DEVICES "0"
+setx INTP_MINERU_PROCESSING_WINDOW_SIZE "16"
+setx INTP_MINERU_API_MAX_CONCURRENT_REQUESTS "1"
 setx INTP_MINERU_METHOD "auto"
 setx INTP_MINERU_LANG "ch"
+setx INTP_MINERU_START_PAGE "0"
+setx INTP_MINERU_END_PAGE "10"
+setx INTP_MINERU_FORMULA "true"
+setx INTP_MINERU_TABLE "true"
+setx INTP_MINERU_IMAGE_ANALYSIS "false"
 setx INTP_MINERU_OUTPUT_DIR "D:\MinerU\outputs"
+setx INTP_MINERU_CACHE_DIR "D:\MinerU\cache"
+setx INTP_MINERU_TEMP_DIR "D:\MinerU\tmp"
+setx INTP_MINERU_ARCHIVE_RAW_OUTPUT "1"
 setx INTP_MINERU_TIMEOUT_SECONDS "3600"
 ```
+
+默认情况下，本项目会使用 MinerU 的 `pipeline` 后端，并把 MinerU 子进程的 `MINERU_DEVICE_MODE` 设为 `cuda`、`CUDA_VISIBLE_DEVICES` 设为 `0`。从 MinerU 源码看，`pipeline` 后端会通过 `mineru.utils.config_reader.get_device()` 选择设备，layout、公式识别和 OCR 的 PyTorch 模型都会读取这个设备；因此 pipeline GPU 路径的关键是 MinerU venv 内的 CUDA PyTorch 可用，而不是安装 `lmdeploy` / `vllm`。
+
+`MINERU_PROCESSING_WINDOW_SIZE` 默认设为 `16`、`MINERU_API_MAX_CONCURRENT_REQUESTS` 默认设为 `1`，这是为了在 12GB 级别显存上先保证稳定，避免长 PDF 一次性把显存或内存打满。确认稳定后可以按机器性能调大窗口。需要强制 CPU 时，可设置 `INTP_MINERU_DEVICE_MODE=cpu`。如果要试用 hybrid / VLM 后端或多卡配置，可以通过 `INTP_MINERU_BACKEND` 与 `INTP_MINERU_CUDA_VISIBLE_DEVICES` 覆盖；hybrid / VLM 通常还需要自愿安装并匹配硬件的 `lmdeploy`、`vllm`、`accelerate` 等额外推理组件，不属于本项目的默认依赖。
+
+默认会向 MinerU 传入 `--formula true` 与 `--table true`，让公式和表格解析显式开启。排查某几页公式或避免整本 PDF 长时间重跑时，可以临时设置 `INTP_MINERU_START_PAGE` 与 `INTP_MINERU_END_PAGE`；它们对应 MinerU 的 0-based 页码。例如只跑第 85 到 93 页，设置 `INTP_MINERU_START_PAGE=84`、`INTP_MINERU_END_PAGE=92`。`INTP_MINERU_IMAGE_ANALYSIS` 默认不传，只有设置后才会传给 MinerU，适合 VLM / hybrid 后端的图片或图表分析调试。
+
+MinerU 子进程的临时目录和 HuggingFace / ModelScope 缓存会放到 `D:\MinerU\tmp` 与 `D:\MinerU\cache`，避免模型下载和解析中间文件继续占用 C 盘。
+
+为方便排查“MinerU 已生成但页面未完整导入”的情况，本项目默认会把 MinerU 生成的 JSON / Markdown 轻量归档到输出目录的 `_raw` 子目录；如果不想保留这些调试文件，可以设置 `INTP_MINERU_ARCHIVE_RAW_OUTPUT=0`。
 
 进入“PPT 逐页讲解”并选择 PDF 资料后，打开“PDF 识别增强设置”。只有检测到 `INTP_MINERU_COMMAND` 指向的命令可运行，或系统 `PATH` / `D:\MinerU\.venv\Scripts\mineru.exe` 中的 MinerU 能通过轻量命令探测时，页面才会显示“MinerU 高精度抽取（可选）”。未检测到或命令依赖损坏时只能选择默认本地增强抽取。
 

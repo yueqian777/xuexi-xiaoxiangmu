@@ -56,7 +56,7 @@ from services.ppt_context_service import (
 )
 from services.ppt_generation_state import apply_stop_request, generation_progress_patch
 from services.ppt_service import import_deck, refresh_pdf_slide_text, render_missing_page_images
-from services.pdf_extraction_service import MinerUStatus, get_mineru_status
+from services.pdf_extraction_service import MinerUStatus, get_mineru_status, normalize_mineru_math_text
 from services.prompt_service import render_template
 from services.ppt_reader_state import (
     LAST_READER_DECK_STATE_KEY,
@@ -3488,7 +3488,7 @@ def _build_reader_payload(
     for slide in slides:
         image_path = Path(slide.get("image_path") or "")
         latest = latest_by_slide_id.get(int(slide["id"]))
-        slide_text = slide.get("slide_text") or ""
+        slide_text = _display_slide_text(slide)
         slide_title = slide.get("title") or f"第 {slide['slide_number']} 页"
         bookmark_title = str(slide.get("bookmark_title") or "").strip() or slide_title
 
@@ -4172,7 +4172,7 @@ def _build_slide_prompt(
     user_id: int | None = None,
     related_knowledge: str | None = None,
 ) -> str:
-    slide_text = "" if ignore_extracted_text else (slide["slide_text"] or "")
+    slide_text = "" if ignore_extracted_text else _display_slide_text(slide)
     subject = deck.get("subject") or "未分类"
     if ignore_extracted_text and image_attached and _image_exists(slide):
         slide_text = "本次已选择不使用 PPT/PDF 识别文字。我会随请求附上该页原图，请直接根据页面图片内容讲解，尤其注意公式、符号、图表和推导步骤；不要依赖 OCR 文本，也不要编造图片中不存在的信息。"
@@ -4241,7 +4241,7 @@ def _build_branch_prompt(
             "deck_title": deck["title"],
             "slide_number": str(slide["slide_number"]),
             "slide_title": slide["title"] or "未命名页面",
-            "slide_text": slide["slide_text"] or "这一页没有解析到文字。",
+            "slide_text": _display_slide_text(slide) or "这一页没有解析到文字。",
             "main_explanation": latest["explanation"] if latest else "尚未生成主线讲解。",
             "context_package": format_slide_context_package(context),
             "question": question,
@@ -4265,6 +4265,14 @@ def _slide_label(slides: dict[int, dict], slide_id: int) -> str:
 def _format_slide_text(text: str) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return "\n".join(f"- {line}" for line in lines)
+
+
+def _display_slide_text(slide: dict) -> str:
+    text = str(slide.get("slide_text") or "")
+    notes = str(slide.get("notes") or "")
+    if "extractor=mineru" not in notes:
+        return text
+    return "\n".join(normalize_mineru_math_text(line) for line in text.splitlines())
 
 
 def _is_pdf_deck(deck: dict) -> bool:

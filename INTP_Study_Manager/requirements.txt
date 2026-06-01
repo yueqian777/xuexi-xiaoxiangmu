@@ -13,6 +13,10 @@ Pillow>=10.0
 # Optional PDF high-accuracy extraction:
 # MinerU is intentionally NOT installed by this requirements file.
 # Install it voluntarily in an external D-drive environment.
+# For NVIDIA acceleration, use a CUDA-enabled torch inside that venv and set:
+# INTP_MINERU_DEVICE_MODE=cuda
+# INTP_MINERU_CUDA_VISIBLE_DEVICES=0
+# Hybrid/VLM backends may need extra voluntary packages such as lmdeploy/vllm.
 # If MinerU pipeline reports "No module named 'six'", install six in that venv.
 # Then set:
 # INTP_MINERU_COMMAND=D:\MinerU\.venv\Scripts\mineru.exe

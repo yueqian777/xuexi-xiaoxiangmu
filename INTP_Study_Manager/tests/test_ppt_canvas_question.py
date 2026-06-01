@@ -268,6 +268,25 @@ class PptCanvasQuestionTest(unittest.TestCase):
         self.assertTrue(result[0]["bookmarkEnabled"])
         self.assertEqual(result[0]["bookmarkTitle"], "Signals")
 
+    def test_build_reader_payload_normalizes_mineru_latex_for_display(self):
+        slides = [
+            {
+                "id": 9,
+                "slide_number": 2,
+                "title": "Signals",
+                "slide_text": r"通带截止频率\Omega _ { p }、通带衰减\delta _ { 1 }",
+                "notes": "source=pdf;extractor=mineru",
+                "image_path": "",
+            }
+        ]
+
+        result = ppt_tutor._build_reader_payload(slides, {}, {}, image_slide_numbers=set())
+
+        self.assertIn(
+            r"通带截止频率$\Omega _ { p }$、通带衰减$\delta _ { 1 }$",
+            result[0]["explanation"],
+        )
+
     def test_toggle_slide_bookmark_updates_slide_without_model_call(self):
         deck = {"id": 3, "title": "Deck", "subject": "Subject"}
         slide = {"id": 9, "slide_number": 2, "title": "Signals", "slide_text": ""}

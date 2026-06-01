@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from db import DATA_DIR
 
@@ -186,7 +187,7 @@ def _extract_pdf_pages_with_mineru(path: Path) -> list[dict[str, str | int]]:
             "-o",
             temp_dir,
         ]
-        backend = os.getenv("INTP_MINERU_BACKEND", "").strip()
+        backend = os.getenv("INTP_MINERU_BACKEND", "pipeline").strip()
         if backend:
             command.extend(["-b", backend])
         method = os.getenv("INTP_MINERU_METHOD", "").strip()
@@ -195,14 +196,19 @@ def _extract_pdf_pages_with_mineru(path: Path) -> list[dict[str, str | int]]:
         lang = os.getenv("INTP_MINERU_LANG", "").strip()
         if lang:
             command.extend(["-l", lang])
+        _extend_mineru_optional_cli_args(command)
         environment = os.environ.copy()
-        cuda_visible_devices = os.getenv("INTP_MINERU_CUDA_VISIBLE_DEVICES", "").strip()
-        if cuda_visible_devices:
+        _apply_mineru_local_cache_environment(environment)
+        _apply_mineru_device_environment(environment)
+        cuda_visible_devices = os.getenv("INTP_MINERU_CUDA_VISIBLE_DEVICES", "0").strip()
+        if cuda_visible_devices and "CUDA_VISIBLE_DEVICES" not in environment:
             environment["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
         completed = subprocess.run(
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=int(os.getenv("INTP_MINERU_TIMEOUT_SECONDS", "3600")),
             shell=False,
             env=environment,
@@ -211,23 +217,81 @@ def _extract_pdf_pages_with_mineru(path: Path) -> list[dict[str, str | int]]:
             detail = (completed.stderr or completed.stdout or "").strip()
             raise RuntimeError(f"MinerU 提取失败：{detail or completed.returncode}")
 
-        content_file = _latest_mineru_content_file(Path(temp_dir))
-        if not content_file:
+        content_files = _mineru_content_files(Path(temp_dir))
+        if not content_files:
             raise RuntimeError("MinerU 已运行，但没有找到 content_list 输出文件。")
-        content = json.loads(content_file.read_text(encoding="utf-8"))
-        pages = parse_mineru_content_list(content)
+        _archive_mineru_raw_outputs(Path(temp_dir), output_root)
+        pages = _parse_richest_mineru_content_files(content_files)
+        pages = _offset_mineru_pages_for_configured_range(pages)
         if not pages:
             raise RuntimeError("MinerU 输出为空，未能提取到可用页面内容。")
         return pages
 
 
-def _latest_mineru_content_file(output_dir: Path) -> Path | None:
+def _mineru_content_files(output_dir: Path) -> list[Path]:
     candidates = list(output_dir.rglob("*_content_list_v2.json"))
-    if not candidates:
-        candidates = list(output_dir.rglob("*_content_list.json"))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda path: path.stat().st_mtime)
+    candidates.extend(
+        path
+        for path in output_dir.rglob("*_content_list.json")
+        if not path.name.endswith("_content_list_v2.json")
+    )
+    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def _parse_richest_mineru_content_files(content_files: list[Path]) -> list[dict[str, str | int]]:
+    best_pages: list[dict[str, str | int]] = []
+    best_score = -1
+    for content_file in content_files:
+        content = json.loads(content_file.read_text(encoding="utf-8"))
+        pages = parse_mineru_content_list(content)
+        score = _mineru_pages_score(pages)
+        if score > best_score:
+            best_pages = pages
+            best_score = score
+    return best_pages
+
+
+def _mineru_pages_score(pages: list[dict[str, str | int]]) -> int:
+    text = "\n".join(str(page.get("slide_text") or "") for page in pages)
+    math_bonus = text.count("$$") * 20 + text.count("\\") * 2
+    return len(pages) * 1000 + len(text.strip()) + math_bonus
+
+
+def _offset_mineru_pages_for_configured_range(pages: list[dict[str, str | int]]) -> list[dict[str, str | int]]:
+    start = _configured_mineru_start_page()
+    if start <= 0:
+        return pages
+    return [
+        {
+            **page,
+            "slide_number": int(page["slide_number"]) + start,
+        }
+        for page in pages
+    ]
+
+
+def _configured_mineru_start_page() -> int:
+    value = os.getenv("INTP_MINERU_START_PAGE", "").strip()
+    if not value:
+        return 0
+    try:
+        return max(0, int(value))
+    except ValueError:
+        return 0
+
+
+def _archive_mineru_raw_outputs(temp_dir: Path, output_root: Path) -> None:
+    if os.getenv("INTP_MINERU_ARCHIVE_RAW_OUTPUT", "1").strip().lower() in {"0", "false", "no"}:
+        return
+    archive_dir = output_root / "_raw" / temp_dir.name
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    for source in temp_dir.rglob("*"):
+        if not source.is_file() or source.suffix.lower() not in {".json", ".md"}:
+            continue
+        relative = source.relative_to(temp_dir)
+        destination = archive_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
 
 
 def _mineru_output_root(path: Path) -> Path:
@@ -235,6 +299,67 @@ def _mineru_output_root(path: Path) -> Path:
     if configured:
         return Path(configured)
     return DATA_DIR / "mineru_outputs" / _safe_filename(path.stem)
+
+
+def _apply_mineru_local_cache_environment(environment: dict[str, str]) -> None:
+    cache_root = Path(os.getenv("INTP_MINERU_CACHE_DIR", "D:/MinerU/cache"))
+    temp_root = Path(os.getenv("INTP_MINERU_TEMP_DIR", "D:/MinerU/tmp"))
+    cache_root.mkdir(parents=True, exist_ok=True)
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    for key, value in {
+        "TEMP": str(temp_root),
+        "TMP": str(temp_root),
+        "HF_HOME": str(cache_root / "huggingface"),
+        "HUGGINGFACE_HUB_CACHE": str(cache_root / "huggingface" / "hub"),
+        "TRANSFORMERS_CACHE": str(cache_root / "transformers"),
+        "MODELSCOPE_CACHE": str(cache_root / "modelscope"),
+    }.items():
+        environment.setdefault(key, value)
+
+    model_source = os.getenv("INTP_MINERU_MODEL_SOURCE", "modelscope").strip()
+    if model_source:
+        environment.setdefault("MINERU_MODEL_SOURCE", model_source)
+
+    for env_key, mineru_key, default in (
+        ("INTP_MINERU_FORMULA", "MINERU_FORMULA_ENABLE", "true"),
+        ("INTP_MINERU_TABLE", "MINERU_TABLE_ENABLE", "true"),
+    ):
+        value = os.getenv(env_key, default).strip()
+        if value:
+            environment.setdefault(mineru_key, value)
+
+
+def _apply_mineru_device_environment(environment: dict[str, str]) -> None:
+    device_mode = os.getenv("INTP_MINERU_DEVICE_MODE", "cuda").strip()
+    if device_mode and "MINERU_DEVICE_MODE" not in environment:
+        environment["MINERU_DEVICE_MODE"] = device_mode
+
+    for key, value in {
+        "MINERU_PROCESSING_WINDOW_SIZE": os.getenv("INTP_MINERU_PROCESSING_WINDOW_SIZE", "16").strip(),
+        "MINERU_API_MAX_CONCURRENT_REQUESTS": os.getenv("INTP_MINERU_API_MAX_CONCURRENT_REQUESTS", "1").strip(),
+    }.items():
+        if value and key not in environment:
+            environment[key] = value
+
+
+def _extend_mineru_optional_cli_args(command: list[str]) -> None:
+    for env_key, cli_key in (
+        ("INTP_MINERU_START_PAGE", "--start"),
+        ("INTP_MINERU_END_PAGE", "--end"),
+    ):
+        value = os.getenv(env_key, "").strip()
+        if value:
+            command.extend([cli_key, value])
+
+    for env_key, cli_key, default in (
+        ("INTP_MINERU_FORMULA", "--formula", "true"),
+        ("INTP_MINERU_TABLE", "--table", "true"),
+        ("INTP_MINERU_IMAGE_ANALYSIS", "--image-analysis", ""),
+    ):
+        value = os.getenv(env_key, default).strip()
+        if value:
+            command.extend([cli_key, value])
 
 
 def _parse_mineru_content_list_v1(content: list[Any]) -> list[dict[str, str | int]]:
@@ -281,14 +406,14 @@ def _pages_from_grouped_text(pages: dict[int, list[str]]) -> list[dict[str, str 
 
 def _mineru_v1_block_to_text(item: dict[str, Any]) -> str:
     block_type = str(item.get("type") or "")
-    if block_type in {"text", "title"}:
-        text = str(item.get("text") or "").strip()
+    if block_type in {"text", "title", "header", "footer", "page_header", "page_footer"}:
+        text = normalize_mineru_math_text(str(item.get("text") or "").strip())
         level = int(item.get("text_level") or 0)
         if text and level > 0:
             return f"{'#' * min(level, 6)} {text}"
         return text
     if block_type == "equation":
-        return str(item.get("text") or "").strip()
+        return _mathjax_display_formula(str(item.get("text") or ""))
     if block_type == "table":
         return "\n\n".join(
             chunk
@@ -308,7 +433,7 @@ def _mineru_v1_block_to_text(item: dict[str, Any]) -> str:
         return "\n".join([*(str(value) for value in captions), str(body)]).strip()
     if block_type == "code":
         return str(item.get("code_body") or "").strip()
-    return ""
+    return _fallback_mineru_block_text(item)
 
 
 def _mineru_v2_block_to_text(item: dict[str, Any]) -> str:
@@ -319,9 +444,9 @@ def _mineru_v2_block_to_text(item: dict[str, Any]) -> str:
         level = int(content.get("level") or 1)
         return f"{'#' * min(level, 6)} {text}".strip()
     if block_type == "paragraph":
-        return _span_text(content.get("paragraph_content") or content.get("content"))
+        return normalize_mineru_math_text(_span_text(content.get("paragraph_content") or content.get("content")))
     if block_type == "equation_interline":
-        return str(content.get("math_content") or content.get("content") or "").strip()
+        return _mathjax_display_formula(str(content.get("math_content") or content.get("content") or ""))
     if block_type in {"table", "image", "chart"}:
         parts = [
             _span_text(content.get("table_caption") or content.get("image_caption") or content.get("chart_caption")),
@@ -334,6 +459,36 @@ def _mineru_v2_block_to_text(item: dict[str, Any]) -> str:
         return "\n".join(f"- {_span_text(item)}" for item in items if _span_text(item))
     if block_type in {"code", "algorithm"}:
         return str(content.get("code_content") or content.get("algorithm_content") or "").strip()
+    if block_type in {"page_header", "page_footer", "header", "footer"}:
+        return _span_text(
+            content.get("page_header_content")
+            or content.get("page_footer_content")
+            or content.get("header_content")
+            or content.get("footer_content")
+            or content.get("content")
+        )
+    return _fallback_mineru_block_text(content if isinstance(content, dict) else item)
+
+
+def _fallback_mineru_block_text(item: dict[str, Any]) -> str:
+    for key in (
+        "text",
+        "content",
+        "body",
+        "caption",
+        "html",
+        "math_content",
+        "math_latex",
+        "latex",
+        "markdown",
+        "paragraph_content",
+        "title_content",
+        "spans",
+    ):
+        value = item.get(key)
+        text = _span_text(value)
+        if text:
+            return normalize_mineru_math_text(text)
     return ""
 
 
@@ -345,10 +500,101 @@ def _span_text(value: Any) -> str:
     if isinstance(value, dict):
         if "content" in value:
             return _span_text(value.get("content"))
+        if "text" in value:
+            return _span_text(value.get("text"))
+        if "math_content" in value:
+            return _span_text(value.get("math_content"))
+        if "math_latex" in value:
+            return _span_text(value.get("math_latex"))
+        if "latex" in value:
+            return _span_text(value.get("latex"))
         return " ".join(_span_text(item) for item in value.values()).strip()
     if isinstance(value, list):
-        return "".join(_span_text(item) for item in value).strip()
+        return _join_span_parts(_span_text(item) for item in value)
     return str(value).strip()
+
+
+def _join_span_parts(parts: Iterable[str]) -> str:
+    text = ""
+    for part in (value.strip() for value in parts):
+        if not part:
+            continue
+        if text and _needs_space_between_fragments(text[-1], part[0]):
+            text += " "
+        text += part
+    return text.strip()
+
+
+def _needs_space_between_fragments(left: str, right: str) -> bool:
+    if left.isspace() or right.isspace():
+        return False
+    if left in "([{/$\\" or right in ")]}.,;:!?，。；：、）】》":
+        return False
+    if _is_cjk(left) or _is_cjk(right):
+        return False
+    return left.isalnum() and right.isalnum()
+
+
+def _is_cjk(char: str) -> bool:
+    return "\u4e00" <= char <= "\u9fff"
+
+
+def _mathjax_display_formula(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    if (
+        (text.startswith("$$") and text.endswith("$$"))
+        or (text.startswith(r"\[") and text.endswith(r"\]"))
+        or (text.startswith(r"\(") and text.endswith(r"\)"))
+        or (text.startswith("$") and text.endswith("$"))
+    ):
+        return text
+    return f"$${text}$$"
+
+
+_LATEX_COMMAND_PATTERN = re.compile(
+    r"\\(?:"
+    r"alpha|beta|gamma|delta|varepsilon|epsilon|lambda|sigma|omega|Omega|pi|theta|nu|"
+    r"frac|cfrac|sqrt|sum|prod|left|right|begin|end|displaystyle|mathrm|scriptscriptstyle|"
+    r"quad|qquad|cdot|times|pm|geq|leq|vert|Bigg|Biggl|Biggr|bigg|sin|cos"
+    r")\b"
+)
+_LATEX_INLINE_SEGMENT_PATTERN = re.compile(
+    r"\\(?:"
+    r"alpha|beta|gamma|delta|varepsilon|epsilon|lambda|sigma|omega|Omega|pi|theta|nu|"
+    r"frac|cfrac|sqrt|sum|prod|left|right|begin|end|displaystyle|mathrm|scriptscriptstyle|"
+    r"quad|qquad|cdot|times|pm|geq|leq|vert|Bigg|Biggl|Biggr|bigg|sin|cos"
+    r")\b"
+    r"(?:\s*(?:[_^]\s*\{[^{}]*\}|[_^]\s*[A-Za-z0-9]+|\{[^{}]*\}|[=+\-*/(),.\[\]A-Za-z0-9])+)*"
+)
+
+
+def normalize_mineru_math_text(value: str) -> str:
+    text = value.strip()
+    if not text or "$" in text or not _LATEX_COMMAND_PATTERN.search(text):
+        return text
+    if _looks_like_standalone_latex(text):
+        return _mathjax_display_formula(text)
+    return _LATEX_INLINE_SEGMENT_PATTERN.sub(
+        lambda match: f"${match.group(0).strip()}$",
+        text,
+    )
+
+
+def _looks_like_standalone_latex(text: str) -> bool:
+    if any(char in text for char in "，。；：、！？"):
+        return False
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return False
+    return bool(
+        "=" in text
+        or r"\begin" in text
+        or r"\frac" in text
+        or r"\sqrt" in text
+        or r"\sum" in text
+        or r"\prod" in text
+    )
 
 
 def _markdown_table(table: Any) -> str:
