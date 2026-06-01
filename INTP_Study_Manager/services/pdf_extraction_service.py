@@ -261,6 +261,8 @@ def _offset_mineru_pages_for_configured_range(pages: list[dict[str, str | int]])
     start = _configured_mineru_start_page()
     if start <= 0:
         return pages
+    if pages and min(int(page["slide_number"]) for page in pages) >= start + 1:
+        return pages
     return [
         {
             **page,
@@ -367,11 +369,21 @@ def _parse_mineru_content_list_v1(content: list[Any]) -> list[dict[str, str | in
     for item in content:
         if not isinstance(item, dict):
             continue
-        page_number = int(item.get("page_idx") or 0) + 1
+        page_number = _mineru_v1_page_number(item)
         block = _mineru_v1_block_to_text(item)
         if block:
             pages.setdefault(page_number, []).append(block)
     return _pages_from_grouped_text(pages)
+
+
+def _mineru_v1_page_number(item: dict[str, Any]) -> int:
+    if "page_idx" in item:
+        return _safe_int(item.get("page_idx"), default=0) + 1
+    for key in ("page", "page_no", "page_number", "page_id"):
+        if key in item:
+            value = _safe_int(item.get(key), default=1)
+            return value + 1 if value <= 0 else value
+    return 1
 
 
 def _parse_mineru_content_list_v2(content: list[Any]) -> list[dict[str, str | int]]:
@@ -441,7 +453,7 @@ def _mineru_v2_block_to_text(item: dict[str, Any]) -> str:
     content = item.get("content") or {}
     if block_type == "title":
         text = _span_text(content.get("title_content") or content.get("content"))
-        level = int(content.get("level") or 1)
+        level = _mineru_heading_level(content.get("level"))
         return f"{'#' * min(level, 6)} {text}".strip()
     if block_type == "paragraph":
         return normalize_mineru_math_text(_span_text(content.get("paragraph_content") or content.get("content")))
@@ -450,7 +462,7 @@ def _mineru_v2_block_to_text(item: dict[str, Any]) -> str:
     if block_type in {"table", "image", "chart"}:
         parts = [
             _span_text(content.get("table_caption") or content.get("image_caption") or content.get("chart_caption")),
-            str(content.get("table_body") or content.get("content") or "").strip(),
+            _span_text(content.get("table_body") or content.get("content")),
             _span_text(content.get("table_footnote") or content.get("image_footnote") or content.get("chart_footnote")),
         ]
         return "\n\n".join(part for part in parts if part)
@@ -458,7 +470,7 @@ def _mineru_v2_block_to_text(item: dict[str, Any]) -> str:
         items = content.get("list_items") or content.get("index_items") or []
         return "\n".join(f"- {_span_text(item)}" for item in items if _span_text(item))
     if block_type in {"code", "algorithm"}:
-        return str(content.get("code_content") or content.get("algorithm_content") or "").strip()
+        return _span_text(content.get("code_content") or content.get("algorithm_content"))
     if block_type in {"page_header", "page_footer", "header", "footer"}:
         return _span_text(
             content.get("page_header_content")
@@ -471,6 +483,7 @@ def _mineru_v2_block_to_text(item: dict[str, Any]) -> str:
 
 
 def _fallback_mineru_block_text(item: dict[str, Any]) -> str:
+    parts: list[str] = []
     for key in (
         "text",
         "content",
@@ -488,8 +501,25 @@ def _fallback_mineru_block_text(item: dict[str, Any]) -> str:
         value = item.get(key)
         text = _span_text(value)
         if text:
-            return normalize_mineru_math_text(text)
-    return ""
+            parts.append(normalize_mineru_math_text(text))
+    return "\n\n".join(dict.fromkeys(parts))
+
+
+def _mineru_heading_level(value: Any) -> int:
+    if value is None:
+        return 1
+    parsed = _safe_int(value, default=0)
+    if parsed > 0:
+        return parsed
+    match = re.search(r"\d+", str(value))
+    return max(1, int(match.group(0))) if match else 1
+
+
+def _safe_int(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _span_text(value: Any) -> str:
@@ -540,46 +570,159 @@ def _is_cjk(char: str) -> bool:
 
 
 def _mathjax_display_formula(value: str) -> str:
-    text = value.strip()
+    text = _strip_wrapping_math_delimiters(value.strip())
     if not text:
         return ""
-    if (
-        (text.startswith("$$") and text.endswith("$$"))
-        or (text.startswith(r"\[") and text.endswith(r"\]"))
-        or (text.startswith(r"\(") and text.endswith(r"\)"))
-        or (text.startswith("$") and text.endswith("$"))
-    ):
-        return text
     return f"$${text}$$"
 
 
-_LATEX_COMMAND_PATTERN = re.compile(
-    r"\\(?:"
-    r"alpha|beta|gamma|delta|varepsilon|epsilon|lambda|sigma|omega|Omega|pi|theta|nu|"
-    r"frac|cfrac|sqrt|sum|prod|left|right|begin|end|displaystyle|mathrm|scriptscriptstyle|"
-    r"quad|qquad|cdot|times|pm|geq|leq|vert|Bigg|Biggl|Biggr|bigg|sin|cos"
-    r")\b"
-)
+def _mathjax_inline_formula(value: str) -> str:
+    text = _strip_wrapping_math_delimiters(value.strip())
+    if not text:
+        return ""
+    return f"${text}$"
+
+
+def _strip_wrapping_math_delimiters(text: str) -> str:
+    if text.startswith(r"\[") and text.endswith(r"\]"):
+        return text[2:-2].strip()
+    if text.startswith(r"\(") and text.endswith(r"\)"):
+        return text[2:-2].strip()
+    if text.startswith("$") or text.endswith("$"):
+        stripped = text.strip("$").strip()
+        return stripped or text
+    return text
+
+
+_LATEX_COMMAND_PATTERN = re.compile(r"\\[A-Za-z]+")
 _LATEX_INLINE_SEGMENT_PATTERN = re.compile(
-    r"\\(?:"
-    r"alpha|beta|gamma|delta|varepsilon|epsilon|lambda|sigma|omega|Omega|pi|theta|nu|"
-    r"frac|cfrac|sqrt|sum|prod|left|right|begin|end|displaystyle|mathrm|scriptscriptstyle|"
-    r"quad|qquad|cdot|times|pm|geq|leq|vert|Bigg|Biggl|Biggr|bigg|sin|cos"
-    r")\b"
+    r"\\[A-Za-z]+"
     r"(?:\s*(?:[_^]\s*\{[^{}]*\}|[_^]\s*[A-Za-z0-9]+|\{[^{}]*\}|[=+\-*/(),.\[\]A-Za-z0-9])+)*"
 )
+_LATEX_SYMBOL_PATTERN = re.compile(r"(?:\\[A-Za-z]+|[_^]\s*\{|[=<>])")
 
 
 def normalize_mineru_math_text(value: str) -> str:
     text = value.strip()
-    if not text or "$" in text or not _LATEX_COMMAND_PATTERN.search(text):
+    if not text:
         return text
-    if _looks_like_standalone_latex(text):
-        return _mathjax_display_formula(text)
+    return _normalize_latex_outside_existing_math(text)
+
+
+def _normalize_latex_outside_existing_math(text: str) -> str:
+    output: list[str] = []
+    index = 0
+    plain_start = 0
+    while index < len(text):
+        span = _normalized_math_span_at(text, index)
+        if span:
+            end_index, normalized = span
+            output.append(_wrap_bare_latex_segments(text[plain_start:index]))
+            output.append(normalized)
+            index = end_index
+            plain_start = index
+            continue
+        index += 1
+    output.append(_wrap_bare_latex_segments(text[plain_start:]))
+    return "".join(output)
+
+
+def _normalized_math_span_at(text: str, index: int) -> tuple[int, str] | None:
+    if text.startswith(r"\[", index):
+        end = _find_unescaped_token(text, r"\]", index + 2)
+        if end >= 0:
+            return end + 2, _mathjax_display_formula(text[index : end + 2])
+    if text.startswith(r"\(", index):
+        end = _find_unescaped_token(text, r"\)", index + 2)
+        if end >= 0:
+            return end + 2, _mathjax_inline_formula(text[index : end + 2])
+
+    dollar_count = _dollar_run_length(text, index)
+    if dollar_count >= 2:
+        content_start = index + dollar_count
+        end = _find_dollar_run(text, content_start, min_count=2)
+        if end >= 0:
+            return end + _dollar_run_length(text, end), _mathjax_display_formula(text[content_start:end])
+        line_end = _line_end_index(text, content_start)
+        candidate = text[content_start:line_end]
+        if _contains_latex(candidate):
+            return line_end, _mathjax_display_formula(candidate)
+    if dollar_count == 1:
+        content_start = index + 1
+        end = _find_dollar_run(text, content_start, min_count=1, exact_count=1)
+        if end >= 0:
+            return end + 1, _mathjax_inline_formula(text[content_start:end])
+        line_end = _line_end_index(text, content_start)
+        candidate = text[content_start:line_end]
+        if _contains_latex(candidate):
+            return line_end, _mathjax_inline_formula(candidate)
+    return None
+
+
+def _wrap_bare_latex_segments(text: str) -> str:
+    if not _LATEX_COMMAND_PATTERN.search(text):
+        return text
+    stripped = text.strip()
+    if stripped and _looks_like_standalone_latex(stripped):
+        leading = text[: len(text) - len(text.lstrip())]
+        trailing = text[len(text.rstrip()) :]
+        return f"{leading}{_mathjax_display_formula(stripped)}{trailing}"
     return _LATEX_INLINE_SEGMENT_PATTERN.sub(
-        lambda match: f"${match.group(0).strip()}$",
+        lambda match: _mathjax_inline_formula(match.group(0).strip()),
         text,
     )
+
+
+def _contains_latex(text: str) -> bool:
+    return bool(_LATEX_SYMBOL_PATTERN.search(text))
+
+
+def _find_unescaped_token(text: str, token: str, start: int) -> int:
+    index = start
+    while index < len(text):
+        found = text.find(token, index)
+        if found < 0:
+            return -1
+        if not _is_escaped(text, found):
+            return found
+        index = found + len(token)
+    return -1
+
+
+def _dollar_run_length(text: str, index: int) -> int:
+    if index >= len(text) or text[index] != "$" or _is_escaped(text, index):
+        return 0
+    end = index
+    while end < len(text) and text[end] == "$":
+        end += 1
+    return end - index
+
+
+def _find_dollar_run(text: str, start: int, *, min_count: int, exact_count: int | None = None) -> int:
+    index = start
+    while index < len(text):
+        run_length = _dollar_run_length(text, index)
+        if run_length:
+            if run_length >= min_count and (exact_count is None or run_length == exact_count):
+                return index
+            index += run_length
+            continue
+        index += 1
+    return -1
+
+
+def _line_end_index(text: str, start: int) -> int:
+    newline = text.find("\n", start)
+    return len(text) if newline < 0 else newline
+
+
+def _is_escaped(text: str, index: int) -> bool:
+    backslashes = 0
+    cursor = index - 1
+    while cursor >= 0 and text[cursor] == "\\":
+        backslashes += 1
+        cursor -= 1
+    return backslashes % 2 == 1
 
 
 def _looks_like_standalone_latex(text: str) -> bool:

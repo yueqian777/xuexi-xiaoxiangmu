@@ -284,8 +284,28 @@ class PptCanvasQuestionTest(unittest.TestCase):
 
         self.assertIn(
             r"通带截止频率$\Omega _ { p }$、通带衰减$\delta _ { 1 }$",
-            result[0]["explanation"],
+            result[0]["slideText"],
         )
+
+    def test_build_reader_payload_keeps_full_mineru_text_separate_from_explanation(self):
+        long_prefix = "prefix " * 40
+        formula = r"\int_0^1 x dx"
+        slides = [
+            {
+                "id": 9,
+                "slide_number": 2,
+                "title": "Signals",
+                "slide_text": f"{long_prefix}{formula}",
+                "notes": "source=pdf;extractor=mineru",
+                "image_path": "",
+            }
+        ]
+
+        result = ppt_tutor._build_reader_payload(slides, {}, {}, image_slide_numbers=set())
+
+        self.assertEqual(result[0]["explanation"], "本页还没有 AI 讲解。")
+        self.assertIn(r"$\int_0^1 x dx$", result[0]["slideText"])
+        self.assertNotIn("...", result[0]["slideText"])
 
     def test_toggle_slide_bookmark_updates_slide_without_model_call(self):
         deck = {"id": 3, "title": "Deck", "subject": "Subject"}

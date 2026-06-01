@@ -78,6 +78,12 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "isAsciiWordLike",
             "isLikelyEqualityOperator",
             "findHighlightDelimiter",
+            "isEscapedAt",
+            "dollarRunLength",
+            "findDollarRun",
+            "mathLineEnd",
+            "looksLikeLatexSource",
+            "normalizeDollarMathDelimiters",
             "normalizeMathDelimiters",
             "findMathSegmentAt",
             "protectMathSegments",
@@ -90,6 +96,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "renderFallbackMarkdown",
             "renderMarkdown",
             "renderSafeExplanationMarkdown",
+            "noteDisplayMarkdown",
             "isGeneratedExplanationPreambleLine",
             "displayExplanationSourceInfo",
             "displayExplanationSource",
@@ -704,6 +711,46 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             }
             if (rendered.includes('MATHJAXPLACEHOLDER')) {
               throw new Error(rendered);
+            }
+            """
+        )
+
+    def test_render_markdown_repairs_repeated_and_unclosed_math_delimiters(self):
+        self.run_js(
+            r"""
+            global.window = {};
+
+            const rendered = renderMarkdown('Repeated $$$$\\int_0^1 x dx$$$$ and open $$\\Omega _ { p } = 2\\pi f _ { p }');
+            if (!rendered.includes('\\[\\int_0^1 x dx\\]')) {
+              throw new Error(rendered);
+            }
+            if (!rendered.includes('\\[\\Omega _ { p } = 2\\pi f _ { p }\\]')) {
+              throw new Error(rendered);
+            }
+            if (rendered.includes('$$$$') || rendered.includes('MATHJAXPLACEHOLDER')) {
+              throw new Error(rendered);
+            }
+            """
+        )
+
+    def test_note_display_markdown_includes_full_slide_text_after_explanation(self):
+        self.run_js(
+            r"""
+            const source = noteDisplayMarkdown({
+              explanation: 'AI explanation',
+              slideText: 'Extracted ' + 'prefix '.repeat(40) + '$$\\Omega _ { p } = 2\\pi f _ { p }$$',
+            });
+            if (!source.includes('AI explanation')) {
+              throw new Error(source);
+            }
+            if (!source.includes('PPT/PDF')) {
+              throw new Error(source);
+            }
+            if (!source.includes('$$\\Omega _ { p } = 2\\pi f _ { p }$$')) {
+              throw new Error(source);
+            }
+            if (source.includes('...')) {
+              throw new Error(source);
             }
             """
         )

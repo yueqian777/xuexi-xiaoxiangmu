@@ -3504,7 +3504,8 @@ def _build_reader_payload(
                 "title": slide_title,
                 "image": image_data,
                 "imageAvailable": image_available,
-                "explanation": latest["explanation"] if latest else "本页还没有 AI 讲解。" + (f"\n\n参考文字：\n{slide_text[:200]}..." if slide_text else ""),
+                "explanation": latest["explanation"] if latest else "本页还没有 AI 讲解。",
+                "slideText": slide_text,
                 "model": latest["model"] if latest else "",
                 "createdAt": latest["created_at"] if latest else "",
                 "sectionIndex": int(slide.get("section_index") or 0),
@@ -3777,7 +3778,7 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
     }}
     .note-body mjx-container {{
       overflow-x: auto;
-      overflow-y: hidden;
+      overflow-y: visible;
       max-width: 100%;
       padding: 2px 0;
     }}

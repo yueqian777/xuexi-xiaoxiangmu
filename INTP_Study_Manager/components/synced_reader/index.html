@@ -890,7 +890,7 @@
     }
     .note-body mjx-container {
       overflow-x: auto;
-      overflow-y: hidden;
+      overflow-y: visible;
       max-width: 100%;
       padding: 2px 0;
     }
@@ -1616,8 +1616,91 @@
       return -1;
     }
 
+    function isEscapedAt(source, index) {
+      let slashCount = 0;
+      for (let i = index - 1; i >= 0 && source[i] === '\\'; i -= 1) {
+        slashCount += 1;
+      }
+      return slashCount % 2 === 1;
+    }
+
+    function dollarRunLength(source, index) {
+      if (source[index] !== '$' || isEscapedAt(source, index)) return 0;
+      let end = index;
+      while (source[end] === '$') end += 1;
+      return end - index;
+    }
+
+    function findDollarRun(source, start, minCount, exactCount = null) {
+      let index = start;
+      while (index < source.length) {
+        const runLength = dollarRunLength(source, index);
+        if (runLength) {
+          if (runLength >= minCount && (exactCount === null || runLength === exactCount)) return index;
+          index += runLength;
+          continue;
+        }
+        index += 1;
+      }
+      return -1;
+    }
+
+    function mathLineEnd(source, start) {
+      const newline = source.indexOf('\n', start);
+      return newline < 0 ? source.length : newline;
+    }
+
+    function looksLikeLatexSource(value) {
+      const source = String(value || '');
+      return /\\[A-Za-z]+/.test(source)
+        || (/[_^]\s*/.test(source) && source.includes(String.fromCharCode(123)))
+        || /[=<>]/.test(source);
+    }
+
+    function normalizeDollarMathDelimiters(source) {
+      let output = '';
+      let index = 0;
+      while (index < source.length) {
+        const runLength = dollarRunLength(source, index);
+        if (runLength >= 2) {
+          const contentStart = index + runLength;
+          const end = findDollarRun(source, contentStart, 2);
+          if (end >= 0) {
+            output += `\\[${source.slice(contentStart, end).trim()}\\]`;
+            index = end + dollarRunLength(source, end);
+            continue;
+          }
+          const lineEnd = mathLineEnd(source, contentStart);
+          const candidate = source.slice(contentStart, lineEnd);
+          if (looksLikeLatexSource(candidate)) {
+            output += `\\[${candidate.trim()}\\]`;
+            index = lineEnd;
+            continue;
+          }
+        } else if (runLength === 1) {
+          const contentStart = index + 1;
+          const end = findDollarRun(source, contentStart, 1, 1);
+          if (end >= 0) {
+            output += `\\(${source.slice(contentStart, end).trim()}\\)`;
+            index = end + 1;
+            continue;
+          }
+          const lineEnd = mathLineEnd(source, contentStart);
+          const candidate = source.slice(contentStart, lineEnd);
+          if (looksLikeLatexSource(candidate)) {
+            output += `\\(${candidate.trim()}\\)`;
+            index = lineEnd;
+            continue;
+          }
+        }
+        output += source[index];
+        index += 1;
+      }
+      return output;
+    }
+
     function normalizeMathDelimiters(value) {
-      return String(value ?? '').replace(/\\\\([()[\]])/g, '\\$1');
+      return normalizeDollarMathDelimiters(String(value ?? '').replace(/\\\\([()[\]])/g, '\\$1'));
     }
 
     function findMathSegmentAt(source, index) {
@@ -2987,9 +3070,17 @@
       window.setTimeout(recenter, 720);
     }
 
+    function noteDisplayMarkdown(page) {
+      const explanation = String(page?.explanation || '').trim();
+      const slideText = String(page?.slideText || page?.slide_text || '').trim();
+      if (!slideText) return explanation;
+      const sourceSection = `### PPT/PDF 识别文字\n\n${slideText}`;
+      return explanation ? `${explanation}\n\n---\n\n${sourceSection}` : sourceSection;
+    }
+
     function renderNoteBody(page, hydrate = false) {
       if (hydrate) {
-        return `<div class="note-body" data-hydrated="1">${renderSafeExplanationMarkdown(page.explanation)}</div>`;
+        return `<div class="note-body" data-hydrated="1">${renderSafeExplanationMarkdown(noteDisplayMarkdown(page))}</div>`;
       }
       return '<div class="note-body lazy" data-hydrated="0">讲解按需渲染</div>';
     }
@@ -3003,13 +3094,14 @@
       const hydrateKey = Number(slideNumber);
       const pending = hydratingNotePromises.get(hydrateKey);
       if (pending?.body === body) return pending.promise;
-      body.innerHTML = renderSafeExplanationMarkdown(page.explanation);
+      const displayMarkdown = noteDisplayMarkdown(page);
+      body.innerHTML = renderSafeExplanationMarkdown(displayMarkdown);
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (editor) editor.value = String(page.explanation || '');
       const promise = typesetTargets([body])
         .then(typesetDone => {
-          if (typesetDone !== false) applyMarkdownSourceMap(body, page.explanation);
+          if (typesetDone !== false) applyMarkdownSourceMap(body, displayMarkdown);
           return true;
         })
         .finally(() => {
@@ -3336,14 +3428,14 @@
       const previousNoteScroll = noteRoot.scrollTop;
       const previousPageScroll = pageRoot.scrollTop;
       page.explanation = explanation;
-      body.innerHTML = renderSafeExplanationMarkdown(explanation);
+      body.innerHTML = renderSafeExplanationMarkdown(noteDisplayMarkdown(page));
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (editor) editor.value = explanation;
       if (!options.keepEditing) note.classList.remove('editing');
 
       return typesetTargets([body]).then(typesetDone => {
-        if (typesetDone !== false) applyMarkdownSourceMap(body, explanation);
+        if (typesetDone !== false) applyMarkdownSourceMap(body, noteDisplayMarkdown(page));
         return true;
       }).finally(() => {
         noteRoot.scrollTop = previousNoteScroll;
@@ -3429,7 +3521,7 @@
         const body = note.querySelector('.note-body');
         const editor = note.querySelector('.note-editor');
         if (!body) return;
-        body.innerHTML = renderSafeExplanationMarkdown(page.explanation);
+        body.innerHTML = renderSafeExplanationMarkdown(noteDisplayMarkdown(page));
         body.classList.remove('lazy');
         body.dataset.hydrated = '1';
         if (editor) editor.value = String(page.explanation || '');
@@ -3799,7 +3891,7 @@
       const slideNumber = Number(note?.dataset?.page);
       const page = pageForSlide(slideNumber);
       if (!body || !page) return false;
-      return applyMarkdownSourceMap(body, page.explanation);
+      return applyMarkdownSourceMap(body, noteDisplayMarkdown(page));
     }
 
     function applyMarkdownSourceMapsForBodies(bodies) {
@@ -4189,10 +4281,10 @@
       }
 
       if (!noteBodySourceMaps.get(body)) {
-        applyMarkdownSourceMap(body, page.explanation);
+        applyMarkdownSourceMap(body, noteDisplayMarkdown(page));
       }
 
-      const location = quoteLocationForCentering(page.explanation || '', payload);
+      const location = quoteLocationForCentering(noteDisplayMarkdown(page), payload);
       const targetRect = quoteRectInBody(body, location) || note.getBoundingClientRect();
       const rootRect = noteRoot.getBoundingClientRect();
       const targetTop = targetRect.top - rootRect.top + noteRoot.scrollTop;
@@ -4315,7 +4407,7 @@
       if (!page || !body) return;
 
       const previousScrollTop = noteRoot.scrollTop;
-      body.innerHTML = renderSafeExplanationMarkdown(page.explanation);
+      body.innerHTML = renderSafeExplanationMarkdown(noteDisplayMarkdown(page));
       body.classList.remove('lazy');
       body.dataset.hydrated = '1';
       if (button) {
@@ -4323,7 +4415,7 @@
         button.textContent = '刷新中';
       }
       typesetTargets([body]).then(typesetDone => {
-        if (typesetDone !== false) applyMarkdownSourceMap(body, page.explanation);
+        if (typesetDone !== false) applyMarkdownSourceMap(body, noteDisplayMarkdown(page));
       }).finally(() => {
         noteRoot.scrollTop = previousScrollTop;
         if (!button) return;
@@ -4694,7 +4786,7 @@
       const slideNumber = Number(note.dataset.page);
       const page = pages.find(item => Number(item.slideNumber) === slideNumber) || {};
       if (!noteBodySourceMaps.get(noteBody)) {
-        applyMarkdownSourceMap(noteBody, page.explanation);
+        applyMarkdownSourceMap(noteBody, noteDisplayMarkdown(page));
       }
       const sourceLocation = sourceLocationFromSelectionRange(noteBody, range);
       const startHighlight = startElement?.closest?.('.reader-highlight');

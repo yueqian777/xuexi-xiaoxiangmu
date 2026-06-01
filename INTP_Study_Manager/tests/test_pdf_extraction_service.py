@@ -9,6 +9,7 @@ from services.pdf_extraction_service import (
     MinerUStatus,
     extract_pdf_pages,
     get_mineru_status,
+    normalize_mineru_math_text,
     parse_mineru_content_list,
 )
 
@@ -137,6 +138,32 @@ class PdfExtractionServiceTest(unittest.TestCase):
 
         self.assertEqual(pages[0]["slide_text"], "$$x = y + 1$$")
 
+    def test_normalize_mineru_math_text_repairs_delimiter_damage(self):
+        self.assertEqual(
+            normalize_mineru_math_text(r"Gain $$$$\int_0^1 x dx$$$$"),
+            r"Gain $$\int_0^1 x dx$$",
+        )
+        self.assertEqual(
+            normalize_mineru_math_text(r"Open $$\Omega _ { p } = 2\pi f _ { p }"),
+            r"Open $$\Omega _ { p } = 2\pi f _ { p }$$",
+        )
+        self.assertEqual(
+            normalize_mineru_math_text(r"Known $x$ and bare \Omega _ { p }"),
+            r"Known $x$ and bare $\Omega _ { p }$",
+        )
+
+    def test_parse_mineru_content_list_normalizes_repeated_and_unclosed_formula_delimiters(self):
+        content = [
+            {"type": "equation", "text": r"$$$$\int_0^1 x dx$$$$", "page_idx": 0},
+            {"type": "text", "text": r"Open $$\Omega _ { p } = 2\pi f _ { p }", "page_idx": 0},
+        ]
+        pages = parse_mineru_content_list(content)
+
+        text = pages[0]["slide_text"]
+        self.assertIn(r"$$\int_0^1 x dx$$", text)
+        self.assertIn(r"Open $$\Omega _ { p } = 2\pi f _ { p }$$", text)
+        self.assertNotIn("$$$$", text)
+
     def test_parse_mineru_content_list_imports_header_and_footer_blocks(self):
         content = [
             {"type": "header", "text": "Course Header", "page_idx": 0},
@@ -166,6 +193,17 @@ class PdfExtractionServiceTest(unittest.TestCase):
 
         self.assertIn(r"$$\Omega _ { s } = 2\pi f _ { s }$$", pages[0]["slide_text"])
         self.assertIn("Caption text that still belongs on the page", pages[0]["slide_text"])
+
+    def test_parse_mineru_content_list_accepts_common_page_number_keys(self):
+        content = [
+            {"type": "text", "text": "First page", "page": 1},
+            {"type": "text", "text": "Second page", "page_no": 2},
+            {"type": "text", "text": "Third page", "page_number": 3},
+        ]
+        pages = parse_mineru_content_list(content)
+
+        self.assertEqual([page["slide_number"] for page in pages], [1, 2, 3])
+        self.assertIn("Second page", pages[1]["slide_text"])
 
     def test_parse_mineru_content_list_v2_nested_pages(self):
         content = [
@@ -252,6 +290,40 @@ class PdfExtractionServiceTest(unittest.TestCase):
 
         self.assertIn(r"$$\omega _ { p } = \Omega _ { p } / T$$", pages[0]["slide_text"])
         self.assertIn("Nested span text", pages[0]["slide_text"])
+
+    def test_parse_mineru_content_list_v2_handles_variant_levels_and_nested_table_content(self):
+        content = [
+            [
+                {
+                    "type": "title",
+                    "content": {"title_content": "Variant Title", "level": "h2"},
+                },
+                {
+                    "type": "table",
+                    "content": {
+                        "table_caption": [{"text": "Table caption"}],
+                        "table_body": [{"text": "Nested table body"}],
+                        "table_footnote": [{"text": "Table footnote"}],
+                    },
+                },
+                {
+                    "type": "custom",
+                    "content": {
+                        "caption": "Custom caption",
+                        "markdown": "Custom markdown body",
+                    },
+                },
+            ]
+        ]
+        pages = parse_mineru_content_list(content)
+
+        text = pages[0]["slide_text"]
+        self.assertIn("## Variant Title", text)
+        self.assertIn("Table caption", text)
+        self.assertIn("Nested table body", text)
+        self.assertIn("Table footnote", text)
+        self.assertIn("Custom caption", text)
+        self.assertIn("Custom markdown body", text)
 
     def test_mineru_extraction_archives_raw_json_and_markdown_outputs(self):
         temp_root = Path(self.tmp.name) / "mineru-temp"
@@ -529,6 +601,64 @@ class PdfExtractionServiceTest(unittest.TestCase):
 
         self.assertEqual(pages[0]["slide_number"], 85)
         self.assertEqual(pages[0]["title"], "Page range result")
+
+    def test_mineru_extraction_does_not_double_offset_absolute_page_indexes(self):
+        content_dir = Path(self.tmp.name) / "out" / "doc"
+        content_dir.mkdir(parents=True)
+        (content_dir / "doc_content_list.json").write_text(
+            json.dumps([{"type": "text", "text": "Absolute page result", "page_idx": 84}]),
+            encoding="utf-8",
+        )
+
+        def fake_run(_command, **_kwargs):
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        env = {
+            "INTP_MINERU_COMMAND": "D:\\MinerU\\.venv\\Scripts\\mineru.exe",
+            "INTP_MINERU_OUTPUT_DIR": str(Path(self.tmp.name) / "out"),
+            "INTP_MINERU_START_PAGE": "84",
+        }
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch("services.pdf_extraction_service._resolve_command", return_value=env["INTP_MINERU_COMMAND"]),
+            patch("services.pdf_extraction_service._probe_mineru_command", return_value=(True, "ok")),
+            patch("services.pdf_extraction_service.tempfile.TemporaryDirectory") as temporary_directory,
+            patch("services.pdf_extraction_service.subprocess.run", side_effect=fake_run),
+        ):
+            temporary_directory.return_value.__enter__.return_value = str(content_dir.parent)
+            pages = extract_pdf_pages(self.pdf_path, method="mineru")
+
+        self.assertEqual(pages[0]["slide_number"], 85)
+        self.assertEqual(pages[0]["title"], "Absolute page result")
+
+    def test_mineru_extraction_offsets_later_relative_page_indexes_in_configured_range(self):
+        content_dir = Path(self.tmp.name) / "out" / "doc"
+        content_dir.mkdir(parents=True)
+        (content_dir / "doc_content_list.json").write_text(
+            json.dumps([{"type": "text", "text": "Relative second page", "page_idx": 1}]),
+            encoding="utf-8",
+        )
+
+        def fake_run(_command, **_kwargs):
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        env = {
+            "INTP_MINERU_COMMAND": "D:\\MinerU\\.venv\\Scripts\\mineru.exe",
+            "INTP_MINERU_OUTPUT_DIR": str(Path(self.tmp.name) / "out"),
+            "INTP_MINERU_START_PAGE": "84",
+        }
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch("services.pdf_extraction_service._resolve_command", return_value=env["INTP_MINERU_COMMAND"]),
+            patch("services.pdf_extraction_service._probe_mineru_command", return_value=(True, "ok")),
+            patch("services.pdf_extraction_service.tempfile.TemporaryDirectory") as temporary_directory,
+            patch("services.pdf_extraction_service.subprocess.run", side_effect=fake_run),
+        ):
+            temporary_directory.return_value.__enter__.return_value = str(content_dir.parent)
+            pages = extract_pdf_pages(self.pdf_path, method="mineru")
+
+        self.assertEqual(pages[0]["slide_number"], 86)
+        self.assertEqual(pages[0]["title"], "Relative second page")
 
     def test_mineru_command_defaults_cache_and_temp_to_d_drive(self):
         content_dir = Path(self.tmp.name) / "out" / "doc"

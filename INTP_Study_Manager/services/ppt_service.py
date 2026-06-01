@@ -361,24 +361,56 @@ def refresh_pdf_slide_text(deck: dict, slides: list[dict], *, method: str = "loc
         raise RuntimeError("只有 PDF 资料需要重新提取文字。")
 
     extracted = {int(item["slide_number"]): item for item in extract_pdf_pages(path, method=method)}
+    user = require_login()
+    deck_id = int(deck["id"])
+    existing_by_number = {int(slide["slide_number"]): slide for slide in slides}
     updated = 0
-    rows = []
-    for slide in slides:
-        slide_number = int(slide["slide_number"])
-        item = extracted.get(slide_number)
+    update_rows = []
+    insert_rows = []
+    for slide_number, item in sorted(extracted.items()):
+        slide = existing_by_number.get(slide_number)
+        if slide is None:
+            insert_rows.append(
+                (
+                    user.id,
+                    deck_id,
+                    slide_number,
+                    item["title"],
+                    item["slide_text"],
+                    item["notes"],
+                    "",
+                )
+            )
+            if str(item["slide_text"]).strip():
+                updated += 1
+            continue
         if not item:
             continue
-        rows.append((item["title"], item["slide_text"], item["notes"], slide["id"]))
+        update_rows.append((item["title"], item["slide_text"], item["notes"], slide["id"], user.id))
         if str(item["slide_text"]).strip():
             updated += 1
-    execute_many(
-        """
-        UPDATE ppt_slides
-        SET title = ?, slide_text = ?, notes = ?
-        WHERE id = ? AND user_id = ?
-        """,
-        ((title, slide_text, notes, slide_id, require_login().id) for title, slide_text, notes, slide_id in rows),
-    )
+    with write_transaction() as conn:
+        conn.executemany(
+            """
+            UPDATE ppt_slides
+            SET title = ?, slide_text = ?, notes = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            update_rows,
+        )
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO ppt_slides (user_id, deck_id, slide_number, title, slide_text, notes, image_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            insert_rows,
+        )
+        if extracted:
+            max_slide_number = max([*extracted.keys(), *existing_by_number.keys(), 0])
+            conn.execute(
+                "UPDATE ppt_decks SET slide_count = CASE WHEN slide_count < ? THEN ? ELSE slide_count END WHERE id = ? AND user_id = ?",
+                (max_slide_number, max_slide_number, deck_id, user.id),
+            )
     return updated
 
 
