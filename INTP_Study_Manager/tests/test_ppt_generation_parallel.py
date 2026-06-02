@@ -1,8 +1,10 @@
 import time
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import db
 from services.ai_service import AIServiceError
 from services import api_runtime
 from pages import ppt_tutor
@@ -61,6 +63,22 @@ class _LockedWidgetState(dict):
 
 
 class PptGenerationParallelTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name)
+        self.db_path = self.data_dir / "study_manager.db"
+        self.db_patchers = [
+            patch.object(db, "DATA_DIR", self.data_dir),
+            patch.object(db, "DATABASE_PATH", self.db_path),
+        ]
+        for patcher in self.db_patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(setattr, db, "_INITIALIZED_DATABASE_PATH", None)
+        db._INITIALIZED_DATABASE_PATH = None
+        db.init_db()
+
     def test_generation_ui_does_not_expose_retry_choice_or_attempt_count(self):
         source = (APP_ROOT / "pages" / "ppt_tutor.py").read_text(encoding="utf-8")
 
