@@ -161,32 +161,6 @@
       color: #087b70;
       background: var(--soft-green);
     }
-    .mode-controls {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-right: 8px;
-      padding: 3px;
-      border: 1px solid #b9dde6;
-      border-radius: 999px;
-      background: #f7fffd;
-    }
-    .mode-controls button {
-      border: 0;
-      border-radius: 999px;
-      padding: 5px 10px;
-      background: transparent;
-      color: #4c7580;
-      font: inherit;
-      font-size: 12px;
-      font-weight: 900;
-      cursor: pointer;
-    }
-    .mode-controls button.active {
-      background: linear-gradient(135deg, #18a58f, #55b7f4);
-      color: #ffffff;
-      box-shadow: 0 5px 12px rgba(24, 128, 151, .17);
-    }
     .topbar-right {
       display: flex;
       align-items: center;
@@ -488,33 +462,26 @@
       touch-action: pan-y;
     }
     .pages {
-      padding: 22px 24px 80px;
+      padding: 28px 24px;
       background:
         radial-gradient(circle at 10% 10%, rgba(85,183,244,.16), transparent 28%),
         linear-gradient(180deg, #f3fbff, #eefaf6);
-    }
-    .pages.paged {
-      padding: 28px 24px;
       scroll-snap-type: y mandatory;
       scroll-padding-block: 28px;
     }
     .page {
       position: relative;
-      margin: 0 auto 30px;
-      max-width: 960px;
+      min-height: calc(100% - 64px);
+      height: calc(100% - 64px);
+      width: 100%;
+      max-width: none;
+      margin: 32px auto;
       padding: 12px;
       border-radius: 14px;
       border: 2px solid transparent;
       background: rgba(255,255,255,.56);
       box-shadow: 0 10px 28px rgba(20,85,98,.13);
       transition: border-color .18s, transform .18s, box-shadow .18s;
-    }
-    .pages.paged .page {
-      min-height: calc(100% - 64px);
-      height: calc(100% - 64px);
-      width: 100%;
-      max-width: none;
-      margin: 32px auto;
       display: flex;
       flex-direction: column;
       justify-content: center;
@@ -582,30 +549,15 @@
     }
     .page img {
       width: 100%;
+      height: 100%;
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
       display: block;
       border-radius: 8px;
       background: #fff;
     }
     .page-visual {
-      width: 100%;
-    }
-    .page-placeholder {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 100%;
-      aspect-ratio: 4 / 3;
-      min-height: 220px;
-      box-sizing: border-box;
-      border: 1px dashed #b9dde6;
-      border-radius: 8px;
-      background: #f8fffd;
-      color: #5d7c86;
-      font-size: var(--reader-ui-size);
-      font-weight: 800;
-      text-align: center;
-    }
-    .pages.paged .page-visual {
       flex: 1;
       min-height: 0;
       width: 100%;
@@ -614,16 +566,22 @@
       justify-content: center;
       overflow: hidden;
     }
-    .pages.paged .page img {
+    .page-placeholder {
+      display: flex;
+      align-items: center;
+      justify-content: center;
       width: 100%;
       height: 100%;
-      max-width: 100%;
-      max-height: 100%;
-      object-fit: contain;
-    }
-    .pages.paged .page-placeholder {
-      height: 100%;
       min-height: 0;
+      aspect-ratio: 4 / 3;
+      box-sizing: border-box;
+      border: 1px dashed #b9dde6;
+      border-radius: 8px;
+      background: #f8fffd;
+      color: #5d7c86;
+      font-size: var(--reader-ui-size);
+      font-weight: 800;
+      text-align: center;
     }
     .notes {
       padding: 22px 20px 80px;
@@ -1328,12 +1286,10 @@
       gap: 10px;
     }
     body.reader-layout-narrow .topbar-right,
-    body.reader-layout-narrow .layout-controls,
-    body.reader-layout-narrow .mode-controls {
+    body.reader-layout-narrow .layout-controls {
       gap: 5px;
     }
     body.reader-layout-narrow .layout-controls button,
-    body.reader-layout-narrow .mode-controls button,
     body.reader-layout-narrow .bookmark-menu-button,
     body.reader-layout-narrow .section-select {
       padding-left: 8px;
@@ -1372,7 +1328,6 @@
       .pages { border-right: 0; }
       .section-select { display: none; }
       .layout-controls { display: none; }
-      .mode-controls { display: none; }
       .fullscreen-btn { display: none; }
     }
   </style>
@@ -1394,10 +1349,6 @@
           <div class="bookmark-popover" id="bookmarkPopover" hidden></div>
         </div>
         <select class="section-select" id="sectionSelect" title="目录跳转"></select>
-        <div class="mode-controls" aria-label="PPT 阅读模式">
-          <button type="button" data-reading-mode="paged">逐页</button>
-          <button type="button" data-reading-mode="continuous">连续</button>
-        </div>
         <div class="layout-controls" aria-label="阅读器宽度比例">
           <button type="button" data-layout-preset="balanced">均衡</button>
           <button type="button" data-layout-preset="reading">原页优先</button>
@@ -1527,7 +1478,6 @@
     let layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
     let chatCollapsed = true;
     let activeResize = null;
-    let readingMode = 'paged';
     let pageWheelDelta = 0;
     let lastPageSwitchAt = 0;
     let scrollStateSaveTimer = null;
@@ -2266,40 +2216,11 @@
       localStorage.setItem(globalStorageKey('chatCollapsed'), String(chatCollapsed));
     }
 
-    function loadReadingMode() {
-      const saved = localStorage.getItem(globalStorageKey('readingMode'));
-      readingMode = saved === 'continuous' ? 'continuous' : 'paged';
-      applyReadingMode();
-    }
-
-    function saveReadingMode() {
-      localStorage.setItem(globalStorageKey('readingMode'), readingMode);
-    }
-
     function applyReaderWidthClass(gridWidth) {
       const classList = globalThis?.document?.body?.classList;
       if (!classList) return;
       classList.toggle('reader-layout-narrow', Number(gridWidth || 0) < 1180);
       classList.toggle('reader-layout-wide', Number(gridWidth || 0) >= 1540);
-    }
-
-    function applyReadingMode() {
-      pageRoot.classList.toggle('paged', readingMode === 'paged');
-      document.querySelectorAll('[data-reading-mode]').forEach(button => {
-        button.classList.toggle('active', button.dataset.readingMode === readingMode);
-      });
-      if (readingMode === 'paged' && pages.length) {
-        window.setTimeout(() => centerPage(currentSlideNumber, 'auto'), 40);
-      }
-    }
-
-    function setReadingMode(mode) {
-      readingMode = mode === 'continuous' ? 'continuous' : 'paged';
-      applyReadingMode();
-      saveReadingMode();
-      if (readingMode === 'paged') {
-        centerPage(currentSlideNumber, 'smooth');
-      }
     }
 
     function applyLayoutState() {
@@ -3065,11 +2986,10 @@
       const targetSlide = Number(slideNumber || 0);
       const page = document.getElementById(`page-${targetSlide}`);
       const image = page?.querySelector?.('.page-visual img');
-      const settledBehavior = readingMode === 'paged' ? 'auto' : behavior;
       const recenter = () => {
         if (Number(currentSlideNumber) === targetSlide) {
           window.requestAnimationFrame(() => {
-            centerPage(targetSlide, settledBehavior);
+            centerPage(targetSlide, 'auto');
             window.requestAnimationFrame(() => centerPage(targetSlide, 'auto'));
           });
         }
@@ -3595,14 +3515,10 @@
       const pageRect = page.getBoundingClientRect();
       const targetTop = pageRect.top - rootRect.top + pageRoot.scrollTop;
       const top = centeredScrollTopForElement(pageRoot.clientHeight, targetTop, pageRect.height || page.offsetHeight, maxTop);
-      if (readingMode === 'paged') {
-        const previousScrollBehavior = pageRoot.style.scrollBehavior;
-        pageRoot.style.scrollBehavior = 'auto';
-        pageRoot.scrollTop = top;
-        pageRoot.style.scrollBehavior = previousScrollBehavior;
-        return;
-      }
-      pageRoot.scrollTo({ top, behavior });
+      const previousScrollBehavior = pageRoot.style.scrollBehavior;
+      pageRoot.style.scrollBehavior = 'auto';
+      pageRoot.scrollTop = top;
+      pageRoot.style.scrollBehavior = previousScrollBehavior;
     }
 
     function navigateSlide(delta) {
@@ -4323,9 +4239,7 @@
         maxTop
       );
       noteRoot.scrollTo({ top: nextTop, behavior: options.behavior || 'auto' });
-      if (readingMode === 'paged') {
-        centerPage(slideNumber, options.pageBehavior || options.behavior || 'auto');
-      }
+      centerPage(slideNumber, options.pageBehavior || options.behavior || 'auto');
       saveScrollState();
       return Boolean(location);
     }
@@ -4526,7 +4440,6 @@
       frame.style.height = `${Math.max(360, height - 15)}px`;
       Streamlit.setFrameHeight(height);
       loadLayoutState();
-      loadReadingMode();
       const focusSubmittedCanvasQuestion = canvasQuestionFocusPending;
 
       deckTitle.textContent = String(args.title || '学习资料');
@@ -4659,7 +4572,7 @@
             const centerDistance = Math.abs((rect.top + rect.height / 2) - rootCenter);
             return { entry, centerDistance };
           })
-          .filter(item => readingMode !== 'paged' || item.centerDistance <= Math.max(48, pageRoot.clientHeight * 0.18))
+          .filter(item => item.centerDistance <= Math.max(48, pageRoot.clientHeight * 0.18))
           .sort((a, b) => (a.centerDistance - b.centerDistance) || (b.entry.intersectionRatio - a.entry.intersectionRatio))[0]?.entry;
         if (!visible) return;
         setActive(visible.target.dataset.page);
@@ -5277,7 +5190,6 @@
       const target = event.target;
       const isEditing = target?.closest?.('textarea, input, select, button, [contenteditable="true"]');
       if (isEditing) return;
-      if (readingMode !== 'paged') return;
       const key = event.key;
       if (key === 'ArrowDown' || key === 'PageDown' || (key === ' ' && !event.shiftKey)) {
         event.preventDefault();
@@ -5367,9 +5279,6 @@
     });
     document.querySelectorAll('[data-layout-preset]').forEach(button => {
       button.addEventListener('click', () => setLayoutPreset(button.dataset.layoutPreset));
-    });
-    document.querySelectorAll('[data-reading-mode]').forEach(button => {
-      button.addEventListener('click', () => setReadingMode(button.dataset.readingMode));
     });
     if (pageJumpInput) {
       pageJumpInput.addEventListener('focus', () => pageJumpInput.select());
@@ -5526,7 +5435,7 @@
       if (scrollNoteEditor(event)) return;
       const panel = nearestScrollPanel(event.target);
       if (!panel) return;
-      if (panel === pageRoot && readingMode === 'paged') {
+      if (panel === pageRoot) {
         handlePagedWheel(event);
         return;
       }

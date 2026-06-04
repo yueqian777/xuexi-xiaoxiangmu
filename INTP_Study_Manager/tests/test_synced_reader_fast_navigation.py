@@ -613,9 +613,20 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "centerPageAfterImageSettles(currentSlideNumber, options.behavior || 'smooth');",
             self.source,
         )
-        self.assertIn("const settledBehavior = readingMode === 'paged' ? 'auto' : behavior;", self.source)
+        self.assertIn("centerPage(targetSlide, 'auto');", self.source)
         self.assertIn("[80, 180, 360, 720].forEach(delay => window.setTimeout(recenter, delay));", self.source)
         self.assertIn("viewportAnchorState = null;", self.source)
+
+    def test_reader_has_only_paged_mode(self):
+        self.assertNotIn("data-reading-mode", self.source)
+        self.assertNotIn("mode-controls", self.source)
+        self.assertNotIn("readingMode", self.source)
+        self.assertNotIn("continuous", self.source)
+        self.assertNotIn(".pages.paged", self.source)
+        self.assertRegex(
+            self.source,
+            r"\.pages\s*\{[^}]*scroll-snap-type:\s*y mandatory;[^}]*scroll-padding-block:\s*28px;",
+        )
 
     def test_patch_refresh_sets_target_before_image_window_update(self):
         self.assertIn(
@@ -638,10 +649,10 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             self.source,
         )
 
-    def test_paged_observer_requires_centered_page_before_activation(self):
+    def test_observer_requires_centered_page_before_activation(self):
         self.assertIn("const rootCenter = rootRect.top + rootRect.height / 2;", self.source)
         self.assertIn(
-            ".filter(item => readingMode !== 'paged' || item.centerDistance <= Math.max(48, pageRoot.clientHeight * 0.18))",
+            ".filter(item => item.centerDistance <= Math.max(48, pageRoot.clientHeight * 0.18))",
             self.source,
         )
         self.assertIn(".sort((a, b) => (a.centerDistance - b.centerDistance) || (b.entry.intersectionRatio - a.entry.intersectionRatio))", self.source)
