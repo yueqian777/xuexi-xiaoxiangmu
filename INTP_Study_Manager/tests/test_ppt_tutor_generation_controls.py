@@ -95,6 +95,37 @@ class PptTutorGenerationControlsTest(unittest.TestCase):
         self.assertNotIn(retry_text, visible_captions)
         self.assertNotIn(sync_text, visible_captions)
 
+    def test_pdf_rescan_fill_pages_is_visible_primary_action(self):
+        button_calls = [
+            node
+            for node in ast.walk(self.render_deck_actions)
+            if isinstance(node, ast.Call)
+            and _call_name(node).endswith(".button")
+            and _first_string_arg(node) == "重新扫描 / 补齐 PDF 页面"
+        ]
+        self.assertEqual(len(button_calls), 1)
+
+        parent_by_child = {
+            child: parent
+            for parent in ast.walk(self.render_deck_actions)
+            for child in ast.iter_child_nodes(parent)
+        }
+        current = button_calls[0]
+        guarded_by_pdf_deck = False
+        while current in parent_by_child:
+            current = parent_by_child[current]
+            if (
+                isinstance(current, ast.If)
+                and isinstance(current.test, ast.Call)
+                and _call_name(current.test) == "_is_pdf_deck"
+            ):
+                guarded_by_pdf_deck = True
+                break
+
+        self.assertTrue(guarded_by_pdf_deck)
+        nested_calls = {_call_name(item) for item in ast.walk(current) if isinstance(item, ast.Call)}
+        self.assertIn("refresh_pdf_slide_text", nested_calls)
+
 
 if __name__ == "__main__":
     unittest.main()

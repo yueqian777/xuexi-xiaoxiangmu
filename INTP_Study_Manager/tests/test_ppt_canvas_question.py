@@ -135,6 +135,39 @@ class PptCanvasQuestionTest(unittest.TestCase):
             quote_source_question_id=12,
         )
 
+    def test_canvas_question_marks_submitted_slide_active_for_next_payload(self):
+        deck = {"id": 3, "title": "Deck", "subject": "Subject"}
+        slides = [
+            {"id": 8, "slide_number": 4, "title": "Previous", "slide_text": ""},
+            {"id": 9, "slide_number": 5, "title": "Target", "slide_text": "body"},
+            {"id": 10, "slide_number": 6, "title": "Next", "slide_text": ""},
+        ]
+        payload = {
+            "action": "canvas_question",
+            "deckId": 3,
+            "slideNumber": 5,
+            "token": "tok-active-slide",
+            "question": "why this step?",
+        }
+        session_state = {
+            ppt_tutor._reader_active_slide_state_key(3): 4,
+        }
+
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor.st, "spinner", return_value=nullcontext()),
+            patch.object(ppt_tutor.st, "rerun"),
+            patch.object(ppt_tutor, "build_slide_context_map", return_value={5: {"same_section": []}}),
+            patch.object(ppt_tutor, "_build_branch_prompt", return_value="model prompt"),
+            patch.object(ppt_tutor, "generate_text", return_value="answer"),
+            patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 11})()),
+            patch.object(ppt_tutor, "_active_model_label", return_value="test model"),
+            patch.object(ppt_tutor, "add_slide_question"),
+        ):
+            ppt_tutor._handle_synced_reader_action(deck, slides, {}, payload, [])
+
+        self.assertEqual(session_state[ppt_tutor._reader_active_slide_state_key(3)], 5)
+
     def test_canvas_answer_highlight_save_updates_question_answer_without_model_call(self):
         deck = {"id": 3, "title": "信号课件", "subject": "信号与系统"}
         slide = {"id": 9, "slide_number": 2, "title": "周期信号", "slide_text": "本页正文"}

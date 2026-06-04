@@ -502,6 +502,16 @@ def _render_deck_actions(
         option_values = [value for value, _label in extraction_options]
         if st.session_state.get(method_key) not in option_values:
             st.session_state[method_key] = "local"
+        extraction_method = st.session_state.get(method_key, "local")
+        if cols[1].button("重新扫描 / 补齐 PDF 页面"):
+            try:
+                spinner_text = "正在使用 MinerU 高精度扫描 PDF..." if extraction_method == "mineru" else "正在重新扫描 PDF 页面..."
+                with st.spinner(spinner_text):
+                    updated = refresh_pdf_slide_text(deck, slides, method=extraction_method)
+                st.success(f"PDF 页面已补齐：{updated} 页提取到文本。")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"重新扫描 / 补齐 PDF 页面失败：{exc}")
         with st.expander("PDF 识别增强设置", expanded=False):
             st.radio(
                 "重新提取方式",
@@ -514,17 +524,6 @@ def _render_deck_actions(
             if not mineru_status.available:
                 st.caption("MinerU 是自愿安装的辅助配置，不会随 requirements.txt 自动安装。")
                 st.code('setx INTP_MINERU_COMMAND "D:\\MinerU\\.venv\\Scripts\\mineru.exe"', language="powershell")
-
-        extraction_method = st.session_state.get(method_key, "local")
-        if st.button("重新提取 PDF 文字"):
-            try:
-                spinner_text = "正在使用 MinerU 高精度提取 PDF..." if extraction_method == "mineru" else "正在重新提取 PDF 文字..."
-                with st.spinner(spinner_text):
-                    updated = refresh_pdf_slide_text(deck, slides, method=extraction_method)
-                st.success(f"PDF 文字已刷新：{updated} 页提取到文本。")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"重新提取 PDF 文字失败：{exc}")
 
     _render_document_structure_controls(deck, slides, sections)
 
@@ -1026,6 +1025,11 @@ def _handle_synced_reader_action(
             parent_question_id=parent_question_id,
             quote_source=quote_source,
             quote_source_question_id=quote_source_question_id,
+        )
+        update_reader_position_state(
+            st.session_state,
+            deck_id=int(deck["id"]),
+            slide_number=slide_number,
         )
     except AIServiceError as exc:
         st.error(str(exc))
