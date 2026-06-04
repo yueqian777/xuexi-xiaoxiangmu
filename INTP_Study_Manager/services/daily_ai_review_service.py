@@ -67,6 +67,7 @@ def collect_review_candidates(limit: int = MAX_DAILY_REVIEW_QUESTIONS, *, user_i
                     SELECT rt.id
                     FROM review_tasks rt
                     WHERE rt.knowledge_id = kc.id
+                      AND rt.user_id = kc.user_id
                       AND rt.review_date <= ?
                       AND rt.status = '待复习'
                     ORDER BY rt.review_date ASC, rt.id ASC
@@ -76,6 +77,7 @@ def collect_review_candidates(limit: int = MAX_DAILY_REVIEW_QUESTIONS, *, user_i
                     SELECT rt.review_stage
                     FROM review_tasks rt
                     WHERE rt.knowledge_id = kc.id
+                      AND rt.user_id = kc.user_id
                       AND rt.review_date <= ?
                       AND rt.status = '待复习'
                     ORDER BY rt.review_date ASC, rt.id ASC
@@ -132,6 +134,7 @@ def generate_today_ai_review_plan(
         api_key=api_key,
         model_override=model,
         max_output_tokens=max_output_tokens,
+        user_id=user_id,
     )
     plan = _normalize_plan_payload(_load_json_payload(raw), candidates, max_questions)
     _save_today_plan(
@@ -207,6 +210,7 @@ def evaluate_today_ai_review(
         api_key=api_key,
         model_override=model,
         max_output_tokens=max_output_tokens,
+        user_id=user_id,
     )
     evaluation = _normalize_evaluation_payload(_load_json_payload(raw), plan, normalized_answers)
     updates = _apply_evaluation_results(

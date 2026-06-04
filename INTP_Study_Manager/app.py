@@ -21,6 +21,7 @@ from pages import (
     study_sessions,
 )
 from services.ai_service import ensure_default_api_providers
+from services.auth_service import require_login
 
 APP_ROOT = Path(__file__).resolve().parent
 ENTER_SUBMIT_SHORTCUT_SCRIPT = (
@@ -131,7 +132,9 @@ def main() -> None:
     )
     _install_browser_dom_guard()
     init_db()
-    ensure_default_api_providers()
+    user = require_login()
+    user_id = user.id
+    ensure_default_api_providers(user_id=user_id)
 
     st.sidebar.title("INTP Study Manager")
     st.sidebar.caption("问题驱动 · 闭卷回忆 · 错因分析 · 间隔复习")

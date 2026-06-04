@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import requests
 
 from db import execute
+from services.auth_service import require_login
 
 
 class BalanceQueryError(RuntimeError):
@@ -90,7 +91,9 @@ def save_balance_query_config(
     enabled: bool,
     query_type: str,
     config: dict[str, Any],
+    user_id: int | None = None,
 ) -> None:
+    user_id = int(user_id) if user_id is not None else require_login().id
     safe_config = dict(config)
     # 敏感凭据只允许走会话、环境变量或加密密钥库，不写进 SQLite。
     for secret_key in ["api_key", "access_token", "authorization", "token"]:
@@ -102,13 +105,14 @@ def save_balance_query_config(
             balance_query_type = ?,
             balance_query_config_json = ?,
             updated_at = datetime('now', 'localtime')
-        WHERE provider_key = ?
+        WHERE provider_key = ? AND user_id = ?
         """,
         (
             int(bool(enabled)),
             query_type if query_type in BALANCE_QUERY_TYPES else "auto_wallet",
             json.dumps(safe_config, ensure_ascii=False),
             provider_key,
+            user_id,
         ),
     )
 

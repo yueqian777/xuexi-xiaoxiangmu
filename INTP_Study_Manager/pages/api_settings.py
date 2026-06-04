@@ -57,10 +57,11 @@ AUTH_TYPES = {
 
 def render() -> None:
     user = require_login()
+    user_id = user.id
     st.title("API 接入设置")
     st.caption("统一管理模型接口：OpenAI、OpenAI 兼容代理、Anthropic、Gemini，以及任意自定义 HTTP JSON API。")
 
-    providers = list_api_providers()
+    providers = list_api_providers(user_id=user_id)
     if providers:
         st.subheader("当前 Provider")
         overview = pd.DataFrame(providers)[
@@ -101,16 +102,16 @@ def render() -> None:
         )
 
         with tab_manage:
-            _render_provider_management(providers)
+            _render_provider_management(providers, user_id=user_id)
 
         with tab_balance:
-            _render_balance_query(providers)
+            _render_balance_query(providers, user_id=user_id)
 
         with tab_edit:
-            _render_edit_provider(providers)
+            _render_edit_provider(providers, user_id=user_id)
 
         with tab_custom:
-            _render_create_provider()
+            _render_create_provider(user_id=user_id)
     else:
         tab_vault, tab_test, tab_help = st.tabs(["加密 API Key", "测试调用", "填写参考"])
         st.info("Provider 模板由管理员统一维护。普通用户可以在这里保存自己的加密 API Key 并测试调用。")
@@ -119,13 +120,13 @@ def render() -> None:
         _render_secret_vault(providers)
 
     with tab_test:
-        _render_test_provider(providers)
+        _render_test_provider(providers, user_id=user_id)
 
     with tab_help:
         _render_help()
 
 
-def _render_provider_management(providers: list[dict]) -> None:
+def _render_provider_management(providers: list[dict], *, user_id: int) -> None:
     st.subheader("编号 / 启用 / 删除")
     st.caption("“编号”就是 API 管理页面的连续编号。保存时会自动整理成 1、2、3...；常用 API 也可以用下方按钮快速置顶或上移。")
     if not providers:
@@ -159,7 +160,7 @@ def _render_provider_management(providers: list[dict]) -> None:
 
     cols = st.columns([1.1, 1.1, 2])
     if cols[0].button("保存编号 / 启用状态", type="primary", key="save_api_provider_order"):
-        save_api_provider_order(edited.to_dict("records"))
+        save_api_provider_order(edited.to_dict("records"), user_id=user_id)
         st.success("Provider 编号和启用状态已保存，编号已自动连续。")
         st.rerun()
 
@@ -172,13 +173,13 @@ def _render_provider_management(providers: list[dict]) -> None:
     )
     move_cols = cols[2].columns(3)
     if move_cols[0].button("上移一位", key="quick_move_provider_up"):
-        move_api_provider(provider_key, offset=-1)
+        move_api_provider(provider_key, offset=-1, user_id=user_id)
         st.rerun()
     if move_cols[1].button("置顶常用 API", key="quick_move_provider_top"):
-        move_api_provider(provider_key, to_top=True)
+        move_api_provider(provider_key, to_top=True, user_id=user_id)
         st.rerun()
     if move_cols[2].button("下移一位", key="quick_move_provider_down"):
-        move_api_provider(provider_key, offset=1)
+        move_api_provider(provider_key, offset=1, user_id=user_id)
         st.rerun()
 
     with st.expander("删除勾选的 Provider", expanded=bool(selected_delete_keys)):
@@ -203,7 +204,7 @@ def _render_provider_management(providers: list[dict]) -> None:
             key="delete_selected_api_providers",
             disabled=not selected_delete_keys or not confirm_delete,
         ):
-            _delete_providers_and_cleanup(selected_delete_keys)
+            _delete_providers_and_cleanup(selected_delete_keys, user_id=user_id)
             st.success("已删除勾选 Provider，并重新整理编号。")
             st.rerun()
 
@@ -221,8 +222,7 @@ def _provider_management_frame(providers: list[dict]) -> pd.DataFrame:
     return frame
 
 
-def _render_balance_query(providers: list[dict]) -> None:
-    require_login()
+def _render_balance_query(providers: list[dict], *, user_id: int) -> None:
     st.subheader("远程余量 / Plan 查询")
     st.caption(
         "不再读取本地浏览器缓存或本地数据库；所有结果都来自你选择的 Provider 远程接口。"
@@ -286,6 +286,7 @@ def _render_balance_query(providers: list[dict]) -> None:
                 enabled=enabled_query,
                 query_type=query_type,
                 config=current_config,
+                user_id=user_id,
             )
             st.success("远程余量查询配置已保存。敏感凭据没有写入 SQLite。")
             st.rerun()
@@ -536,7 +537,7 @@ def _render_balance_result(result: dict | None) -> None:
                 st.json(details)
 
 
-def _render_edit_provider(providers: list[dict]) -> None:
+def _render_edit_provider(providers: list[dict], *, user_id: int) -> None:
     if not providers:
         st.warning("没有可编辑的 Provider。")
         return
@@ -546,12 +547,11 @@ def _render_edit_provider(providers: list[dict]) -> None:
         format_func=lambda item_key: provider_label(next(p for p in providers if p["provider_key"] == item_key)),
     )
     provider = next(p for p in providers if p["provider_key"] == provider_key)
-    _provider_form("更新 Provider", provider, provider_key)
-    _render_provider_edit_actions(provider, providers)
+    _provider_form("更新 Provider", provider, provider_key, user_id=user_id)
+    _render_provider_edit_actions(provider, providers, user_id=user_id)
 
 
-def _render_create_provider() -> None:
-    user = require_login()
+def _render_create_provider(*, user_id: int) -> None:
     provider = {
         "name": "新的自定义 API",
         "provider_type": "custom_http_json",
@@ -564,13 +564,12 @@ def _render_create_provider() -> None:
         "response_path": "choices.0.message.content",
         "vision_capability": "auto",
         "enabled": 1,
-        "sort_order": len(list_api_providers()) + 1,
+        "sort_order": len(list_api_providers(user_id=user_id)) + 1,
     }
-    _provider_form("创建 Provider", provider, None)
+    _provider_form("创建 Provider", provider, None, user_id=user_id)
 
 
-def _provider_form(title: str, provider: dict, provider_key: str | None) -> None:
-    user = require_login()
+def _provider_form(title: str, provider: dict, provider_key: str | None, *, user_id: int) -> None:
     with st.form(f"provider_form_{provider_key or 'new'}"):
         st.subheader(title)
         cols = st.columns([1.2, 1.2, 0.6])
@@ -653,6 +652,7 @@ def _provider_form(title: str, provider: dict, provider_key: str | None) -> None
                 "sort_order": sort_order,
             },
             provider_key,
+            user_id=user_id,
         )
     except Exception as exc:
         st.error(f"保存失败：{exc}")
@@ -661,19 +661,19 @@ def _provider_form(title: str, provider: dict, provider_key: str | None) -> None
     st.rerun()
 
 
-def _render_provider_edit_actions(provider: dict, providers: list[dict]) -> None:
+def _render_provider_edit_actions(provider: dict, providers: list[dict], *, user_id: int) -> None:
     provider_key = str(provider["provider_key"])
     st.divider()
     st.subheader("快捷编号与删除")
     cols = st.columns(4)
     if cols[0].button("上移一位", key=f"edit_move_provider_up_{provider_key}"):
-        move_api_provider(provider_key, offset=-1)
+        move_api_provider(provider_key, offset=-1, user_id=user_id)
         st.rerun()
     if cols[1].button("置顶常用 API", key=f"edit_move_provider_top_{provider_key}"):
-        move_api_provider(provider_key, to_top=True)
+        move_api_provider(provider_key, to_top=True, user_id=user_id)
         st.rerun()
     if cols[2].button("下移一位", key=f"edit_move_provider_down_{provider_key}"):
-        move_api_provider(provider_key, offset=1)
+        move_api_provider(provider_key, offset=1, user_id=user_id)
         st.rerun()
     cols[3].caption(f"当前编号：{_positive_int(provider.get('sort_order'), 1)} / {len(providers)}")
 
@@ -689,14 +689,14 @@ def _render_provider_edit_actions(provider: dict, providers: list[dict]) -> None
             key=f"delete_provider_{provider_key}",
             disabled=not confirm,
         ):
-            if delete_api_provider(provider_key):
+            if delete_api_provider(provider_key, user_id=user_id):
                 _cleanup_deleted_provider_state([provider_key])
                 st.success("Provider 已删除，编号已自动连续。")
                 st.rerun()
 
 
-def _delete_providers_and_cleanup(provider_keys: list[str]) -> None:
-    delete_api_providers(provider_keys)
+def _delete_providers_and_cleanup(provider_keys: list[str], *, user_id: int) -> None:
+    delete_api_providers(provider_keys, user_id=user_id)
     _cleanup_deleted_provider_state(provider_keys)
 
 
@@ -728,7 +728,7 @@ def _cleanup_deleted_provider_state(provider_keys: list[str]) -> None:
     st.session_state["secret_vault_data"] = updated
 
 
-def _render_test_provider(providers: list[dict]) -> None:
+def _render_test_provider(providers: list[dict], *, user_id: int) -> None:
     enabled = [p for p in providers if p["enabled"]]
     if not enabled:
         st.warning("没有启用的 Provider。")
@@ -778,6 +778,7 @@ def _render_test_provider(providers: list[dict]) -> None:
                     api_key=api_key,
                     model_override=active_model,
                     max_output_tokens=int(max_tokens),
+                    user_id=user_id,
                 )
             st.success("调用成功。")
             st.markdown(output)

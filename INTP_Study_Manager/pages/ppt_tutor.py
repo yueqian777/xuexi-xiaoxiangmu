@@ -302,7 +302,7 @@ def render() -> None:
 
     _resume_interrupted_structure_generation()
     generation_task = _resume_interrupted_generation()
-    _render_api_settings()
+    _render_api_settings(user.id)
     decks = fetch_all(
         """
         SELECT *
@@ -356,8 +356,8 @@ def render() -> None:
     sections = fetch_deck_sections(int(deck["id"]), user_id=user.id)
 
     st.divider()
-    _render_deck_actions(deck, slides, latest_by_slide_id, sections)
-    _render_synced_reader(deck, slides, latest_by_slide_id, last_position, sections)
+    _render_deck_actions(deck, slides, latest_by_slide_id, sections, user_id=user.id)
+    _render_synced_reader(deck, slides, latest_by_slide_id, last_position, sections, user_id=user.id)
     _auto_refresh_structure_generation(st.session_state.get("ppt_structure_task"))
     _auto_refresh_running_generation(generation_task)
 
@@ -365,10 +365,10 @@ def render() -> None:
     _render_study_asset_generator(deck, sections, slides, latest_by_slide_id)
 
 
-def _render_api_settings() -> None:
+def _render_api_settings(user_id: int) -> None:
     with st.expander("AI API 设置", expanded=False):
         st.caption("选择任意已启用 Provider。API Key 只保存在当前 Streamlit 会话里，不写入 SQLite。")
-        providers = list_api_providers(enabled_only=True)
+        providers = list_api_providers(enabled_only=True, user_id=user_id)
         if not providers:
             st.warning("没有启用的 Provider。请先到「API 接入设置」页面创建。")
             return
@@ -488,6 +488,8 @@ def _render_deck_actions(
     slides: list[dict],
     latest_by_slide_id: dict[int, dict],
     sections: list[dict],
+    *,
+    user_id: int,
 ) -> None:
     st.subheader("整份资料逐页分析")
     missing_images = [slide for slide in slides if not _image_exists(slide)]
@@ -517,7 +519,7 @@ def _render_deck_actions(
         send_image_when_no_text = input_mode != "只用识别文字，不发原图"
         force_image_input = input_mode == "直接发原图，不使用识别文字"
         selected_slides, range_label, force_regenerate = _select_generation_range(slides, sections)
-        enabled_providers = list_api_providers(enabled_only=True)
+        enabled_providers = list_api_providers(enabled_only=True, user_id=user_id)
         active_provider_key = str(st.session_state.get("active_api_provider_key") or "")
         provider_by_key = {str(provider["provider_key"]): provider for provider in enabled_providers}
         default_provider_keys = [active_provider_key] if active_provider_key in provider_by_key else list(provider_by_key)[:1]
@@ -611,6 +613,7 @@ def _render_deck_actions(
                 provider_pool=provider_pool,
                 adaptive_parallelism=adaptive_parallelism,
                 benchmark_during_generation=benchmark_during_generation,
+                user_id=user_id,
             )
 
 
@@ -829,6 +832,7 @@ def _start_document_structure_generation(deck: dict, slides: list[dict], *, sour
         "active_model": st.session_state.get("active_api_model", DEFAULT_MODEL),
         "max_tokens": int(st.session_state.get("active_api_max_tokens", 4096)),
         "reasoning_depth": st.session_state.get("active_api_reasoning_depth"),
+        "user_id": int(deck["user_id"]) if deck.get("user_id") is not None else require_login().id,
         "sections": 0,
         "stop_requested": False,
     }
@@ -897,6 +901,7 @@ def _background_document_structure_worker(task: dict, deck: dict, slides: list[d
             active_model=task.get("active_model") or DEFAULT_MODEL,
             max_tokens=int(task.get("max_tokens") or 4096),
             reasoning_depth=task.get("reasoning_depth"),
+            user_id=int(task.get("user_id") or 0) or None,
         )
         if task.get("stop_requested"):
             task["status"] = "stopped"
@@ -922,7 +927,13 @@ def _generate_document_structure(
     active_model: str | None = None,
     max_tokens: int | None = None,
     reasoning_depth: str | None = None,
+    user_id: int | None = None,
 ) -> dict:
+    deck_user_id = (
+        int(user_id)
+        if user_id is not None
+        else int(deck["user_id"]) if deck.get("user_id") is not None else require_login().id
+    )
     per_page_limit = 420
     if len(slides) > 80:
         per_page_limit = 180
@@ -945,9 +956,9 @@ def _generate_document_structure(
         model_override=active_model or st.session_state.get("active_api_model", DEFAULT_MODEL),
         max_output_tokens=min(max(2048, int(max_tokens or st.session_state.get("active_api_max_tokens", 4096))), 4096),
         reasoning_depth=reasoning_depth if reasoning_depth is not None else st.session_state.get("active_api_reasoning_depth"),
+        user_id=deck_user_id,
     )
     structure = parse_document_structure_response(response, slides)
-    deck_user_id = int(deck["user_id"]) if deck.get("user_id") is not None else None
     save_deck_structure(int(deck["id"]), structure, user_id=deck_user_id)
     return structure
 
@@ -958,9 +969,12 @@ def _render_synced_reader(
     latest_by_slide_id: dict[int, dict],
     last_position: dict[str, int],
     sections: list[dict],
+    *,
+    user_id: int | None = None,
 ) -> None:
     st.subheader("同步阅读器")
     st.caption("提示：右侧固定插问栏会绑定当前页。你可以直接提问，或选中讲解文字后引用到插问。")
+    user_id = int(user_id) if user_id is not None else int(deck.get("user_id") or require_login().id)
     initial_slide_number = _initial_reader_slide_number(int(deck["id"]), slides, last_position)
     active_state_key = _reader_active_slide_state_key(int(deck["id"]))
     session_active_slide = st.session_state.get(active_state_key)
@@ -997,7 +1011,7 @@ def _render_synced_reader(
         deck_id=int(deck["id"]),
         title=deck.get("title") or "学习资料",
         subject=deck.get("subject") or "未分类",
-        active_model=_active_model_label(),
+        active_model=_active_model_label(user_id=user_id),
         pages=payload,
         sections=_reader_sections_payload(sections),
         initial_slide_number=active_slide_number,
@@ -1006,7 +1020,7 @@ def _render_synced_reader(
         key=f"synced_reader_{deck['id']}",
     )
     if isinstance(component_payload, dict):
-        _handle_synced_reader_action(deck, slides, latest_by_slide_id, component_payload, sections)
+        _handle_synced_reader_action(deck, slides, latest_by_slide_id, component_payload, sections, user_id=user_id)
 
 
 def _handle_synced_reader_action(
@@ -1015,7 +1029,10 @@ def _handle_synced_reader_action(
     latest_by_slide_id: dict[int, dict],
     payload: dict,
     sections: list[dict],
+    *,
+    user_id: int | None = None,
 ) -> None:
+    user_id = int(user_id) if user_id is not None else int(deck.get("user_id") or require_login().id)
     action = payload.get("action")
     if action not in {
         "canvas_question",
@@ -1048,6 +1065,7 @@ def _handle_synced_reader_action(
             slides=slides,
             image_window_slide_numbers=payload.get("imageWindowSlideNumbers"),
             image_window_radius=payload.get("imageWindowRadius"),
+            user_id=user_id,
         ):
             st.rerun()
         return
@@ -1056,7 +1074,6 @@ def _handle_synced_reader_action(
         last_bookmark_token_key = f"ppt_slide_bookmark_last_token_{deck['id']}"
         if token and st.session_state.get(last_bookmark_token_key) == token:
             return
-        user_id = require_login().id
         if action == "toggle_slide_bookmark":
             update_slide_bookmark(user_id, int(slide["id"]), enabled=bool(payload.get("enabled")))
         else:
@@ -1075,7 +1092,7 @@ def _handle_synced_reader_action(
         if not explanation:
             st.warning("讲解内容不能为空，未保存本次修改。")
             return
-        _save_manual_explanation(int(slide["id"]), explanation)
+        _save_manual_explanation(int(slide["id"]), explanation, user_id=user_id)
         if token:
             st.session_state[last_edit_token_key] = token
         st.toast(f"第 {slide['slide_number']} 页讲解已保存。")
@@ -1092,7 +1109,7 @@ def _handle_synced_reader_action(
         answer = str(payload.get("answer") or "").strip()
         if not question_id or not answer:
             return
-        update_slide_question_answer(require_login().id, question_id, answer)
+        update_slide_question_answer(user_id, question_id, answer)
         if token:
             st.session_state[last_answer_edit_token_key] = token
         st.toast("插问回答高亮已保存。")
@@ -1107,7 +1124,7 @@ def _handle_synced_reader_action(
         except (TypeError, ValueError):
             return
         if question_id:
-            flatten_question_subtree(require_login().id, question_id)
+            flatten_question_subtree(user_id, question_id)
         if token:
             st.session_state[last_merge_token_key] = token
         st.rerun()
@@ -1150,13 +1167,14 @@ def _handle_synced_reader_action(
                 api_key=_active_api_key(),
                 model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+                user_id=user_id,
             )
         add_slide_question(
-            require_login().id,
+            user_id,
             slide["id"],
             question,
             answer,
-            _active_model_label(),
+            _active_model_label(user_id=user_id),
             quote_text=quote["selected_text"] if quote else "",
             parent_question_id=parent_question_id,
             quote_source=quote_source,
@@ -1181,8 +1199,9 @@ def _handle_synced_reader_action(
     st.rerun()
 
 
-def _save_manual_explanation(slide_id: int, explanation: str) -> int:
-    return add_slide_explanation(require_login().id, int(slide_id), f"手动编辑 / {_active_model_label()}", explanation)
+def _save_manual_explanation(slide_id: int, explanation: str, *, user_id: int | None = None) -> int:
+    user_id = int(user_id) if user_id is not None else require_login().id
+    return add_slide_explanation(user_id, int(slide_id), f"手动编辑 / {_active_model_label(user_id=user_id)}", explanation)
 
 
 def _optional_positive_int(value: object) -> int | None:
@@ -1201,7 +1220,9 @@ def _handle_reader_position_update(
     slides: list[dict] | None = None,
     image_window_slide_numbers: object | None = None,
     image_window_radius: object | None = None,
+    user_id: int | None = None,
 ) -> bool:
+    user_id = int(user_id) if user_id is not None else require_login().id
     deck_id = int(deck["id"])
     last_position_token_key = f"ppt_reader_position_last_token_{deck_id}"
     if token and st.session_state.get(last_position_token_key) == token:
@@ -1221,7 +1242,7 @@ def _handle_reader_position_update(
             image_window_slide_numbers=image_window_slide_numbers,
             image_window_radius=image_window_radius,
         )
-    _save_last_reader_position(require_login().id, deck_id, int(slide_number))
+    _save_last_reader_position(user_id, deck_id, int(slide_number))
     return changed or image_window_changed
 
 
@@ -1565,6 +1586,7 @@ def _start_study_asset_generation_task(
         "active_model": st.session_state.get("active_api_model", DEFAULT_MODEL),
         "max_tokens": int(st.session_state.get("active_api_max_tokens", 4096)),
         "reasoning_depth": st.session_state.get("active_api_reasoning_depth"),
+        "user_id": int(deck["user_id"]) if deck.get("user_id") is not None else require_login().id,
         "raw_outputs": [],
         "retried": 0,
         "stop_requested": False,
@@ -1722,6 +1744,7 @@ def _generate_study_asset_batch_output(task: dict, batch: dict, index: int, tota
                 max_output_tokens=int(task.get("max_tokens") or 4096),
                 reasoning_depth=task.get("reasoning_depth"),
                 request_timeout=PPT_STUDY_ASSET_REQUEST_TIMEOUT_SECONDS,
+                user_id=int(task.get("user_id") or 0) or None,
             )
         except AIServiceError as exc:
             category = parallel_benchmark.classify_error_category(exc)
@@ -2339,8 +2362,9 @@ def _clip_text(text: str, limit: int) -> str:
 
 def _render_main_explanation(deck: dict, slide: dict) -> None:
     st.subheader("当前页主线讲解")
+    user_id = int(slide.get("user_id") or deck.get("user_id") or require_login().id)
     latest = _latest_explanation(slide["id"])
-    supports_image_input = _active_provider_supports_image_input()
+    supports_image_input = _active_provider_supports_image_input(user_id=user_id)
     force_image_input = st.checkbox(
         "本页直接发原图给 API，不使用识别文字",
         value=False,
@@ -2388,8 +2412,9 @@ def _render_main_explanation(deck: dict, slide: dict) -> None:
                     image_paths=image_paths,
                     max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
                     reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
+                    user_id=user_id,
                 )
-            _save_generated_explanation(require_login().id, slide, _active_model_label(), explanation)
+            _save_generated_explanation(user_id, slide, _active_model_label(user_id=user_id), explanation)
             st.success("本页主线讲解已保存。")
             st.rerun()
         except AIServiceError as exc:
@@ -2462,6 +2487,7 @@ def _render_branch_question_form(
         st.error("插问不能为空。")
         return
 
+    user_id = int(slide.get("user_id") or deck.get("user_id") or require_login().id)
     typed_question = question.strip()
     full_question = _compose_quoted_branch_question(quote, typed_question) if quote else typed_question
     prompt = _build_branch_prompt(deck, slide, latest, full_question)
@@ -2474,13 +2500,14 @@ def _render_branch_question_form(
                 model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
                 reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
+                user_id=user_id,
             )
         add_slide_question(
-            require_login().id,
+            user_id,
             slide["id"],
             typed_question,
             answer,
-            _active_model_label(),
+            _active_model_label(user_id=user_id),
             quote_text=quote["selected_text"] if quote else "",
         )
         if quote:
@@ -2669,6 +2696,7 @@ def _generate_whole_deck_explanations(
     provider_pool: list[dict] | None = None,
     adaptive_parallelism: bool = False,
     benchmark_during_generation: bool = False,
+    user_id: int | None = None,
 ) -> None:
     targets = []
     for slide in slides:
@@ -2681,14 +2709,15 @@ def _generate_whole_deck_explanations(
         st.info("所有页面都已有讲解。")
         return
 
+    user_id = int(user_id) if user_id is not None else int(deck.get("user_id") or require_login().id)
     provider_key = st.session_state.get("active_api_provider_key")
     api_key = _active_api_key()
     active_model = st.session_state.get("active_api_model", DEFAULT_MODEL)
     max_tokens = int(st.session_state.get("active_api_max_tokens", 4096))
-    active_model_label = _active_model_label()
+    active_model_label = _active_model_label(user_id=user_id)
     total = len(targets)
     provider_pool = provider_pool or _build_generation_provider_pool(
-        list_api_providers(enabled_only=True),
+        list_api_providers(enabled_only=True, user_id=user_id),
         selected_provider_keys=[str(provider_key)] if provider_key else [],
         active_provider_key=str(provider_key or ""),
     )
@@ -2699,7 +2728,6 @@ def _generate_whole_deck_explanations(
         total,
         max_parallelism=group_parallel_cap,
     )
-    user_id = require_login().id
     context_by_slide = build_slide_context_map(deck, all_slides or slides, sections or [])
     related_knowledge = _related_knowledge_context(deck.get("subject") or "未分类", user_id=user_id)
 
@@ -2805,6 +2833,7 @@ def _generate_whole_deck_explanations(
                 image_paths=image_paths,
                 max_output_tokens=max_tokens,
                 reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
+                user_id=user_id,
             )
             _save_generated_explanation(user_id, slide, active_model_label, explanation)
             generated += 1
@@ -2833,6 +2862,7 @@ def _generate_whole_deck_explanations(
                         model_override=active_model,
                         max_output_tokens=max_tokens,
                         reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
+                        user_id=user_id,
                     )
                     _save_generated_explanation(user_id, slide, active_model_label, explanation)
                     generated += 1
@@ -3186,6 +3216,7 @@ def _generate_slide_explanation_from_task(
             image_paths=image_paths,
             max_output_tokens=int(task.get("max_tokens") or 4096),
             reasoning_depth=reasoning_depth,
+            user_id=user_id,
         )
         _save_generated_explanation(user_id, slide, active_model_label, explanation)
         return _slide_generation_result(slide, "generated", f"第 {slide_number} 页讲解已生成。")
@@ -3220,6 +3251,7 @@ def _generate_slide_explanation_from_task(
                     model_override=provider_config.get("active_model"),
                     max_output_tokens=int(task.get("max_tokens") or 4096),
                     reasoning_depth=reasoning_depth,
+                    user_id=user_id,
                 )
                 _save_generated_explanation(user_id, slide, active_model_label, explanation)
                 return _slide_generation_result(slide, "generated", f"第 {slide_number} 页已回退文本模式生成。")
@@ -3681,7 +3713,7 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
     deck_id = int(deck["id"])
     title = html.escape(deck.get("title") or "学习资料")
     subject = html.escape(deck.get("subject") or "未分类")
-    active_model = html.escape(_active_model_label())
+    active_model = html.escape(_active_model_label(user_id=int(deck.get("user_id") or require_login().id)))
     return f"""
 <!doctype html>
 <html>
@@ -4474,9 +4506,10 @@ def _provider_supports_image_input(provider: dict, model: str | None = None) -> 
     return any(marker in model for marker in vision_markers)
 
 
-def _active_provider_supports_image_input() -> bool:
+def _active_provider_supports_image_input(*, user_id: int | None = None) -> bool:
+    user_id = int(user_id) if user_id is not None else require_login().id
     provider_key = st.session_state.get("active_api_provider_key")
-    providers = list_api_providers()
+    providers = list_api_providers(user_id=user_id)
     provider = next((item for item in providers if item["provider_key"] == provider_key), None)
     if not provider:
         return False
@@ -4496,10 +4529,11 @@ def _is_image_input_error(exc: AIServiceError) -> bool:
     return any(marker in message for marker in markers)
 
 
-def _active_model_label() -> str:
+def _active_model_label(*, user_id: int | None = None) -> str:
+    user_id = int(user_id) if user_id is not None else require_login().id
     provider_key = st.session_state.get("active_api_provider_key")
     model = st.session_state.get("active_api_model", DEFAULT_MODEL)
-    providers = list_api_providers()
+    providers = list_api_providers(user_id=user_id)
     provider = next((item for item in providers if item["provider_key"] == provider_key), None)
     if not provider:
         return model

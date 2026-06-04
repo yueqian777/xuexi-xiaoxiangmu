@@ -9,12 +9,13 @@ from services.review_service import get_all_pending_review_tasks, get_today_revi
 
 
 def render() -> None:
-    require_login()
+    user = require_login()
+    user_id = user.id
     st.title("复习计划")
     st.caption("复习结果会自动调整掌握度；仍然模糊和完全不会会追加复习任务。")
 
-    today_tasks = get_today_review_tasks()
-    all_pending = get_all_pending_review_tasks()
+    today_tasks = get_today_review_tasks(user_id=user_id)
+    all_pending = get_all_pending_review_tasks(user_id=user_id)
 
     st.subheader("今日复习")
     if today_tasks:

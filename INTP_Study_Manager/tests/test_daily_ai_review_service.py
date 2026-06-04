@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
+import db
 from services.daily_ai_review_service import (
+    collect_review_candidates,
     _normalize_plan_payload,
     daily_review_question_markdown,
 )
@@ -25,6 +29,35 @@ class DailyAiReviewServiceTest(unittest.TestCase):
                 "last_cause": "条件漏看",
             }
         ]
+
+    def test_collect_review_candidates_ignores_other_users_review_tasks(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            data_dir = Path(tmp)
+            db_path = data_dir / "study_manager.db"
+            with (
+                patch.object(db, "DATA_DIR", data_dir),
+                patch.object(db, "DATABASE_PATH", db_path),
+            ):
+                db._INITIALIZED_DATABASE_PATH = None
+                db.init_db()
+                self.addCleanup(setattr, db, "_INITIALIZED_DATABASE_PATH", None)
+                knowledge_id = db.insert_and_get_id(
+                    """
+                    INSERT INTO knowledge_cards (user_id, subject, topic, one_sentence, mastery, need_review)
+                    VALUES (1, 'Math', 'ROC', 'ROC decides stability.', 85, 0)
+                    """
+                )
+                db.execute(
+                    """
+                    INSERT INTO review_tasks (user_id, knowledge_id, review_date, review_stage)
+                    VALUES (2, ?, date('now'), 'other user due task')
+                    """,
+                    (knowledge_id,),
+                )
+
+                candidates = collect_review_candidates(user_id=1)
+
+        self.assertEqual(candidates, [])
 
     def test_normalize_plan_replaces_formula_writing_demands(self):
         payload = {

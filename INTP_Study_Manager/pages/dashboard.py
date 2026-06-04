@@ -37,11 +37,12 @@ def _self_test_question(topic: str) -> str:
 
 def _render_default_api_and_daily_ai_review() -> None:
     user = require_login()
+    user_id = user.id
     _install_daily_review_styles()
     st.subheader("每日 AI 轻量复习")
     st.caption("少量闭卷检索题检查今天最值得复习的知识点；提交后自动批改，并写回知识点掌握度。")
 
-    providers = list_api_providers(enabled_only=True)
+    providers = list_api_providers(enabled_only=True, user_id=user_id)
     if not providers:
         st.warning("没有启用的 API Provider。请先进入“API 接入设置”创建或启用一个 Provider。")
         return
@@ -101,7 +102,7 @@ def _render_default_api_and_daily_ai_review() -> None:
             st.success("项目默认 API 已保存。后续 API 任务未主动切换时会使用它。")
             st.rerun()
 
-        candidates = collect_review_candidates(user_id=user.id)
+        candidates = collect_review_candidates(user_id=user_id)
         cols[1].metric("今日自测候选", len(candidates))
         if candidates:
             cols[2].caption("候选来自：今日到期复习、低于 70% 的知识点、仍需复习的知识卡片。")
@@ -112,8 +113,8 @@ def _render_default_api_and_daily_ai_review() -> None:
         st.info("填写默认 API Key 后，首页会自动生成今天的轻量自测计划。")
         return
 
-    plan = get_today_ai_review_plan(user_id=user.id)
-    auto_key = f"daily_ai_review_auto_generated_{date.today().isoformat()}_{user.id}"
+    plan = get_today_ai_review_plan(user_id=user_id)
+    auto_key = f"daily_ai_review_auto_generated_{date.today().isoformat()}_{user_id}"
     if plan is None and candidates and not st.session_state.get(auto_key):
         st.session_state[auto_key] = True
         try:
@@ -123,7 +124,7 @@ def _render_default_api_and_daily_ai_review() -> None:
                     api_key=api_key,
                     model=active_model,
                     max_output_tokens=int(max_tokens),
-                    user_id=user.id,
+                    user_id=user_id,
                 )
             st.success("今日轻量自测计划已生成。")
         except (AIServiceError, ValueError, RuntimeError) as exc:
@@ -138,7 +139,7 @@ def _render_default_api_and_daily_ai_review() -> None:
                     api_key=api_key,
                     model=active_model,
                     max_output_tokens=int(max_tokens),
-                    user_id=user.id,
+                    user_id=user_id,
                 )
             st.success("今日自测计划已更新。")
             st.rerun()
@@ -146,7 +147,7 @@ def _render_default_api_and_daily_ai_review() -> None:
             st.error(f"生成失败：{exc}")
     controls[1].caption("建议每天 3-5 题；直接写中文、数字或选项，无需特殊公式格式。")
 
-    plan = plan or get_today_ai_review_plan(user_id=user.id)
+    plan = plan or get_today_ai_review_plan(user_id=user_id)
     if not plan:
         return
 
