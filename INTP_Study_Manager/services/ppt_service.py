@@ -14,6 +14,7 @@ from services.pdf_extraction_service import extract_pdf_pages as extract_pdf_pag
 
 UPLOAD_DIR = DATA_DIR / "uploads"
 PAGE_IMAGE_DIR = DATA_DIR / "page_images"
+PAGE_SOURCE_DIR = DATA_DIR / "page_sources"
 
 
 def import_deck(uploaded_file: BinaryIO, *, subject: str, title: str) -> int:
@@ -112,6 +113,25 @@ def save_uploaded_deck(uploaded_file: BinaryIO, *, file_bytes: bytes | None = No
     return target
 
 
+def save_page_source_file(uploaded_file: BinaryIO, *, file_bytes: bytes | None = None) -> Path:
+    user = require_login()
+    original_name = getattr(uploaded_file, "name", "uploaded")
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in {".pptx", ".pdf"}:
+        raise RuntimeError("仅支持 PPTX 或 PDF 文件。")
+
+    user_source_dir = PAGE_SOURCE_DIR / f"user_{user.id}"
+    user_source_dir.mkdir(parents=True, exist_ok=True)
+    safe_stem = _safe_filename(Path(original_name).stem) or "source"
+    target = user_source_dir / f"{uuid.uuid4().hex}_{safe_stem}{suffix}"
+    temp_target = target.with_name(f".{target.name}.tmp")
+
+    data = file_bytes if file_bytes is not None else bytes(uploaded_file.getbuffer() if hasattr(uploaded_file, "getbuffer") else uploaded_file.read())
+    temp_target.write_bytes(data)
+    temp_target.replace(target)
+    return target
+
+
 def extract_pptx_slides(path: Path) -> list[dict[str, str | int]]:
     try:
         from pptx import Presentation
@@ -136,6 +156,32 @@ def extract_pptx_slides(path: Path) -> list[dict[str, str | int]]:
 
 def extract_pdf_pages(path: Path, *, method: str = "local") -> list[dict[str, str | int]]:
     return extract_pdf_pages_from_pdf(path, method=method)
+
+
+def extract_source_pages(path: Path, *, method: str = "local") -> list[dict[str, str | int]]:
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        pages = extract_pdf_pages(path, method=method)
+    elif suffix == ".pptx":
+        pages = extract_pptx_slides(path)
+    else:
+        raise RuntimeError("仅支持解析 PPTX 或 PDF 文件。")
+
+    image_paths = render_deck_page_images(path)
+    result: list[dict[str, str | int]] = []
+    for page in sorted(pages, key=lambda item: int(item["slide_number"])):
+        slide_number = int(page["slide_number"])
+        result.append(
+            {
+                "slide_number": slide_number,
+                "title": str(page.get("title") or f"第 {slide_number} 页"),
+                "slide_text": str(page.get("slide_text") or ""),
+                "notes": str(page.get("notes") or ""),
+                "image_path": str(image_paths.get(slide_number, "")),
+            }
+        )
+    return result
 
 
 def render_deck_page_images(path: Path) -> dict[int, Path]:
@@ -355,63 +401,189 @@ def render_missing_page_images(deck: dict, slides: list[dict]) -> dict[int, Path
     return image_paths
 
 
-def refresh_pdf_slide_text(deck: dict, slides: list[dict], *, method: str = "local") -> int:
-    path = Path(deck["file_path"])
-    if path.suffix.lower() != ".pdf":
-        raise RuntimeError("只有 PDF 资料需要重新提取文字。")
-
-    extracted = {int(item["slide_number"]): item for item in extract_pdf_pages(path, method=method)}
+def apply_source_page_to_deck(
+    deck: dict,
+    source_page: dict,
+    *,
+    target_slide_number: int,
+    mode: str,
+) -> dict[str, int]:
     user = require_login()
     deck_id = int(deck["id"])
-    existing_by_number = {int(slide["slide_number"]): slide for slide in slides}
-    updated = 0
-    update_rows = []
-    insert_rows = []
-    for slide_number, item in sorted(extracted.items()):
-        slide = existing_by_number.get(slide_number)
-        if slide is None:
-            insert_rows.append(
-                (
-                    user.id,
-                    deck_id,
-                    slide_number,
-                    item["title"],
-                    item["slide_text"],
-                    item["notes"],
-                    "",
-                )
-            )
-            if str(item["slide_text"]).strip():
-                updated += 1
-            continue
-        if not item:
-            continue
-        update_rows.append((item["title"], item["slide_text"], item["notes"], slide["id"], user.id))
-        if str(item["slide_text"]).strip():
-            updated += 1
+    target = int(target_slide_number)
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"insert", "replace"}:
+        raise RuntimeError("页面操作仅支持 insert 或 replace。")
+
+    page = _normalize_source_page(source_page)
     with write_transaction() as conn:
-        conn.executemany(
+        max_slide_number = _max_slide_number(conn, user.id, deck_id)
+        if normalized_mode == "insert":
+            if target < 1 or target > max_slide_number + 1:
+                raise RuntimeError(f"插入位置必须在 1 到 {max_slide_number + 1} 之间。")
+            _shift_slide_numbers_up(conn, user.id, deck_id, target)
+            cursor = conn.execute(
+                """
+                INSERT INTO ppt_slides (user_id, deck_id, slide_number, title, slide_text, notes, image_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user.id, deck_id, target, page["title"], page["slide_text"], page["notes"], page["image_path"]),
+            )
+            conn.execute(
+                "UPDATE ppt_decks SET slide_count = ? WHERE id = ? AND user_id = ?",
+                (max_slide_number + 1, deck_id, user.id),
+            )
+            return {"inserted": 1, "replaced": 0, "slide_id": int(cursor.lastrowid), "target_slide_number": target}
+
+        if target < 1 or target > max_slide_number:
+            raise RuntimeError(f"替换位置必须在 1 到 {max_slide_number} 之间。")
+        cursor = conn.execute(
             """
             UPDATE ppt_slides
-            SET title = ?, slide_text = ?, notes = ?
-            WHERE id = ? AND user_id = ?
+            SET title = ?, slide_text = ?, notes = ?, image_path = ?
+            WHERE user_id = ? AND deck_id = ? AND slide_number = ?
             """,
-            update_rows,
+            (page["title"], page["slide_text"], page["notes"], page["image_path"], user.id, deck_id, target),
         )
-        conn.executemany(
+        if cursor.rowcount == 0:
+            raise RuntimeError(f"未找到第 {target} 页，无法替换。")
+        return {"inserted": 0, "replaced": 1, "target_slide_number": target}
+
+
+def delete_deck_page(deck: dict, *, target_slide_number: int) -> dict[str, int]:
+    user = require_login()
+    deck_id = int(deck["id"])
+    target = int(target_slide_number)
+    with write_transaction() as conn:
+        max_slide_number = _max_slide_number(conn, user.id, deck_id)
+        if target < 1 or target > max_slide_number:
+            raise RuntimeError(f"删除位置必须在 1 到 {max_slide_number} 之间。")
+        row = conn.execute(
             """
-            INSERT OR IGNORE INTO ppt_slides (user_id, deck_id, slide_number, title, slide_text, notes, image_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            SELECT id
+            FROM ppt_slides
+            WHERE user_id = ? AND deck_id = ? AND slide_number = ?
             """,
-            insert_rows,
+            (user.id, deck_id, target),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"未找到第 {target} 页，无法删除。")
+        slide_id = int(row[0])
+        conn.execute("DELETE FROM slide_questions WHERE user_id = ? AND slide_id = ?", (user.id, slide_id))
+        conn.execute("DELETE FROM slide_explanations WHERE user_id = ? AND slide_id = ?", (user.id, slide_id))
+        conn.execute("DELETE FROM ppt_slides WHERE user_id = ? AND id = ?", (user.id, slide_id))
+        conn.execute(
+            "DELETE FROM ppt_study_asset_pages WHERE user_id = ? AND deck_id = ? AND slide_number = ?",
+            (user.id, deck_id, target),
         )
-        if extracted:
-            max_slide_number = max([*extracted.keys(), *existing_by_number.keys(), 0])
-            conn.execute(
-                "UPDATE ppt_decks SET slide_count = CASE WHEN slide_count < ? THEN ? ELSE slide_count END WHERE id = ? AND user_id = ?",
-                (max_slide_number, max_slide_number, deck_id, user.id),
-            )
-    return updated
+        _shift_slide_numbers_down(conn, user.id, deck_id, target)
+        conn.execute(
+            """
+            UPDATE ppt_sections
+            SET
+                start_slide = CASE WHEN start_slide > ? THEN start_slide - 1 ELSE start_slide END,
+                end_slide = CASE WHEN end_slide >= ? THEN end_slide - 1 ELSE end_slide END,
+                updated_at = datetime('now', 'localtime')
+            WHERE user_id = ? AND deck_id = ?
+            """,
+            (target, target, user.id, deck_id),
+        )
+        conn.execute(
+            "DELETE FROM ppt_sections WHERE user_id = ? AND deck_id = ? AND end_slide < start_slide",
+            (user.id, deck_id),
+        )
+        conn.execute(
+            "UPDATE ppt_decks SET slide_count = ? WHERE id = ? AND user_id = ?",
+            (max(0, max_slide_number - 1), deck_id, user.id),
+        )
+    return {"deleted": 1, "target_slide_number": target}
+
+
+def _normalize_source_page(source_page: dict) -> dict[str, str]:
+    slide_number = int(source_page.get("slide_number") or 0)
+    return {
+        "title": str(source_page.get("title") or f"第 {slide_number} 页"),
+        "slide_text": str(source_page.get("slide_text") or ""),
+        "notes": str(source_page.get("notes") or ""),
+        "image_path": str(source_page.get("image_path") or ""),
+    }
+
+
+def _max_slide_number(conn, user_id: int, deck_id: int) -> int:
+    row = conn.execute(
+        """
+        SELECT COALESCE(MAX(slide_number), 0)
+        FROM ppt_slides
+        WHERE user_id = ? AND deck_id = ?
+        """,
+        (user_id, deck_id),
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _shift_slide_numbers_up(conn, user_id: int, deck_id: int, start_slide_number: int) -> None:
+    conn.execute(
+        """
+        UPDATE ppt_slides
+        SET slide_number = -slide_number
+        WHERE user_id = ? AND deck_id = ? AND slide_number >= ?
+        """,
+        (user_id, deck_id, start_slide_number),
+    )
+    conn.execute(
+        """
+        UPDATE ppt_slides
+        SET slide_number = -slide_number + 1
+        WHERE user_id = ? AND deck_id = ? AND slide_number < 0
+        """,
+        (user_id, deck_id),
+    )
+    conn.execute(
+        """
+        UPDATE ppt_study_asset_pages
+        SET slide_number = slide_number + 1
+        WHERE user_id = ? AND deck_id = ? AND slide_number >= ?
+        """,
+        (user_id, deck_id, start_slide_number),
+    )
+    conn.execute(
+        """
+        UPDATE ppt_sections
+        SET
+            start_slide = CASE WHEN start_slide >= ? THEN start_slide + 1 ELSE start_slide END,
+            end_slide = CASE WHEN end_slide >= ? THEN end_slide + 1 ELSE end_slide END,
+            updated_at = datetime('now', 'localtime')
+        WHERE user_id = ? AND deck_id = ?
+        """,
+        (start_slide_number, start_slide_number, user_id, deck_id),
+    )
+
+
+def _shift_slide_numbers_down(conn, user_id: int, deck_id: int, deleted_slide_number: int) -> None:
+    conn.execute(
+        """
+        UPDATE ppt_slides
+        SET slide_number = -slide_number
+        WHERE user_id = ? AND deck_id = ? AND slide_number > ?
+        """,
+        (user_id, deck_id, deleted_slide_number),
+    )
+    conn.execute(
+        """
+        UPDATE ppt_slides
+        SET slide_number = -slide_number - 1
+        WHERE user_id = ? AND deck_id = ? AND slide_number < 0
+        """,
+        (user_id, deck_id),
+    )
+    conn.execute(
+        """
+        UPDATE ppt_study_asset_pages
+        SET slide_number = slide_number - 1
+        WHERE user_id = ? AND deck_id = ? AND slide_number > ?
+        """,
+        (user_id, deck_id, deleted_slide_number),
+    )
 
 
 def _page_image_target_dir(path: Path) -> Path:

@@ -39,6 +39,11 @@ class PptTutorGenerationControlsTest(unittest.TestCase):
             for node in cls.tree.body
             if isinstance(node, ast.FunctionDef) and node.name == "_render_deck_actions"
         )
+        cls.source_page_editor = next(
+            node
+            for node in cls.tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_render_source_page_editor"
+        )
 
     def test_generation_controls_are_inside_collapsed_expander(self):
         expander = None
@@ -95,36 +100,39 @@ class PptTutorGenerationControlsTest(unittest.TestCase):
         self.assertNotIn(retry_text, visible_captions)
         self.assertNotIn(sync_text, visible_captions)
 
-    def test_pdf_rescan_fill_pages_is_visible_primary_action(self):
-        button_calls = [
-            node
-            for node in ast.walk(self.render_deck_actions)
-            if isinstance(node, ast.Call)
-            and _call_name(node).endswith(".button")
-            and _first_string_arg(node) == "重新扫描 / 补齐 PDF 页面"
-        ]
-        self.assertEqual(len(button_calls), 1)
-
-        parent_by_child = {
-            child: parent
-            for parent in ast.walk(self.render_deck_actions)
-            for child in ast.iter_child_nodes(parent)
+    def test_manual_source_page_editor_replaces_auto_rescan_actions(self):
+        action_constants = {
+            item.value
+            for item in ast.walk(self.render_deck_actions)
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
         }
-        current = button_calls[0]
-        guarded_by_pdf_deck = False
-        while current in parent_by_child:
-            current = parent_by_child[current]
-            if (
-                isinstance(current, ast.If)
-                and isinstance(current.test, ast.Call)
-                and _call_name(current.test) == "_is_pdf_deck"
-            ):
-                guarded_by_pdf_deck = True
-                break
+        nested_calls = {_call_name(item) for item in ast.walk(self.render_deck_actions) if isinstance(item, ast.Call)}
 
-        self.assertTrue(guarded_by_pdf_deck)
-        nested_calls = {_call_name(item) for item in ast.walk(current) if isinstance(item, ast.Call)}
-        self.assertIn("refresh_pdf_slide_text", nested_calls)
+        self.assertIn("_render_source_page_editor", nested_calls)
+        self.assertNotIn("重新扫描 / 补齐 PDF 页面", action_constants)
+        self.assertNotIn("重新扫描 / 补齐 PPT 页面", action_constants)
+
+    def test_manual_source_page_editor_supports_page_insert_replace_and_delete(self):
+        constants = {
+            item.value
+            for item in ast.walk(self.source_page_editor)
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        }
+        nested_calls = {_call_name(item) for item in ast.walk(self.source_page_editor) if isinstance(item, ast.Call)}
+
+        self.assertIn("从另一个 PPT / PDF 插入、替换或删除单页", constants)
+        self.assertIn("选择包含目标页面的 PPTX 或 PDF 文件", constants)
+        self.assertIn("解析来源文件", constants)
+        self.assertIn("插入到目标页前", constants)
+        self.assertIn("替换目标页", constants)
+        self.assertIn("删除当前已有页面", constants)
+        self.assertIn("应用到当前资料", constants)
+        self.assertIn("不会删除已有讲解和查问；替换只换页面内容。", constants)
+        self.assertIn("删除会移除该页讲解和查问，后面的页码自动前移。", constants)
+        self.assertIn("save_page_source_file", nested_calls)
+        self.assertIn("extract_source_pages", nested_calls)
+        self.assertIn("apply_source_page_to_deck", nested_calls)
+        self.assertIn("delete_deck_page", nested_calls)
 
 
 if __name__ == "__main__":

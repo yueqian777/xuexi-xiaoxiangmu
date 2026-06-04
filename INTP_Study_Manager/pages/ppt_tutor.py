@@ -55,7 +55,14 @@ from services.ppt_context_service import (
     should_use_lightweight_explanation,
 )
 from services.ppt_generation_state import apply_stop_request, generation_progress_patch
-from services.ppt_service import import_deck, refresh_pdf_slide_text, render_missing_page_images
+from services.ppt_service import (
+    apply_source_page_to_deck,
+    delete_deck_page,
+    extract_source_pages,
+    import_deck,
+    render_missing_page_images,
+    save_page_source_file,
+)
 from services.pdf_extraction_service import MinerUStatus, get_mineru_status, normalize_mineru_math_text
 from services.prompt_service import render_template
 from services.ppt_reader_state import (
@@ -494,36 +501,7 @@ def _render_deck_actions(
         except Exception as exc:
             st.error(f"生成原页面图片失败：{exc}")
 
-    if _is_pdf_deck(deck):
-        mineru_status = get_mineru_status()
-        method_key = f"ppt_pdf_extraction_method_{deck['id']}"
-        extraction_options = _pdf_extraction_method_options(mineru_status)
-        option_labels = dict(extraction_options)
-        option_values = [value for value, _label in extraction_options]
-        if st.session_state.get(method_key) not in option_values:
-            st.session_state[method_key] = "local"
-        extraction_method = st.session_state.get(method_key, "local")
-        if cols[1].button("重新扫描 / 补齐 PDF 页面"):
-            try:
-                spinner_text = "正在使用 MinerU 高精度扫描 PDF..." if extraction_method == "mineru" else "正在重新扫描 PDF 页面..."
-                with st.spinner(spinner_text):
-                    updated = refresh_pdf_slide_text(deck, slides, method=extraction_method)
-                st.success(f"PDF 页面已补齐：{updated} 页提取到文本。")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"重新扫描 / 补齐 PDF 页面失败：{exc}")
-        with st.expander("PDF 识别增强设置", expanded=False):
-            st.radio(
-                "重新提取方式",
-                option_values,
-                format_func=lambda value: option_labels[value],
-                key=method_key,
-                help="默认使用本地增强抽取。安装并配置 MinerU 后，才会出现 MinerU 高精度抽取选项。",
-            )
-            st.caption(mineru_status.message)
-            if not mineru_status.available:
-                st.caption("MinerU 是自愿安装的辅助配置，不会随 requirements.txt 自动安装。")
-                st.code('setx INTP_MINERU_COMMAND "D:\\MinerU\\.venv\\Scripts\\mineru.exe"', language="powershell")
+    _render_source_page_editor(deck, slides)
 
     _render_document_structure_controls(deck, slides, sections)
 
@@ -634,6 +612,164 @@ def _render_deck_actions(
                 adaptive_parallelism=adaptive_parallelism,
                 benchmark_during_generation=benchmark_during_generation,
             )
+
+
+def _render_source_page_editor(deck: dict, slides: list[dict]) -> None:
+    if not slides:
+        return
+
+    deck_id = int(deck["id"])
+    slide_numbers = [int(slide["slide_number"]) for slide in slides]
+    max_slide_number = max(slide_numbers)
+    source_state_key = f"ppt_source_page_editor_{deck_id}"
+    mode_key = f"ppt_source_page_editor_mode_{deck_id}"
+
+    with st.expander("从另一个 PPT / PDF 插入、替换或删除单页", expanded=False):
+        operation = st.radio(
+            "页面操作",
+            ("插入到目标页前", "替换目标页", "删除当前已有页面"),
+            horizontal=True,
+            key=mode_key,
+        )
+
+        if operation == "删除当前已有页面":
+            st.caption("删除会移除该页讲解和查问，后面的页码自动前移。")
+            target_slide_number = st.selectbox(
+                "目标页",
+                slide_numbers,
+                format_func=lambda value: f"删除第 {value} 页",
+                key=f"ppt_delete_target_slide_{deck_id}",
+            )
+            confirmed = st.checkbox(
+                "确认删除这一页及其讲解和查问",
+                key=f"ppt_delete_target_confirm_{deck_id}",
+            )
+            if st.button(
+                "应用到当前资料",
+                type="primary",
+                disabled=not confirmed,
+                key=f"ppt_delete_target_apply_{deck_id}",
+            ):
+                try:
+                    with st.spinner("正在删除页面并调整后续页码..."):
+                        delete_deck_page(deck, target_slide_number=int(target_slide_number))
+                    next_slide_number = min(int(target_slide_number), max(1, max_slide_number - 1))
+                    update_reader_position_state(st.session_state, deck_id=deck_id, slide_number=next_slide_number)
+                    st.success(f"已删除第 {target_slide_number} 页，后续页码已前移。")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"删除页面失败：{exc}")
+            return
+
+        st.caption("不会删除已有讲解和查问；替换只换页面内容。")
+        uploaded = st.file_uploader(
+            "选择包含目标页面的 PPTX 或 PDF 文件",
+            type=["pptx", "pdf"],
+            key=f"ppt_source_page_file_{deck_id}",
+        )
+        source_method = "local"
+        if uploaded is not None and Path(getattr(uploaded, "name", "")).suffix.lower() == ".pdf":
+            mineru_status = get_mineru_status()
+            method_key = f"ppt_source_pdf_extraction_method_{deck_id}"
+            extraction_options = _pdf_extraction_method_options(mineru_status)
+            option_labels = dict(extraction_options)
+            option_values = [value for value, _label in extraction_options]
+            if st.session_state.get(method_key) not in option_values:
+                st.session_state[method_key] = "local"
+            source_method = st.radio(
+                "来源 PDF 提取方式",
+                option_values,
+                format_func=lambda value: option_labels[value],
+                key=method_key,
+                help="只用于解析本次上传的来源 PDF，不会自动覆盖当前资料页面。",
+            )
+            st.caption(mineru_status.message)
+            if not mineru_status.available:
+                st.caption("MinerU 是自愿安装的辅助配置，不会随 requirements.txt 自动安装。")
+
+        if st.button(
+            "解析来源文件",
+            disabled=uploaded is None,
+            key=f"ppt_source_page_parse_{deck_id}",
+        ):
+            try:
+                with st.spinner("正在解析来源文件页面..."):
+                    saved_path = save_page_source_file(uploaded)
+                    source_pages = extract_source_pages(saved_path, method=source_method)
+                if not source_pages:
+                    st.warning("这个来源文件没有解析到可用页面。")
+                else:
+                    st.session_state[source_state_key] = {
+                        "name": getattr(uploaded, "name", saved_path.name),
+                        "path": str(saved_path),
+                        "pages": source_pages,
+                    }
+                    st.success(f"已解析 {len(source_pages)} 页来源页面。")
+            except Exception as exc:
+                st.error(f"解析来源文件失败：{exc}")
+
+        source_state = st.session_state.get(source_state_key)
+        if not isinstance(source_state, dict) or not source_state.get("pages"):
+            return
+
+        source_pages = list(source_state.get("pages") or [])
+        page_by_number = {int(page["slide_number"]): page for page in source_pages}
+        source_numbers = sorted(page_by_number)
+        st.caption(f"当前来源：{source_state.get('name') or Path(str(source_state.get('path') or '')).name}")
+        source_slide_number = st.selectbox(
+            "来源页",
+            source_numbers,
+            format_func=lambda value: _source_page_label(page_by_number[int(value)]),
+            key=f"ppt_source_page_number_{deck_id}",
+        )
+        source_page = page_by_number[int(source_slide_number)]
+        preview_path = Path(str(source_page.get("image_path") or ""))
+        if preview_path.exists() and preview_path.is_file():
+            st.image(str(preview_path), caption=f"来源第 {source_slide_number} 页", use_container_width=True)
+
+        if operation == "插入到目标页前":
+            target_options = list(range(1, max_slide_number + 2))
+            target_slide_number = st.selectbox(
+                "目标位置",
+                target_options,
+                format_func=lambda value: f"追加到末尾（第 {value} 页）" if int(value) == max_slide_number + 1 else f"插入到第 {value} 页前",
+                key=f"ppt_source_insert_target_{deck_id}",
+            )
+            mode = "insert"
+        else:
+            target_slide_number = st.selectbox(
+                "目标位置",
+                slide_numbers,
+                format_func=lambda value: f"替换第 {value} 页",
+                key=f"ppt_source_replace_target_{deck_id}",
+            )
+            mode = "replace"
+
+        if st.button("应用到当前资料", type="primary", key=f"ppt_source_page_apply_{deck_id}"):
+            try:
+                with st.spinner("正在应用页面变更..."):
+                    apply_source_page_to_deck(
+                        deck,
+                        source_page,
+                        target_slide_number=int(target_slide_number),
+                        mode=mode,
+                    )
+                update_reader_position_state(st.session_state, deck_id=deck_id, slide_number=int(target_slide_number))
+                if mode == "insert":
+                    st.success(f"已把来源第 {source_slide_number} 页插入到当前第 {target_slide_number} 页位置。")
+                else:
+                    st.success(f"已用来源第 {source_slide_number} 页替换当前第 {target_slide_number} 页。")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"应用页面变更失败：{exc}")
+
+
+def _source_page_label(page: dict) -> str:
+    slide_number = int(page.get("slide_number") or 0)
+    title = str(page.get("title") or "未命名页面").strip() or "未命名页面"
+    text = str(page.get("slide_text") or "").strip().replace("\n", " ")
+    suffix = f" · {text[:40]}" if text else ""
+    return f"第 {slide_number} 页 · {title[:40]}{suffix}"
 
 
 def _render_document_structure_controls(deck: dict, slides: list[dict], sections: list[dict]) -> None:
@@ -4279,12 +4415,6 @@ def _display_slide_text(slide: dict) -> str:
     if "extractor=mineru" not in notes:
         return text
     return "\n".join(normalize_mineru_math_text(line) for line in text.splitlines())
-
-
-def _is_pdf_deck(deck: dict) -> bool:
-    filename = str(deck.get("filename") or "")
-    file_path = str(deck.get("file_path") or "")
-    return filename.lower().endswith(".pdf") or file_path.lower().endswith(".pdf")
 
 
 def _pdf_extraction_method_options(mineru_status: MinerUStatus) -> list[tuple[str, str]]:
