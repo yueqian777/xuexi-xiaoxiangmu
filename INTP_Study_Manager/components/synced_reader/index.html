@@ -4846,6 +4846,12 @@
       const depthLabel = depth === 0 ? '主插问' : `子插问 L${depth}`;
       const quoteSource = item.quoteSource ? ` | 引用：${item.quoteSource}` : '';
       const status = item.status ? ` | 状态：${item.status}` : '';
+      const learningBadges = [
+        item.understood ? 'understood' : '',
+        item.needReview ? 'review' : '',
+        item.knowledgeId ? `knowledge #${item.knowledgeId}` : '',
+      ].filter(Boolean).join(' | ');
+      const learningMeta = learningBadges ? ` | ${learningBadges}` : '';
       const indent = isChild ? Math.min(depth, 5) * 14 : 0;
       return `
         <div class="chat-turn ${isChild ? 'child-question' : ''}" data-question-id="${questionId || ''}" data-depth="${depth}" style="${indent ? `margin-left:${indent}px` : ''}">
@@ -4853,7 +4859,7 @@
           <div class="chat-answer">
             <div class="chat-answer-body" data-question-id="${questionId || ''}" data-slide-number="${currentSlideNumber}">${renderMarkdown(item.answer || '')}</div>
           </div>
-          <div class="chat-turn-meta">${escapeHtml(depthLabel + status + quoteSource)} | ${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '| ' + escapeHtml(item.createdAt) : ''}</div>
+          <div class="chat-turn-meta">${escapeHtml(depthLabel + status + quoteSource + learningMeta)} | ${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '| ' + escapeHtml(item.createdAt) : ''}</div>
           ${options.inChildPanel ? '' : `<div class="chat-turn-actions">
             <button type="button" data-open-child-chat="${questionId || ''}">继续追问</button>
             <button type="button" data-question-status="understood" data-question-id="${questionId || ''}">标记已理解</button>

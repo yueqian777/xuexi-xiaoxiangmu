@@ -12,7 +12,10 @@ from pages import (
     knowledge_cards,
     mainline_branches,
     mistakes,
+    markdown_export,
     parking_lot,
+    ppt_explanation_export,
+    ppt_explanation_import,
     ppt_management,
     ppt_tutor,
     quiz_prompts,
@@ -41,6 +44,9 @@ PAGES = {
     "探索停车场": parking_lot.render,
     "主线与插问": mainline_branches.render,
     "错因本": mistakes.render,
+    "私人 Markdown / Obsidian 导出": markdown_export.render,
+    "PPT 讲解分享包": ppt_explanation_export.render,
+    "PPT 讲解包导入": ppt_explanation_import.render,
 }
 
 

@@ -82,6 +82,12 @@ from services.ppt_reader_state import (
     should_refresh_task,
     update_reader_position_state,
 )
+from services.question_to_knowledge_service import (
+    convert_question_to_knowledge,
+    ensure_question_review_tasks,
+    get_question_knowledge_draft,
+    mark_question_understood,
+)
 from services.study_asset_service import parse_study_assets, save_study_assets
 
 SYNCED_READER_COMPONENT_PATH = BASE_DIR / "components" / "synced_reader"
@@ -359,6 +365,7 @@ def render() -> None:
 
     st.divider()
     _render_deck_actions(deck, slides, latest_by_slide_id, sections, user_id=user.id)
+    _render_question_to_knowledge_panel(deck, user_id=user.id)
     _render_synced_reader(deck, slides, latest_by_slide_id, last_position, sections, user_id=user.id)
     _auto_refresh_structure_generation(st.session_state.get("ppt_structure_task"))
     _auto_refresh_running_generation(generation_task)
@@ -495,8 +502,9 @@ def _render_deck_actions(
 ) -> None:
     st.subheader("整份资料逐页分析")
     missing_images = [slide for slide in slides if not _image_exists(slide)]
+    can_render_source = _deck_can_render_page_images(deck)
     cols = st.columns([1.3, 1.3, 2])
-    if cols[0].button("生成 / 修复原页面图片", disabled=not missing_images):
+    if cols[0].button("生成 / 修复原页面图片", disabled=(not missing_images or not can_render_source)):
         try:
             with st.spinner("正在生成原页面图片..."):
                 render_missing_page_images(deck, slides)
@@ -504,6 +512,8 @@ def _render_deck_actions(
             st.rerun()
         except Exception as exc:
             st.error(f"生成原页面图片失败：{exc}")
+    if missing_images and not can_render_source:
+        cols[0].caption("导入的公开分享包没有原始 PPT/PDF 时，不能重新渲染原页面图片。")
 
     _render_source_page_editor(deck, slides)
 
@@ -617,6 +627,88 @@ def _render_deck_actions(
                 benchmark_during_generation=benchmark_during_generation,
                 user_id=user_id,
             )
+
+
+def _question_to_knowledge_pending_key(deck_id: int) -> str:
+    return f"ppt_question_to_knowledge_pending_{int(deck_id)}"
+
+
+def _render_question_to_knowledge_panel(deck: dict, *, user_id: int) -> None:
+    key = _question_to_knowledge_pending_key(int(deck["id"]))
+    pending = st.session_state.get(key)
+    if not pending:
+        return
+    try:
+        question_id = int(pending.get("question_id") if isinstance(pending, dict) else pending)
+    except (TypeError, ValueError):
+        st.session_state.pop(key, None)
+        return
+    draft = get_question_knowledge_draft(user_id, question_id)
+    if not draft:
+        with st.expander("Question to knowledge card", expanded=True):
+            st.warning("This question is no longer available.")
+            if st.button("Dismiss", key=f"dismiss_missing_question_{question_id}"):
+                st.session_state.pop(key, None)
+                st.rerun()
+        return
+
+    existing_card = _question_existing_knowledge_card(user_id, question_id)
+    with st.expander("Question to knowledge card", expanded=True):
+        st.caption(f"Source question #{question_id}")
+        if existing_card:
+            st.info(f"Already linked to knowledge card #{existing_card['id']}. Submitting will reuse it.")
+        with st.form(f"question_to_knowledge_form_{int(deck['id'])}_{question_id}"):
+            subject = st.text_input("Subject", value=str(draft.get("subject") or "Uncategorized"))
+            topic = st.text_input("Topic", value=str(draft.get("topic") or "Question"))
+            core_question = st.text_area("Core question", value=str(draft.get("core_question") or ""), height=90)
+            one_sentence = st.text_area("One sentence", value=str(draft.get("one_sentence") or ""), height=80)
+            logic_or_formula = st.text_area("Logic or formula", value=str(draft.get("logic_or_formula") or ""), height=140)
+            application = st.text_area("Application", value=str(draft.get("application") or ""), height=110)
+            cols = st.columns([1, 1, 2])
+            mastery = cols[0].number_input("Mastery", min_value=0, max_value=100, value=int(draft.get("mastery") or 60), step=5)
+            need_review = cols[1].checkbox("Add review", value=bool(draft.get("need_review", True)))
+            submitted = cols[2].form_submit_button("Save knowledge card", type="primary")
+            cancelled = cols[2].form_submit_button("Cancel")
+        if cancelled:
+            st.session_state.pop(key, None)
+            st.rerun()
+        if submitted:
+            try:
+                result = convert_question_to_knowledge(
+                    user_id,
+                    question_id,
+                    overrides={
+                        "subject": subject,
+                        "topic": topic,
+                        "core_question": core_question,
+                        "one_sentence": one_sentence,
+                        "logic_or_formula": logic_or_formula,
+                        "application": application,
+                        "mastery": mastery,
+                        "need_review": need_review,
+                    },
+                    create_review_tasks=need_review,
+                )
+            except Exception as exc:
+                st.error(f"Failed to create knowledge card: {exc}")
+                return
+            st.session_state.pop(key, None)
+            verb = "Created" if result.get("created") else "Reused"
+            st.success(f"{verb} knowledge card #{result['knowledge_id']}.")
+            st.rerun()
+
+
+def _question_existing_knowledge_card(user_id: int, question_id: int) -> dict | None:
+    return fetch_one(
+        """
+        SELECT id, topic
+        FROM knowledge_cards
+        WHERE user_id = ? AND source_question_id = ?
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (int(user_id), int(question_id)),
+    )
 
 
 def _render_source_page_editor(deck: dict, slides: list[dict]) -> None:
@@ -1104,10 +1196,21 @@ def _handle_synced_reader_action(
         status = str(payload.get("status") or "").strip()
         if not question_id or not status:
             return
-        update_slide_question_status(question_id, user_id, status)
+        if status == "understood":
+            mark_question_understood(user_id, question_id)
+            toast_text = "Question marked understood."
+        elif status == "review":
+            result = ensure_question_review_tasks(user_id, question_id)
+            toast_text = f"Review tasks ready for knowledge card #{result['knowledge_id']}."
+        elif status == "knowledge_card":
+            st.session_state[_question_to_knowledge_pending_key(int(deck["id"]))] = {"question_id": question_id}
+            toast_text = "Knowledge card draft is ready."
+        else:
+            update_slide_question_status(question_id, user_id, status)
+            toast_text = "Question status updated."
         if token:
             st.session_state[last_status_token_key] = token
-        st.toast("插问状态已更新。")
+        st.toast(toast_text)
         st.rerun()
         return
 
@@ -4335,6 +4438,16 @@ def _image_exists(slide: dict) -> bool:
     return bool(image_path and Path(image_path).exists())
 
 
+def _deck_can_render_page_images(deck: dict) -> bool:
+    file_path = str(deck.get("file_path") or "").strip()
+    if not file_path:
+        return False
+    path = Path(file_path)
+    if path.suffix.lower() not in {".pptx", ".pdf"}:
+        return False
+    return path.exists()
+
+
 def _image_paths_for_generation(
     slide: dict,
     send_image_when_no_text: bool,
@@ -4378,6 +4491,10 @@ def _question_tree_node_payload(row: dict) -> dict:
         "model": row["model"],
         "category": row["category"],
         "status": row["status"],
+        "knowledgeId": row.get("knowledge_id"),
+        "convertedToKnowledge": bool(row.get("converted_to_knowledge")),
+        "understood": bool(row.get("understood")),
+        "needReview": bool(row.get("need_review")),
         "sortOrder": row["sort_order"],
         "createdAt": row["created_at"],
         "children": [_question_tree_node_payload(child) for child in children],

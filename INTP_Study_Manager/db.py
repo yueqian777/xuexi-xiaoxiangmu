@@ -115,6 +115,9 @@ def _run_init_db() -> None:
                 mastery INTEGER NOT NULL DEFAULT 0,
                 need_review INTEGER NOT NULL DEFAULT 1,
                 source_session_id INTEGER,
+                source_deck_id INTEGER,
+                source_slide_id INTEGER,
+                source_question_id INTEGER,
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 FOREIGN KEY (source_session_id) REFERENCES study_sessions(id) ON DELETE SET NULL
             );
@@ -185,7 +188,25 @@ def _run_init_db() -> None:
                 slide_count INTEGER NOT NULL DEFAULT 0,
                 outline TEXT DEFAULT '',
                 outline_generated_at TEXT DEFAULT '',
+                import_package_id INTEGER,
+                source_type TEXT NOT NULL DEFAULT 'local_upload',
+                source_package_id TEXT DEFAULT '',
+                imported_at TEXT DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );
+
+            CREATE TABLE IF NOT EXISTS import_packages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                package_id TEXT NOT NULL,
+                package_type TEXT NOT NULL,
+                package_version TEXT NOT NULL DEFAULT '',
+                privacy_mode TEXT NOT NULL DEFAULT '',
+                subject TEXT DEFAULT '',
+                title TEXT DEFAULT '',
+                source_filename TEXT DEFAULT '',
+                manifest_json TEXT NOT NULL DEFAULT '{}',
+                imported_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
 
             CREATE TABLE IF NOT EXISTS ppt_slides (
@@ -264,6 +285,10 @@ def _run_init_db() -> None:
                 depth INTEGER NOT NULL DEFAULT 0,
                 quote_source TEXT DEFAULT 'slide',
                 quote_source_question_id INTEGER,
+                knowledge_id INTEGER,
+                converted_to_knowledge INTEGER NOT NULL DEFAULT 0,
+                understood INTEGER NOT NULL DEFAULT 0,
+                need_review INTEGER NOT NULL DEFAULT 0,
                 category TEXT DEFAULT '',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT '未整理',
@@ -352,6 +377,9 @@ def _run_init_db() -> None:
         _ensure_column(conn, "mainline_anchors", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "branch_questions", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "knowledge_cards", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "knowledge_cards", "source_deck_id", "INTEGER")
+        _ensure_column(conn, "knowledge_cards", "source_slide_id", "INTEGER")
+        _ensure_column(conn, "knowledge_cards", "source_question_id", "INTEGER")
         _ensure_column(conn, "knowledge_links", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "mistakes", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "review_tasks", "user_id", "INTEGER NOT NULL DEFAULT 0")
@@ -359,6 +387,10 @@ def _run_init_db() -> None:
         _ensure_column(conn, "ppt_decks", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "ppt_decks", "outline", "TEXT DEFAULT ''")
         _ensure_column(conn, "ppt_decks", "outline_generated_at", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_decks", "import_package_id", "INTEGER")
+        _ensure_column(conn, "ppt_decks", "source_type", "TEXT NOT NULL DEFAULT 'local_upload'")
+        _ensure_column(conn, "ppt_decks", "source_package_id", "TEXT DEFAULT ''")
+        _ensure_column(conn, "ppt_decks", "imported_at", "TEXT DEFAULT ''")
         _ensure_column(conn, "ppt_slides", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "ppt_slides", "section_index", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "ppt_slides", "page_type", "TEXT DEFAULT ''")
@@ -377,6 +409,10 @@ def _run_init_db() -> None:
         _ensure_column(conn, "slide_questions", "depth", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_questions", "quote_source", "TEXT DEFAULT 'slide'")
         _ensure_column(conn, "slide_questions", "quote_source_question_id", "INTEGER")
+        _ensure_column(conn, "slide_questions", "knowledge_id", "INTEGER")
+        _ensure_column(conn, "slide_questions", "converted_to_knowledge", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "slide_questions", "understood", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "slide_questions", "need_review", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "api_providers", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "api_providers", "vision_capability", "TEXT NOT NULL DEFAULT 'auto'")
         _ensure_column(conn, "app_settings", "user_id", "INTEGER NOT NULL DEFAULT 0")
@@ -410,6 +446,9 @@ def _run_init_db() -> None:
                 ON knowledge_cards(user_id, source_session_id);
             CREATE INDEX IF NOT EXISTS idx_knowledge_cards_source_session
                 ON knowledge_cards(source_session_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_cards_user_source_question_unique
+                ON knowledge_cards(user_id, source_question_id)
+                WHERE source_question_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_knowledge_links_user_source_created
                 ON knowledge_links(user_id, source_knowledge_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_knowledge_links_user_target_created
@@ -440,6 +479,10 @@ def _run_init_db() -> None:
                 ON parking_lot(user_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_ppt_decks_user_created
                 ON ppt_decks(user_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_ppt_decks_user_import_package
+                ON ppt_decks(user_id, import_package_id);
+            CREATE INDEX IF NOT EXISTS idx_import_packages_user_package
+                ON import_packages(user_id, package_id);
             CREATE INDEX IF NOT EXISTS idx_ppt_slides_user_deck_number
                 ON ppt_slides(user_id, deck_id, slide_number ASC);
             CREATE INDEX IF NOT EXISTS idx_ppt_slides_user_deck_bookmark
@@ -466,6 +509,8 @@ def _run_init_db() -> None:
                 ON slide_questions(user_id, parent_question_id, sort_order ASC, created_at ASC, id ASC);
             CREATE INDEX IF NOT EXISTS idx_slide_questions_slide
                 ON slide_questions(slide_id);
+            CREATE INDEX IF NOT EXISTS idx_slide_questions_user_knowledge
+                ON slide_questions(user_id, knowledge_id);
             CREATE INDEX IF NOT EXISTS idx_daily_ai_review_plans_user_date
                 ON daily_ai_review_plans(user_id, review_date DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_api_parallel_benchmarks_provider

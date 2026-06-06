@@ -179,6 +179,10 @@ def _render_question_management(user_id: int) -> None:
         "category",
         "slide_number",
         "slide_title",
+        "knowledge_id",
+        "converted_to_knowledge",
+        "understood",
+        "need_review",
         "question_preview",
         "answer_preview",
         "model",
@@ -193,7 +197,18 @@ def _render_question_management(user_id: int) -> None:
     )
 
     frame = pd.DataFrame(visible)[
-        visible_columns
+        [
+            "id",
+            "sort_order",
+            "status",
+            "category",
+            "slide_number",
+            "slide_title",
+            "question_preview",
+            "answer_preview",
+            "model",
+            "created_at",
+        ]
     ]
     edited = st.data_editor(
         frame,
