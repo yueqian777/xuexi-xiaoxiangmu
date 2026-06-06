@@ -216,6 +216,35 @@ class PptCanvasQuestionTest(unittest.TestCase):
         flatten.assert_called_once_with(11, 12)
         rerun.assert_called_once()
 
+    def test_canvas_close_slide_question_marks_status_without_model_call(self):
+        deck = {"id": 3, "title": "Deck", "subject": "Subject"}
+        slide = {"id": 9, "slide_number": 2, "title": "Signals", "slide_text": ""}
+        payload = {
+            "action": "close_slide_question",
+            "deckId": 3,
+            "slideNumber": 2,
+            "token": "tok-close-question",
+            "questionId": 12,
+        }
+        session_state = {
+            ppt_tutor._reader_active_slide_state_key(3): 2,
+        }
+
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor.st, "toast"),
+            patch.object(ppt_tutor.st, "rerun") as rerun,
+            patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 11})()),
+            patch.object(ppt_tutor, "generate_text") as generate_text,
+            patch.object(ppt_tutor, "close_slide_question", return_value=True) as close_question,
+        ):
+            ppt_tutor._handle_synced_reader_action(deck, [slide], {}, payload, [])
+
+        generate_text.assert_not_called()
+        close_question.assert_called_once_with(12, 11)
+        self.assertEqual(session_state[ppt_tutor._reader_active_slide_state_key(3)], 2)
+        rerun.assert_called_once()
+
     def test_canvas_child_question_validation_error_does_not_crash_reader(self):
         deck = {"id": 3, "title": "信号课件", "subject": "信号与系统"}
         slide = {"id": 9, "slide_number": 2, "title": "周期信号", "slide_text": "本页正文"}
@@ -273,7 +302,7 @@ class PptCanvasQuestionTest(unittest.TestCase):
 
         with (
             patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 11})()),
-            patch.object(ppt_tutor, "questions_by_slide_ids", return_value={9: rows}),
+            patch.object(ppt_tutor, "get_slide_question_tree", return_value=rows),
         ):
             result = ppt_tutor._questions_by_slide_ids([9])
 
@@ -281,6 +310,7 @@ class PptCanvasQuestionTest(unittest.TestCase):
         self.assertEqual(result[9][0]["quoteText"], "周期信号")
         self.assertEqual(result[9][0]["id"], 12)
         self.assertEqual(result[9][0]["rootQuestionId"], 12)
+        self.assertEqual(result[9][0]["children"], [])
 
 
     def test_build_reader_payload_includes_bookmark_status_with_title_fallback(self):

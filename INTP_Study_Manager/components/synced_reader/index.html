@@ -2286,11 +2286,11 @@
       }
     }
 
-    function sendQuestionThreadMerge(questionId) {
+    function sendQuestionClose(questionId) {
       const targetQuestionId = Number(questionId || 0);
       if (!targetQuestionId) return false;
       Streamlit.setComponentValue({
-        action: 'merge_question_thread',
+        action: 'close_slide_question',
         token: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
         deckId,
         slideNumber: currentSlideNumber,
@@ -2299,9 +2299,23 @@
       return true;
     }
 
+    function sendQuestionStatus(questionId, status) {
+      const targetQuestionId = Number(questionId || 0);
+      const targetStatus = String(status || '').trim();
+      if (!targetQuestionId || !targetStatus) return false;
+      Streamlit.setComponentValue({
+        action: 'update_slide_question_status',
+        token: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        deckId,
+        slideNumber: currentSlideNumber,
+        questionId: targetQuestionId,
+        status: targetStatus,
+      });
+      return true;
+    }
+
     function closeChildLayersForSlideChange() {
       if (!childChatLayers.length) return;
-      sendQuestionThreadMerge(childChatLayers[0]?.parentQuestionId);
       suppressObserverUntil = Date.now() + VIEWPORT_ANCHOR_MS;
       childChatLayers = [];
       childPanelScrollToBottomLayerId = null;
@@ -3888,9 +3902,16 @@
     function questionById(questionId) {
       const targetId = Number(questionId || 0);
       if (!targetId) return null;
+      const findInItems = items => {
+        for (const item of (Array.isArray(items) ? items : [])) {
+          if (Number(questionIdForItem(item)) === targetId) return item;
+          const found = findInItems(item.children);
+          if (found) return found;
+        }
+        return null;
+      };
       for (const page of pages) {
-        const found = (Array.isArray(page.questions) ? page.questions : [])
-          .find(item => Number(questionIdForItem(item)) === targetId);
+        const found = findInItems(page.questions);
         if (found) return found;
       }
       return null;
@@ -3898,6 +3919,8 @@
 
     function childQuestionsFor(parentQuestionId) {
       const parentId = Number(parentQuestionId || 0);
+      const parent = questionById(parentId);
+      if (Array.isArray(parent?.children)) return parent.children;
       return allQuestionsForCurrentPage().filter(item => Number(item.parentQuestionId || 0) === parentId);
     }
 
@@ -4819,16 +4842,37 @@
       options = options || {};
       const questionId = questionIdForItem(item);
       const isChild = Number(item.parentQuestionId || 0) > 0;
+      const depth = Math.max(0, Number(item.depth || 0));
+      const depthLabel = depth === 0 ? '主插问' : `子插问 L${depth}`;
+      const quoteSource = item.quoteSource ? ` | 引用：${item.quoteSource}` : '';
+      const status = item.status ? ` | 状态：${item.status}` : '';
+      const indent = isChild ? Math.min(depth, 5) * 14 : 0;
       return `
-        <div class="chat-turn ${isChild ? 'child-question' : ''}" data-question-id="${questionId || ''}" data-depth="${Number(item.depth || 0)}">
+        <div class="chat-turn ${isChild ? 'child-question' : ''}" data-question-id="${questionId || ''}" data-depth="${depth}" style="${indent ? `margin-left:${indent}px` : ''}">
           ${renderChatQuestion(item)}
           <div class="chat-answer">
             <div class="chat-answer-body" data-question-id="${questionId || ''}" data-slide-number="${currentSlideNumber}">${renderMarkdown(item.answer || '')}</div>
           </div>
-          <div class="chat-turn-meta">${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '· ' + escapeHtml(item.createdAt) : ''}</div>
-          ${options.inChildPanel ? '' : `<div class="chat-turn-actions"><button type="button" data-open-child-chat="${questionId || ''}">子插问</button></div>`}
+          <div class="chat-turn-meta">${escapeHtml(depthLabel + status + quoteSource)} | ${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '| ' + escapeHtml(item.createdAt) : ''}</div>
+          ${options.inChildPanel ? '' : `<div class="chat-turn-actions">
+            <button type="button" data-open-child-chat="${questionId || ''}">继续追问</button>
+            <button type="button" data-question-status="understood" data-question-id="${questionId || ''}">标记已理解</button>
+            <button type="button" data-question-status="review" data-question-id="${questionId || ''}">加入复习</button>
+            <button type="button" data-question-status="knowledge_card" data-question-id="${questionId || ''}">转知识卡片</button>
+            <button type="button" data-question-close="${questionId || ''}">关闭</button>
+          </div>`}
         </div>
       `;
+    }
+
+    function renderQuestionThread(item, visited = new Set()) {
+      const questionId = questionIdForItem(item);
+      if (questionId && visited.has(questionId)) return '';
+      if (questionId) visited.add(questionId);
+      return [
+        renderChatTurn(item),
+        ...childQuestionsFor(questionId).map(child => renderQuestionThread(child, new Set(visited))),
+      ].join('');
     }
 
     function renderChatForPage(slideNumber, options = {}) {
@@ -4861,13 +4905,7 @@
       const previousScrollTop = canvasMessages.scrollTop;
       const focusQuestionId = Number(options.focusQuestionId || 0)
         || (options.focusLatestQuestion ? Number(questionIdForItem(rootMessages[rootMessages.length - 1]) || 0) : 0);
-      canvasMessages.innerHTML = rootMessages.map(item => [
-        renderChatTurn(item),
-        ...messages
-          .filter(child => Number(child.rootQuestionId || child.id || 0) === Number(item.rootQuestionId || item.id || 0)
-            && Number(child.parentQuestionId || 0) > 0)
-          .map(child => renderChatTurn(child)),
-      ].join('')).join('');
+      canvasMessages.innerHTML = rootMessages.map(item => renderQuestionThread(item)).join('');
       if (options.preserveScroll) {
         canvasMessages.scrollTop = previousScrollTop;
       } else if (focusQuestionId) {
@@ -4967,7 +5005,7 @@
         childChatLayers = childChatLayers.slice(0, index);
         renderChildQuestionStack({ scrollPositions: childScrollPositions });
       });
-      sendQuestionThreadMerge(layer.parentQuestionId);
+      sendQuestionClose(layer.parentQuestionId);
     }
 
     function isNearChatBottom(container, threshold = (typeof CHAT_BOTTOM_THRESHOLD === 'number' ? CHAT_BOTTOM_THRESHOLD : 56)) {
@@ -5361,6 +5399,16 @@
       submitInputOnEnter(event, () => sendChildQuestion(input.dataset.childInput));
     });
     canvasMessages.addEventListener('click', (event) => {
+      const closeButton = event.target?.closest?.('[data-question-close]');
+      if (closeButton) {
+        sendQuestionClose(closeButton.dataset.questionClose);
+        return;
+      }
+      const statusButton = event.target?.closest?.('[data-question-status]');
+      if (statusButton) {
+        sendQuestionStatus(statusButton.dataset.questionId, statusButton.dataset.questionStatus);
+        return;
+      }
       const button = event.target?.closest?.('[data-open-child-chat]');
       if (!button) return;
       const questionId = Number(button.dataset.openChildChat || 0);

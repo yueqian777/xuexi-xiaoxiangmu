@@ -21,10 +21,12 @@ from db import BASE_DIR, execute, execute_many, fetch_all, fetch_one, insert_and
 from repositories.ppt_repository import (
     add_slide_explanation,
     add_slide_question,
+    close_slide_question,
     flatten_question_subtree,
+    get_slide_question_tree,
     latest_explanation,
     latest_explanations_by_slide_ids,
-    questions_by_slide_ids,
+    update_slide_question_status,
     update_slide_question_answer,
     update_slide_bookmark,
     update_slide_learning_metadata,
@@ -1039,6 +1041,8 @@ def _handle_synced_reader_action(
         "save_explanation_edit",
         "save_question_answer_edit",
         "merge_question_thread",
+        "close_slide_question",
+        "update_slide_question_status",
         "toggle_slide_bookmark",
         "rename_slide_bookmark",
         "reader_position",
@@ -1068,6 +1072,43 @@ def _handle_synced_reader_action(
             user_id=user_id,
         ):
             st.rerun()
+        return
+
+    if action == "close_slide_question":
+        last_close_token_key = f"ppt_question_close_last_token_{deck['id']}"
+        if token and st.session_state.get(last_close_token_key) == token:
+            return
+        try:
+            question_id = int(payload.get("questionId", 0))
+        except (TypeError, ValueError):
+            return
+        if not question_id:
+            return
+        close_slide_question(question_id, user_id)
+        st.session_state.pop(f"ppt_active_question_id_{deck['id']}", None)
+        st.session_state.pop(f"ppt_parent_question_id_{deck['id']}", None)
+        if token:
+            st.session_state[last_close_token_key] = token
+        st.toast("插问已关闭，并保留在插问树中。")
+        st.rerun()
+        return
+
+    if action == "update_slide_question_status":
+        last_status_token_key = f"ppt_question_status_last_token_{deck['id']}"
+        if token and st.session_state.get(last_status_token_key) == token:
+            return
+        try:
+            question_id = int(payload.get("questionId", 0))
+        except (TypeError, ValueError):
+            return
+        status = str(payload.get("status") or "").strip()
+        if not question_id or not status:
+            return
+        update_slide_question_status(question_id, user_id, status)
+        if token:
+            st.session_state[last_status_token_key] = token
+        st.toast("插问状态已更新。")
+        st.rerun()
         return
 
     if action in {"toggle_slide_bookmark", "rename_slide_bookmark"}:
@@ -2570,34 +2611,46 @@ def _markdown_quote_block(text: str) -> str:
     return "\n".join(f"> {line}" if line else ">" for line in str(text or "").splitlines())
 
 
-def _render_question_history(slide_id: int) -> None:
-    questions = fetch_all(
-        """
-        SELECT question, quote_text, answer, model, category, status, sort_order, created_at
-        FROM slide_questions
-        WHERE slide_id = ?
-        ORDER BY sort_order ASC, created_at ASC, id ASC
-        """,
-        (slide_id,),
-    )
+def _render_question_history_node(item: dict) -> None:
+    display_parts = _branch_question_display_parts(item["question"], item.get("quote_text", ""))
+    depth = int(item.get("depth") or 0)
+    label = "主插问" if depth == 0 else f"{'  ' * depth}子插问 L{depth}"
+    with st.container(border=True):
+        st.markdown(f"**{label}:** {display_parts['question']}")
+        if display_parts["quoteText"]:
+            st.markdown(f"**寮曠敤锛?*\n{_markdown_quote_block(display_parts['quoteText'])}")
+        st.markdown(item["answer"])
+        st.caption(
+            f"分类：{item.get('category') or '-'} | 状态：{item.get('status') or '-'} | "
+            f"引用来源：{item.get('quote_source') or 'slide'} | "
+            f"排序：{item.get('sort_order') or 0} | 模型：{item['model']} | {item['created_at']}"
+        )
+    for child in item.get("children") or []:
+        _render_question_history_node(child)
+
+
+def _flatten_question_tree_for_table(tree: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for node in tree:
+        item = dict(node)
+        children = item.pop("children", [])
+        rows.append(item)
+        rows.extend(_flatten_question_tree_for_table(children))
+    return rows
+
+
+def _render_question_history(slide_id: int, *, user_id: int | None = None) -> None:
+    user_id = int(user_id) if user_id is not None else require_login().id
+    questions = get_slide_question_tree(slide_id, user_id)
     st.subheader("本页插问记录")
     if not questions:
         st.caption("当前页还没有插问。")
         return
     for item in questions:
-        display_parts = _branch_question_display_parts(item["question"], item.get("quote_text", ""))
-        with st.container(border=True):
-            st.markdown(f"**问：** {display_parts['question']}")
-            if display_parts["quoteText"]:
-                st.markdown(f"**引用：**\n{_markdown_quote_block(display_parts['quoteText'])}")
-            st.markdown(item["answer"])
-            st.caption(
-                f"分类：{item.get('category') or '未分类'} · 状态：{item.get('status') or '未整理'} · "
-                f"排序：{item.get('sort_order') or 0} · 模型：{item['model']} · {item['created_at']}"
-            )
+        _render_question_history_node(item)
 
     with st.expander("表格视图"):
-        st.dataframe(pd.DataFrame(questions), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(_flatten_question_tree_for_table(questions)), use_container_width=True, hide_index=True)
 
 
 def _resume_interrupted_generation() -> dict | None:
@@ -4311,28 +4364,34 @@ def _latest_explanations_by_slide_ids(slide_ids: list[int]) -> dict[int, dict]:
     return latest_explanations_by_slide_ids(require_login().id, slide_ids)
 
 
-def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
-    grouped = questions_by_slide_ids(require_login().id, slide_ids)
+def _question_tree_node_payload(row: dict) -> dict:
+    children = row.get("children") or []
     return {
-        slide_id: [
-            {
-                **_branch_question_display_parts(row["question"], row.get("quote_text", "")),
-                "id": row.get("id"),
-                "rootQuestionId": row.get("root_question_id") or row.get("id"),
-                "parentQuestionId": row.get("parent_question_id"),
-                "depth": int(row.get("depth") or 0),
-                "quoteSource": row.get("quote_source") or "slide",
-                "quoteSourceQuestionId": row.get("quote_source_question_id"),
-                "answer": row["answer"],
-                "model": row["model"],
-                "category": row["category"],
-                "status": row["status"],
-                "sortOrder": row["sort_order"],
-                "createdAt": row["created_at"],
-            }
-            for row in rows
+        **_branch_question_display_parts(row["question"], row.get("quote_text", "")),
+        "id": row.get("id"),
+        "rootQuestionId": row.get("root_question_id") or row.get("id"),
+        "parentQuestionId": row.get("parent_question_id"),
+        "depth": int(row.get("depth") or 0),
+        "quoteSource": row.get("quote_source") or "slide",
+        "quoteSourceQuestionId": row.get("quote_source_question_id"),
+        "answer": row["answer"],
+        "model": row["model"],
+        "category": row["category"],
+        "status": row["status"],
+        "sortOrder": row["sort_order"],
+        "createdAt": row["created_at"],
+        "children": [_question_tree_node_payload(child) for child in children],
+    }
+
+
+def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
+    user_id = require_login().id
+    return {
+        int(slide_id): [
+            _question_tree_node_payload(row)
+            for row in get_slide_question_tree(int(slide_id), user_id)
         ]
-        for slide_id, rows in grouped.items()
+        for slide_id in slide_ids
     }
 
 

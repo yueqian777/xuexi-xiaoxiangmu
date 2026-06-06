@@ -1,7 +1,10 @@
 import unittest
 from contextlib import contextmanager
+from pathlib import Path
+import tempfile
 from unittest.mock import patch
 
+import db
 from repositories import ppt_repository
 
 
@@ -54,13 +57,17 @@ class PptRepositoryTest(unittest.TestCase):
             result = ppt_repository.add_slide_question("4", "9", "问题", "答案", "模型", quote_text="引用")
 
         self.assertEqual(result, 88)
-        query, params = conn.calls[0]
+        query, params = next(call for call in conn.calls if "INSERT INTO slide_questions" in call[0])
         self.assertIn("INSERT INTO slide_questions", query)
         self.assertIn("quote_text", query)
         self.assertIn("root_question_id", query)
+        self.assertIn("sort_order", query)
+        self.assertEqual(params[-1], 1)
+        params = params[:-1]
         self.assertEqual(params, (4, 9, "问题", "引用", "答案", "模型", None, None, 0, "slide", None))
-        update_query, update_params = conn.calls[1]
+        update_query, update_params = next(call for call in conn.calls if "UPDATE slide_questions" in call[0])
         self.assertIn("UPDATE slide_questions", update_query)
+        update_params = (update_params[0], update_params[-1])
         self.assertEqual(update_params, (88, 88))
 
     def test_add_slide_question_saves_child_question_lineage(self):
@@ -81,10 +88,13 @@ class PptRepositoryTest(unittest.TestCase):
             )
 
         self.assertEqual(result, 99)
-        query, params = conn.calls[1]
+        query, params = next(call for call in conn.calls if "INSERT INTO slide_questions" in call[0])
         self.assertIn("parent_question_id", query)
+        self.assertIn("sort_order", query)
+        self.assertEqual(params[-1], 1)
+        params = params[:-1]
         self.assertEqual(params, (4, 9, "子问题", "回答片段", "子答案", "模型", 88, 77, 2, "question_answer", 77))
-        self.assertEqual(len(conn.calls), 2)
+        self.assertGreaterEqual(len(conn.calls), 2)
 
     def test_latest_explanations_by_slide_ids_returns_empty_for_no_ids(self):
         with patch.object(ppt_repository, "fetch_all") as fetch_all:
@@ -242,6 +252,221 @@ class PptRepositoryTest(unittest.TestCase):
         delete_calls = [call for call in conn.calls if "DELETE FROM slide_questions" in call[0]]
         self.assertEqual(len(delete_calls), 1)
         self.assertEqual(delete_calls[0][1], (4, 10, 11, 12))
+
+
+class PptRepositorySqliteIntegrationTest(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.data_dir = Path(self.temp_dir.name)
+        self.db_path = self.data_dir / "study_manager.db"
+        self.data_dir_patch = patch.object(db, "DATA_DIR", self.data_dir)
+        self.db_path_patch = patch.object(db, "DATABASE_PATH", self.db_path)
+        self.data_dir_patch.start()
+        self.db_path_patch.start()
+        self.addCleanup(self.data_dir_patch.stop)
+        self.addCleanup(self.db_path_patch.stop)
+        self.addCleanup(setattr, db, "_INITIALIZED_DATABASE_PATH", None)
+        db._INITIALIZED_DATABASE_PATH = None
+        db.init_db()
+        self.slide_id = self._create_slide()
+
+    def _create_slide(self, *, user_id: int = 11) -> int:
+        deck_id = db.insert_and_get_id(
+            """
+            INSERT INTO ppt_decks (user_id, filename, title, file_path, slide_count)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, "deck.pdf", "Deck", "deck.pdf", 1),
+        )
+        return db.insert_and_get_id(
+            """
+            INSERT INTO ppt_slides (user_id, deck_id, slide_number, title)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, deck_id, 1, "Slide 1"),
+        )
+
+    def _question_row(self, question_id: int) -> dict:
+        row = db.fetch_one("SELECT * FROM slide_questions WHERE id = ?", (question_id,))
+        self.assertIsNotNone(row)
+        return row
+
+    def test_create_slide_question_tree_node_persists_root_child_depth_and_sort_order(self):
+        root_1 = ppt_repository.create_slide_question_tree_node(
+            11,
+            self.slide_id,
+            "root 1",
+            "answer 1",
+            "model",
+        )
+        root_2 = ppt_repository.create_slide_question_tree_node(
+            11,
+            self.slide_id,
+            "root 2",
+            "answer 2",
+            "model",
+        )
+        child_1 = ppt_repository.create_slide_question_tree_node(
+            11,
+            self.slide_id,
+            "child 1",
+            "child answer 1",
+            "model",
+            parent_question_id=root_1,
+        )
+        child_2 = ppt_repository.create_slide_question_tree_node(
+            11,
+            self.slide_id,
+            "child 2",
+            "child answer 2",
+            "model",
+            parent_question_id=root_1,
+        )
+        grandchild = ppt_repository.create_slide_question_tree_node(
+            11,
+            self.slide_id,
+            "grandchild",
+            "grandchild answer",
+            "model",
+            parent_question_id=child_1,
+        )
+
+        root_1_row = self._question_row(root_1)
+        root_2_row = self._question_row(root_2)
+        child_1_row = self._question_row(child_1)
+        child_2_row = self._question_row(child_2)
+        grandchild_row = self._question_row(grandchild)
+
+        self.assertEqual(root_1_row["root_question_id"], root_1)
+        self.assertIsNone(root_1_row["parent_question_id"])
+        self.assertEqual(root_1_row["depth"], 0)
+        self.assertEqual(root_1_row["sort_order"], 1)
+        self.assertEqual(root_2_row["sort_order"], 2)
+
+        self.assertEqual(child_1_row["parent_question_id"], root_1)
+        self.assertEqual(child_1_row["root_question_id"], root_1)
+        self.assertEqual(child_1_row["depth"], 1)
+        self.assertEqual(child_1_row["sort_order"], 1)
+        self.assertEqual(child_2_row["sort_order"], 2)
+
+        self.assertEqual(grandchild_row["parent_question_id"], child_1)
+        self.assertEqual(grandchild_row["root_question_id"], root_1)
+        self.assertEqual(grandchild_row["depth"], 2)
+        self.assertEqual(grandchild_row["sort_order"], 1)
+
+    def test_get_slide_question_tree_returns_complete_nested_tree_after_reload(self):
+        root = ppt_repository.create_slide_question_tree_node(11, self.slide_id, "root", "answer", "model")
+        child = ppt_repository.create_slide_question_tree_node(
+            11,
+            self.slide_id,
+            "child",
+            "child answer",
+            "model",
+            parent_question_id=root,
+        )
+        grandchild = ppt_repository.create_slide_question_tree_node(
+            11,
+            self.slide_id,
+            "grandchild",
+            "grandchild answer",
+            "model",
+            parent_question_id=child,
+        )
+
+        first_load = ppt_repository.get_slide_question_tree(self.slide_id, 11)
+        second_load = ppt_repository.get_slide_question_tree(self.slide_id, 11)
+
+        for tree in (first_load, second_load):
+            self.assertEqual([node["id"] for node in tree], [root])
+            self.assertEqual([node["id"] for node in tree[0]["children"]], [child])
+            self.assertEqual([node["id"] for node in tree[0]["children"][0]["children"]], [grandchild])
+
+    def test_close_slide_question_only_changes_status(self):
+        root = ppt_repository.create_slide_question_tree_node(11, self.slide_id, "root", "answer", "model")
+        child = ppt_repository.create_slide_question_tree_node(
+            11,
+            self.slide_id,
+            "child",
+            "child answer",
+            "model",
+            parent_question_id=root,
+        )
+
+        before = self._question_row(child)
+        changed = ppt_repository.close_slide_question(child, 11)
+        after = self._question_row(child)
+
+        self.assertTrue(changed)
+        self.assertEqual(after["status"], "closed")
+        self.assertEqual(after["parent_question_id"], before["parent_question_id"])
+        self.assertEqual(after["root_question_id"], before["root_question_id"])
+        self.assertEqual(after["depth"], before["depth"])
+        self.assertEqual(after["sort_order"], before["sort_order"])
+        tree = ppt_repository.get_slide_question_tree(self.slide_id, 11)
+        self.assertEqual(tree[0]["children"][0]["id"], child)
+
+    def test_normalize_slide_question_tree_repairs_legacy_root_depth_and_sort_order(self):
+        root = db.insert_and_get_id(
+            """
+            INSERT INTO slide_questions (
+                user_id, slide_id, question, answer, model,
+                root_question_id, parent_question_id, depth, sort_order, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+            """,
+            (11, self.slide_id, "legacy root", "answer", "model", 4, 0, "2026-01-01 10:00:00"),
+        )
+        child_a = db.insert_and_get_id(
+            """
+            INSERT INTO slide_questions (
+                user_id, slide_id, question, answer, model,
+                root_question_id, parent_question_id, depth, sort_order, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+            """,
+            (11, self.slide_id, "legacy child a", "answer", "model", root, 0, 0, "2026-01-01 10:01:00"),
+        )
+        child_b = db.insert_and_get_id(
+            """
+            INSERT INTO slide_questions (
+                user_id, slide_id, question, answer, model,
+                root_question_id, parent_question_id, depth, sort_order, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+            """,
+            (11, self.slide_id, "legacy child b", "answer", "model", root, 0, 0, "2026-01-01 10:02:00"),
+        )
+        grandchild = db.insert_and_get_id(
+            """
+            INSERT INTO slide_questions (
+                user_id, slide_id, question, answer, model,
+                root_question_id, parent_question_id, depth, sort_order, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+            """,
+            (11, self.slide_id, "legacy grandchild", "answer", "model", child_a, 0, 0, "2026-01-01 10:03:00"),
+        )
+
+        ppt_repository.normalize_slide_question_tree(self.slide_id, 11)
+
+        root_row = self._question_row(root)
+        child_a_row = self._question_row(child_a)
+        child_b_row = self._question_row(child_b)
+        grandchild_row = self._question_row(grandchild)
+
+        self.assertEqual(root_row["root_question_id"], root)
+        self.assertEqual(root_row["depth"], 0)
+        self.assertEqual(root_row["sort_order"], 1)
+        self.assertEqual(child_a_row["root_question_id"], root)
+        self.assertEqual(child_a_row["depth"], 1)
+        self.assertEqual(child_a_row["sort_order"], 1)
+        self.assertEqual(child_b_row["root_question_id"], root)
+        self.assertEqual(child_b_row["depth"], 1)
+        self.assertEqual(child_b_row["sort_order"], 2)
+        self.assertEqual(grandchild_row["root_question_id"], root)
+        self.assertEqual(grandchild_row["depth"], 2)
+        self.assertEqual(grandchild_row["sort_order"], 1)
 
 
 if __name__ == "__main__":

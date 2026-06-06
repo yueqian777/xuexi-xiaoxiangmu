@@ -458,6 +458,8 @@ def _run_init_db() -> None:
                 ON slide_explanations(slide_id);
             CREATE INDEX IF NOT EXISTS idx_slide_questions_user_slide_created
                 ON slide_questions(user_id, slide_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_slide_questions_user_slide_parent_order
+                ON slide_questions(user_id, slide_id, parent_question_id, sort_order ASC, created_at ASC, id ASC);
             CREATE INDEX IF NOT EXISTS idx_slide_questions_user_root_order
                 ON slide_questions(user_id, root_question_id, parent_question_id, sort_order ASC, created_at ASC, id ASC);
             CREATE INDEX IF NOT EXISTS idx_slide_questions_user_parent_order
@@ -474,6 +476,7 @@ def _run_init_db() -> None:
         _migrate_daily_ai_review_plan_user_scope(conn)
         _migrate_ppt_study_asset_pages_user_scope(conn)
         _migrate_ppt_sections_user_scope(conn)
+        _migrate_slide_question_trees(conn)
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_ppt_decks_manage
@@ -535,6 +538,83 @@ def _migrate_ppt_study_asset_pages_user_scope(conn: sqlite3.Connection) -> None:
         WHERE COALESCE(user_id, 0) = 0
         """
     )
+
+
+def _migrate_slide_question_trees(conn: sqlite3.Connection) -> None:
+    scopes = conn.execute(
+        """
+        SELECT DISTINCT user_id, slide_id
+        FROM slide_questions
+        ORDER BY user_id ASC, slide_id ASC
+        """
+    ).fetchall()
+    for scope in scopes:
+        normalize_slide_question_tree_for_scope(conn, int(scope["user_id"] or 0), int(scope["slide_id"]))
+
+
+def normalize_slide_question_tree_for_scope(conn: sqlite3.Connection, user_id: int, slide_id: int) -> int:
+    rows = conn.execute(
+        """
+        SELECT id, parent_question_id, root_question_id, depth, sort_order, created_at
+        FROM slide_questions
+        WHERE user_id = ? AND slide_id = ?
+        ORDER BY created_at ASC, id ASC
+        """,
+        (int(user_id), int(slide_id)),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    nodes = {int(row["id"]): dict(row) for row in rows}
+    children_by_parent: dict[int, list[dict[str, Any]]] = {}
+    roots: list[dict[str, Any]] = []
+    for node in nodes.values():
+        parent_id = node.get("parent_question_id")
+        parent_id = int(parent_id) if parent_id is not None else None
+        if parent_id is not None and parent_id in nodes:
+            children_by_parent.setdefault(parent_id, []).append(node)
+        else:
+            roots.append(node)
+
+    def sibling_key(node: dict[str, Any]) -> tuple[int, int, str, int]:
+        sort_order = int(node.get("sort_order") or 0)
+        return (
+            0 if sort_order > 0 else 1,
+            sort_order if sort_order > 0 else 0,
+            str(node.get("created_at") or ""),
+            int(node["id"]),
+        )
+
+    updates: list[tuple[int, int, int, int, int, int]] = []
+    visited: set[int] = set()
+
+    def visit(node: dict[str, Any], *, root_id: int, depth: int, sort_order: int) -> None:
+        node_id = int(node["id"])
+        if node_id in visited:
+            return
+        visited.add(node_id)
+        updates.append((root_id, depth, sort_order, int(user_id), int(slide_id), node_id))
+        children = sorted(children_by_parent.get(node_id, []), key=sibling_key)
+        for index, child in enumerate(children, start=1):
+            visit(child, root_id=root_id, depth=depth + 1, sort_order=index)
+
+    for index, root in enumerate(sorted(roots, key=sibling_key), start=1):
+        visit(root, root_id=int(root["id"]), depth=0, sort_order=index)
+
+    # Cycles should not exist, but legacy/manual edits can create them. Keep every row reachable.
+    remaining = [node for node_id, node in nodes.items() if node_id not in visited]
+    for index, root in enumerate(sorted(remaining, key=sibling_key), start=1):
+        visit(root, root_id=int(root["id"]), depth=0, sort_order=index)
+
+    conn.executemany(
+        """
+        UPDATE slide_questions
+        SET root_question_id = ?, depth = ?, sort_order = ?
+        WHERE user_id = ? AND slide_id = ? AND id = ?
+        """,
+        updates,
+    )
+    return len(updates)
 
 
 def _migrate_api_provider_identity(conn: sqlite3.Connection) -> None:

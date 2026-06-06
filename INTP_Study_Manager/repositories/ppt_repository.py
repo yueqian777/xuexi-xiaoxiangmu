@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from db import execute, fetch_all, fetch_one, insert_and_get_id, write_transaction
+from db import (
+    execute,
+    fetch_all,
+    fetch_one,
+    insert_and_get_id,
+    normalize_slide_question_tree_for_scope,
+    write_transaction,
+)
 
 
 MAX_QUESTION_DEPTH = 5
@@ -106,6 +113,85 @@ def latest_explanations_by_slide_ids(user_id: int, slide_ids: list[int]) -> dict
     return latest
 
 
+def create_slide_question_tree_node(
+    user_id: int,
+    slide_id: int,
+    question: str,
+    answer: str,
+    model: str,
+    *,
+    quote_text: str = "",
+    parent_question_id: int | str | None = None,
+    quote_source: str = "slide",
+    quote_source_question_id: int | str | None = None,
+) -> int:
+    user_id_int = int(user_id)
+    slide_id_int = int(slide_id)
+    parent_id = _optional_int(parent_question_id)
+    quote_source_question = _optional_int(quote_source_question_id)
+    clean_quote_source = str(quote_source or "slide").strip() or "slide"
+
+    with write_transaction() as conn:
+        if parent_id is not None:
+            parent = _fetch_slide_question_for_update(conn, user_id_int, parent_id)
+            if not parent or int(parent["slide_id"]) != slide_id_int:
+                raise ValueError("parent question is not available for this slide")
+            parent_depth = int(parent["depth"] or 0)
+            if parent_depth >= MAX_QUESTION_DEPTH:
+                raise ValueError("question nesting depth exceeds the configured limit")
+            root_id = int(parent["root_question_id"] or parent["id"])
+            if not parent["root_question_id"]:
+                conn.execute(
+                    """
+                    UPDATE slide_questions
+                    SET root_question_id = ?, depth = COALESCE(depth, 0)
+                    WHERE user_id = ? AND id = ?
+                    """,
+                    (root_id, user_id_int, parent_id),
+                )
+            question_depth = parent_depth + 1
+        else:
+            root_id = None
+            question_depth = 0
+
+        sort_order = _next_slide_question_sort_order(conn, user_id_int, slide_id_int, parent_id)
+        cursor = conn.execute(
+            """
+            INSERT INTO slide_questions (
+                user_id, slide_id, question, quote_text, answer, model,
+                root_question_id, parent_question_id, depth, quote_source,
+                quote_source_question_id, sort_order
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id_int,
+                slide_id_int,
+                question,
+                quote_text,
+                answer,
+                model,
+                root_id,
+                parent_id,
+                question_depth,
+                clean_quote_source,
+                quote_source_question,
+                sort_order,
+            ),
+        )
+        question_id = int(cursor.lastrowid)
+        if parent_id is None:
+            conn.execute(
+                """
+                UPDATE slide_questions
+                SET root_question_id = ?
+                WHERE user_id = ? AND id = ?
+                """,
+                (question_id, user_id_int, question_id),
+            )
+        return question_id
+
+
 def add_slide_question(
     user_id: int,
     slide_id: int,
@@ -120,75 +206,172 @@ def add_slide_question(
     quote_source: str = "slide",
     quote_source_question_id: int | str | None = None,
 ) -> int:
-    user_id_int = int(user_id)
-    slide_id_int = int(slide_id)
-    parent_id = _optional_int(parent_question_id)
-    requested_root_id = _optional_int(root_question_id)
-    requested_depth = max(0, int(depth or 0))
-    quote_source_question = _optional_int(quote_source_question_id)
-    clean_quote_source = str(quote_source or "slide").strip() or "slide"
+    # root_question_id/depth are accepted for old callers, but lineage is now derived
+    # transactionally from parent_question_id to keep the tree consistent.
+    return create_slide_question_tree_node(
+        user_id,
+        slide_id,
+        question,
+        answer,
+        model,
+        quote_text=quote_text,
+        parent_question_id=parent_question_id,
+        quote_source=quote_source,
+        quote_source_question_id=quote_source_question_id,
+    )
 
-    with write_transaction() as conn:
-        parent = None
-        if parent_id is not None:
-            parent = conn.execute(
-                """
-                SELECT id, slide_id, root_question_id, depth
-                FROM slide_questions
-                WHERE user_id = ? AND id = ?
-                """,
-                (user_id_int, parent_id),
-            ).fetchone()
-            if not parent or int(parent["slide_id"]) != slide_id_int:
-                raise ValueError("parent question is not available for this slide")
-            parent_depth = int(parent["depth"] or 0)
-            if parent_depth >= MAX_QUESTION_DEPTH:
-                raise ValueError("question nesting depth exceeds the configured limit")
-            root_id = int(parent["root_question_id"] or parent["id"])
-            question_depth = parent_depth + 1
-        else:
-            root_id = requested_root_id
-            question_depth = requested_depth if requested_root_id else 0
 
-        cursor = conn.execute(
+def _fetch_slide_question_for_update(conn, user_id: int, question_id: int):
+    return conn.execute(
+        """
+        SELECT id, user_id, slide_id, root_question_id, parent_question_id, depth
+        FROM slide_questions
+        WHERE user_id = ? AND id = ?
+        """,
+        (int(user_id), int(question_id)),
+    ).fetchone()
+
+
+def _next_slide_question_sort_order(conn, user_id: int, slide_id: int, parent_question_id: int | None) -> int:
+    if parent_question_id is None:
+        row = conn.execute(
             """
-            INSERT INTO slide_questions (
-                user_id, slide_id, question, quote_text, answer, model,
-                root_question_id, parent_question_id, depth, quote_source, quote_source_question_id
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            SELECT COALESCE(MAX(sort_order), 0) AS max_order
+            FROM slide_questions
+            WHERE user_id = ? AND slide_id = ? AND parent_question_id IS NULL
             """,
-            (
-                user_id_int,
-                slide_id_int,
-                question,
-                quote_text,
-                answer,
-                model,
-                root_id,
-                parent_id,
-                question_depth,
-                clean_quote_source,
-                quote_source_question,
-            ),
-        )
-        question_id = int(cursor.lastrowid)
-        if parent_id is None and root_id is None:
-            conn.execute(
-                """
-                UPDATE slide_questions
-                SET root_question_id = ?
-                WHERE id = ?
-                """,
-                (question_id, question_id),
-            )
-        return question_id
+            (int(user_id), int(slide_id)),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT COALESCE(MAX(sort_order), 0) AS max_order
+            FROM slide_questions
+            WHERE user_id = ? AND slide_id = ? AND parent_question_id = ?
+            """,
+            (int(user_id), int(slide_id), int(parent_question_id)),
+        ).fetchone()
+    if not row:
+        return 1
+    try:
+        max_order = row["max_order"]
+    except (KeyError, IndexError):
+        max_order = 0
+    return int(max_order or 0) + 1
 
 
 def _optional_int(value: int | str | None) -> int | None:
     if value in (None, ""):
         return None
     return int(value)
+
+
+def get_slide_question_tree(slide_id: int, user_id: int) -> list[dict]:
+    rows = fetch_all(
+        """
+        SELECT
+            id,
+            user_id,
+            slide_id,
+            question,
+            quote_text,
+            answer,
+            model,
+            category,
+            status,
+            sort_order,
+            COALESCE(root_question_id, id) AS root_question_id,
+            parent_question_id,
+            COALESCE(depth, 0) AS depth,
+            COALESCE(quote_source, 'slide') AS quote_source,
+            quote_source_question_id,
+            created_at
+        FROM slide_questions
+        WHERE user_id = ? AND slide_id = ?
+        ORDER BY sort_order ASC, created_at ASC, id ASC
+        """,
+        (int(user_id), int(slide_id)),
+    )
+    return _build_slide_question_tree(rows)
+
+
+def normalize_slide_question_tree(slide_id: int, user_id: int) -> int:
+    with write_transaction() as conn:
+        return normalize_slide_question_tree_for_scope(conn, int(user_id), int(slide_id))
+
+
+def close_slide_question(question_id: int, user_id: int) -> bool:
+    with write_transaction() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE slide_questions
+            SET status = ?
+            WHERE user_id = ? AND id = ?
+            """,
+            ("closed", int(user_id), int(question_id)),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+
+def update_slide_question_status(question_id: int, user_id: int, status: str) -> bool:
+    clean_status = str(status or "").strip()
+    if not clean_status:
+        return False
+    with write_transaction() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE slide_questions
+            SET status = ?
+            WHERE user_id = ? AND id = ?
+            """,
+            (clean_status, int(user_id), int(question_id)),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+
+def _build_slide_question_tree(rows: list[dict]) -> list[dict]:
+    nodes: dict[int, dict] = {}
+    for row in rows:
+        node = dict(row)
+        node["children"] = []
+        nodes[int(node["id"])] = node
+
+    roots: list[dict] = []
+    for node in nodes.values():
+        parent_id = node.get("parent_question_id")
+        parent_id = int(parent_id) if parent_id is not None else None
+        if parent_id is not None and parent_id in nodes:
+            nodes[parent_id]["children"].append(node)
+        else:
+            roots.append(node)
+
+    def sort_key(node: dict) -> tuple[int, str, int]:
+        return (int(node.get("sort_order") or 0), str(node.get("created_at") or ""), int(node["id"]))
+
+    def sort_children(node: dict) -> None:
+        node["children"].sort(key=sort_key)
+        for child in node["children"]:
+            sort_children(child)
+
+    roots.sort(key=sort_key)
+    for root in roots:
+        sort_children(root)
+    return roots
+
+
+def flatten_slide_question_tree(tree: list[dict]) -> list[dict]:
+    flattened: list[dict] = []
+
+    def visit(node: dict) -> None:
+        item = dict(node)
+        children = item.pop("children", [])
+        flattened.append(item)
+        for child in children:
+            visit(child)
+
+    for root in tree:
+        visit(root)
+    return flattened
 
 
 def questions_by_slide_ids(user_id: int, slide_ids: list[int]) -> dict[int, list[dict]]:
@@ -229,8 +412,11 @@ def questions_by_slide_ids(user_id: int, slide_ids: list[int]) -> dict[int, list
             """,
             (int(user_id), *tuple(chunk)),
         )
+        rows_by_slide: dict[int, list[dict]] = {}
         for row in rows:
-            grouped.setdefault(int(row["slide_id"]), []).append(row)
+            rows_by_slide.setdefault(int(row["slide_id"]), []).append(row)
+        for slide_id, slide_rows in rows_by_slide.items():
+            grouped[slide_id] = flatten_slide_question_tree(_build_slide_question_tree(slide_rows))
     return grouped
 
 
