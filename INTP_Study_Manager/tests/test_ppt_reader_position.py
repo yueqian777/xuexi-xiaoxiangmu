@@ -230,6 +230,57 @@ class PptReaderPositionTest(unittest.TestCase):
 
         remember_window.assert_called_once_with(3, slides, 3)
 
+    def test_reader_payload_initial_slide_prefers_remembered_position_over_old_session_state(self):
+        deck = {"id": 3, "title": "Deck", "subject": "Subject", "user_id": 42}
+        slides = [{"id": number, "slide_number": number} for number in range(1, 8)]
+        component_calls = []
+
+        def fake_component(**kwargs):
+            component_calls.append(kwargs)
+            return None
+
+        with (
+            patch.object(ppt_tutor.st, "session_state", {"ppt_reader_active_slide_3": 2}),
+            patch.object(ppt_tutor, "_active_model_label", return_value="model"),
+            patch.object(ppt_tutor, "_remember_reader_image_window") as remember_window,
+            patch.object(ppt_tutor, "_reader_cached_image_slide_numbers", return_value={5}),
+            patch.object(ppt_tutor, "_questions_by_slide_ids", return_value={}),
+            patch.object(ppt_tutor, "_build_reader_payload", return_value=[{"slideNumber": 5}]),
+            patch.object(ppt_tutor, "_get_synced_reader_component", return_value=fake_component),
+        ):
+            ppt_tutor._render_synced_reader(
+                deck,
+                slides,
+                {},
+                {"deck_id": 3, "slide_number": 5},
+                [],
+            )
+
+        remember_window.assert_called_once_with(3, slides, 5)
+        self.assertEqual(component_calls[0]["initial_slide_number"], 5)
+
+    def test_reader_position_action_saves_backend_last_position(self):
+        session_state = {}
+        deck = {"id": 3, "user_id": 42}
+        slides = [{"id": 5, "slide_number": 5}]
+        payload = {
+            "action": "reader_position",
+            "deckId": 3,
+            "slideNumber": 5,
+            "token": "tok",
+            "imageWindowSlideNumbers": [4, 5, 6],
+            "imageWindowRadius": 1,
+        }
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor, "_save_last_reader_position") as save_last_reader_position,
+            patch.object(ppt_tutor.st, "rerun") as rerun,
+        ):
+            ppt_tutor._handle_synced_reader_action(deck, slides, {}, payload, [], user_id=42)
+
+        save_last_reader_position.assert_called_once_with(42, 3, 5)
+        rerun.assert_called_once()
+
     def test_auto_refresh_running_generation_skips_unchanged_recent_task(self):
         session_state = {
             ppt_tutor.PPT_GENERATION_REFRESH_STATE_KEY: {

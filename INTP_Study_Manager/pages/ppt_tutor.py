@@ -99,6 +99,7 @@ READER_IMAGE_PREFETCH_RADIUS = 3
 READER_IMAGE_WINDOW_MAX_RADIUS = 8
 READER_IMAGE_CACHE_MAX_SLIDES = 15
 READER_IMAGE_URL_CACHE_MAX_SLIDES = READER_IMAGE_CACHE_MAX_SLIDES * 2
+READER_BACKEND_POSITION_STATE_KEY = "ppt_reader_backend_position_hydrated"
 PPT_GENERATION_DEFAULT_PARALLELISM = parallel_benchmark.DEFAULT_PARALLELISM
 PPT_PARALLEL_BENCHMARK_MAX_PARALLELISM = parallel_benchmark.DEFAULT_MAX_PARALLELISM
 PPT_INLINE_BENCHMARK_MIN_SLIDES = parallel_benchmark.INLINE_BENCHMARK_MIN_SAMPLES
@@ -167,6 +168,27 @@ def _save_last_reader_position(
 
 def _default_reader_deck_id(deck_ids: list[int], last_position: dict[str, int]) -> int:
     return default_reader_deck_id(deck_ids, last_position, st.session_state.get(LAST_READER_DECK_STATE_KEY))
+
+
+def _reader_backend_position_signature(last_position: dict[str, int]) -> tuple[int, int]:
+    return (
+        int(last_position.get("deck_id") or 0),
+        int(last_position.get("slide_number") or 0),
+    )
+
+
+def _hydrate_reader_position_from_backend(deck_ids: list[int], last_position: dict[str, int]) -> None:
+    signature = _reader_backend_position_signature(last_position)
+    if st.session_state.get(READER_BACKEND_POSITION_STATE_KEY) == signature:
+        return
+    st.session_state[READER_BACKEND_POSITION_STATE_KEY] = signature
+
+    deck_id, slide_number = signature
+    if deck_id not in deck_ids:
+        return
+    st.session_state[LAST_READER_DECK_STATE_KEY] = deck_id
+    if slide_number > 0:
+        st.session_state[_reader_active_slide_state_key(deck_id)] = slide_number
 
 
 def _remember_reader_deck_selection(user_id: int, deck_id: int, last_position: dict[str, int]) -> None:
@@ -342,6 +364,7 @@ def render() -> None:
     deck_ids = list(deck_by_id)
     last_position = _read_last_reader_position(user.id)
     default_deck_id = _default_reader_deck_id(deck_ids, last_position)
+    _hydrate_reader_position_from_backend(deck_ids, last_position)
     if st.session_state.get(LAST_READER_DECK_STATE_KEY) not in deck_by_id:
         st.session_state[LAST_READER_DECK_STATE_KEY] = default_deck_id
     deck_id = st.selectbox(
@@ -1072,12 +1095,8 @@ def _render_synced_reader(
     user_id = int(user_id) if user_id is not None else int(deck.get("user_id") or require_login().id)
     initial_slide_number = _initial_reader_slide_number(int(deck["id"]), slides, last_position)
     active_state_key = _reader_active_slide_state_key(int(deck["id"]))
-    session_active_slide = st.session_state.get(active_state_key)
-    active_slide_number = (
-        initial_slide_number
-        if session_active_slide is None
-        else _reader_active_slide_number(int(deck["id"]), slides, initial_slide_number)
-    )
+    active_slide_number = initial_slide_number
+    st.session_state[active_state_key] = active_slide_number
     _remember_reader_image_window(int(deck["id"]), slides, active_slide_number)
     image_slide_numbers = _reader_cached_image_slide_numbers(int(deck["id"]), slides)
     active_slide_ids = [

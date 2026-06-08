@@ -544,7 +544,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             """
         )
 
-    def test_initial_reader_target_prefers_browser_saved_slide_on_first_entry(self):
+    def test_initial_reader_target_uses_browser_saved_slide_only_without_backend_initial(self):
         self.run_js(
             r"""
             var pages = [
@@ -554,7 +554,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             var restoreScrollAfterRender = { currentSlide: 4 };
 
             const target = initialReaderTargetSlide(
-              { initial_slide_number: 1 },
+              { initial_slide_number: 4 },
               { currentSlide: 9, pageScroll: 500, noteScroll: 300 },
               false
             );
@@ -617,6 +617,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             function syncActivePageDom() {}
             function centerPage() {}
             function saveScrollState() {}
+            function notifyReaderPosition() {}
 
             setActive(5, { scrollNote: false });
             if (hydratedSlide !== 5) {

@@ -1493,8 +1493,11 @@
     let lastFullscreenState = false;
     let readerStructureSignature = '';
     let positionNotifyTimer = null;
+    let readerPositionNotifyTimer = null;
     let lastPositionNotifyKey = '';
+    let lastReaderPositionNotifyKey = '';
     let pendingImageWindowRequest = null;
+    let pendingReaderPositionNotify = null;
     let nearbyContentTimer = null;
     let pendingNearbySlideNumber = null;
     let typesetFlushTimer = null;
@@ -1514,6 +1517,7 @@
     const MATHJAX_RETRY_MS = 180;
     const NEARBY_CONTENT_IDLE_MS = 90;
     const IMAGE_WINDOW_NOTIFY_IDLE_MS = 160;
+    const READER_POSITION_NOTIFY_IDLE_MS = 120;
     const IMAGE_WINDOW_PENDING_TTL_MS = 6000;
     const PAGE_IMAGE_CACHE_MAX_SLIDES = 13;
     const PAGE_IMAGE_RENDER_RADIUS = 3;
@@ -2808,10 +2812,10 @@
       };
       const restoredSlide = slideOrZero(restoreScrollAfterRender?.currentSlide);
       if (isSameDeckRefresh && restoredSlide) return restoredSlide;
-      const storedSlide = slideOrZero(stored?.currentSlide);
-      if (storedSlide) return storedSlide;
       const initialSlide = slideOrZero(args?.initial_slide_number);
       if (initialSlide) return initialSlide;
+      const storedSlide = slideOrZero(stored?.currentSlide);
+      if (storedSlide) return storedSlide;
       if (restoredSlide) return restoredSlide;
       return Number(pages[0]?.slideNumber || 1);
     }
@@ -2942,6 +2946,15 @@
         if (!page || !page.imageAvailable || page.image || cachedImageForPage(page)) return false;
         const pendingUntil = Number(pendingImageRequests.get(pageImageCacheKey(pageNumber)) || 0);
         return pendingUntil <= now;
+      });
+    }
+
+    function markPendingImageWindowSlides(slideNumbers) {
+      const pendingUntil = Date.now() + IMAGE_WINDOW_PENDING_TTL_MS;
+      (Array.isArray(slideNumbers) ? slideNumbers : []).forEach(pageNumber => {
+        const page = pageForSlide(pageNumber);
+        if (!page || !page.imageAvailable || page.image || cachedImageForPage(page)) return;
+        pendingImageRequests.set(pageImageCacheKey(pageNumber), pendingUntil);
       });
     }
 
@@ -3087,10 +3100,7 @@
         if (!request || !pageForSlide(request.slideNumber)) return;
         const latestMissingSlides = missingImageWindowSlides(request.slideNumber);
         if (!latestMissingSlides.length) return;
-        const pendingUntil = Date.now() + IMAGE_WINDOW_PENDING_TTL_MS;
-        latestMissingSlides.forEach(pageNumber => {
-          pendingImageRequests.set(pageImageCacheKey(pageNumber), pendingUntil);
-        });
+        markPendingImageWindowSlides(latestMissingSlides);
         Streamlit.setComponentValue({
           action: 'reader_position',
           token: createComponentToken(),
@@ -3100,6 +3110,42 @@
           imageWindowSlideNumbers: latestMissingSlides,
         });
       }, IMAGE_WINDOW_NOTIFY_IDLE_MS);
+    }
+
+    function notifyReaderPosition(slideNumber = currentSlideNumber, delayMs = READER_POSITION_NOTIFY_IDLE_MS) {
+      const targetSlide = Number(slideNumber || currentSlideNumber || 0);
+      if (!deckId || !pageForSlide(targetSlide)) return;
+      const imageWindowSlideNumbers = desiredImageWindowSlideNumbers(targetSlide);
+      const notifyKey = `${deckId}:${targetSlide}:${imageWindowSlideNumbers.join(',')}`;
+      window.clearTimeout(readerPositionNotifyTimer);
+      readerPositionNotifyTimer = null;
+      if (notifyKey === lastReaderPositionNotifyKey) {
+        pendingReaderPositionNotify = null;
+        return;
+      }
+      pendingReaderPositionNotify = {
+        slideNumber: targetSlide,
+        notifyKey,
+      };
+      readerPositionNotifyTimer = window.setTimeout(() => {
+        const request = pendingReaderPositionNotify;
+        pendingReaderPositionNotify = null;
+        readerPositionNotifyTimer = null;
+        if (!request || !pageForSlide(request.slideNumber)) return;
+        const latestImageWindowSlideNumbers = desiredImageWindowSlideNumbers(request.slideNumber);
+        const latestNotifyKey = `${deckId}:${Number(request.slideNumber)}:${latestImageWindowSlideNumbers.join(',')}`;
+        if (latestNotifyKey === lastReaderPositionNotifyKey) return;
+        lastReaderPositionNotifyKey = latestNotifyKey;
+        markPendingImageWindowSlides(latestImageWindowSlideNumbers);
+        Streamlit.setComponentValue({
+          action: 'reader_position',
+          token: createComponentToken(),
+          deckId,
+          slideNumber: Number(request.slideNumber),
+          imageWindowRadius: IMAGE_PREFETCH_RADIUS,
+          imageWindowSlideNumbers: latestImageWindowSlideNumbers,
+        });
+      }, Math.max(0, Number(delayMs) || 0));
     }
 
     function ensureNearbyContent(slideNumber) {
@@ -3609,6 +3655,7 @@
         } else {
           saveScrollState();
         }
+        notifyReaderPosition(currentSlideNumber);
       }
     }
 
@@ -4435,11 +4482,15 @@
         pendingImageRequests.clear();
         window.clearTimeout(nearbyContentTimer);
         window.clearTimeout(positionNotifyTimer);
+        window.clearTimeout(readerPositionNotifyTimer);
         nearbyContentTimer = null;
         positionNotifyTimer = null;
+        readerPositionNotifyTimer = null;
         pendingNearbySlideNumber = null;
         pendingImageWindowRequest = null;
+        pendingReaderPositionNotify = null;
         lastPositionNotifyKey = '';
+        lastReaderPositionNotifyKey = '';
         canvasQuestionFocusPending = false;
       }
       deckId = nextDeckId;

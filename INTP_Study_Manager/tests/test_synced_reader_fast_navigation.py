@@ -81,6 +81,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "pageIndexForSlide",
             "pageIndexDistance",
             "readScrollState",
+            "initialReaderTargetSlide",
             "buildReaderStructureSignature",
             "pageImageCacheKey",
             "touchPageImageCache",
@@ -99,7 +100,14 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "updateRenderedPageImageWindow",
             "desiredImageWindowSlideNumbers",
             "missingImageWindowSlides",
+            "markPendingImageWindowSlides",
             "requestImageWindowIfNeeded",
+            "saveScrollState",
+            "saveCurrentSlideState",
+            "scheduleScrollStateSave",
+            "scheduleProgrammaticScrollStateSave",
+            "notifyReaderPosition",
+            "setActive",
         ]
         cls.js_helpers = "\n\n".join(
             block for name in helper_names if (block := _extract_function(cls.source, name))
@@ -206,6 +214,153 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             const state = readScrollState();
             if (state !== null) {
               throw new Error(JSON.stringify(state));
+            }
+            """
+        )
+
+    def test_new_reader_entry_prefers_backend_initial_slide_over_stored_slide(self):
+        self.run_js(
+            r"""
+            let pages = [{ slideNumber: 1 }, { slideNumber: 3 }, { slideNumber: 7 }];
+            let restoreScrollAfterRender = { currentSlide: 7 };
+
+            const target = initialReaderTargetSlide(
+              { initial_slide_number: 3 },
+              { currentSlide: 7 },
+              false
+            );
+
+            if (target !== 3) {
+              throw new Error(`expected backend initial slide 3, got ${target}`);
+            }
+            """
+        )
+
+    def test_same_deck_refresh_keeps_restored_slide_over_backend_initial_slide(self):
+        self.run_js(
+            r"""
+            let pages = [{ slideNumber: 1 }, { slideNumber: 3 }, { slideNumber: 7 }];
+            let restoreScrollAfterRender = { currentSlide: 7 };
+
+            const target = initialReaderTargetSlide(
+              { initial_slide_number: 3 },
+              { currentSlide: 1 },
+              true
+            );
+
+            if (target !== 7) {
+              throw new Error(`expected restored slide 7, got ${target}`);
+            }
+            """
+        )
+
+    def test_set_active_debounces_reader_position_and_sends_prefetch_window(self):
+        self.run_js(
+            r"""
+            let pages = [
+              { slideNumber: 1 },
+              { slideNumber: 2 },
+              { slideNumber: 3 },
+              { slideNumber: 4 },
+              { slideNumber: 5 },
+            ];
+            let deckId = 11;
+            let currentSlideNumber = 1;
+            let childChatLayers = [];
+            let viewportAnchorState = null;
+            let viewportAnchorTimers = [];
+            let viewportAnchorReleaseTimer = null;
+            let scrollStateSaveTimer = null;
+            let readerPositionNotifyTimer = null;
+            let lastReaderPositionNotifyKey = '';
+            let pendingReaderPositionNotify = null;
+            const IMAGE_PREFETCH_RADIUS = 1;
+            const IMAGE_WINDOW_PENDING_TTL_MS = 10000;
+            const READER_POSITION_NOTIFY_IDLE_MS = 0;
+            const pageImageCache = new Map();
+            const pendingImageRequests = new Map();
+            const saved = {};
+            const notifications = [];
+            let latestTimer = null;
+
+            const Streamlit = {
+              setComponentValue: value => notifications.push(value),
+            };
+            global.localStorage = {
+              setItem: (key, value) => {
+                saved[key] = String(value);
+              },
+            };
+            global.window = {
+              clearTimeout: () => {
+                latestTimer = null;
+              },
+              setTimeout: fn => {
+                latestTimer = fn;
+                return 1;
+              },
+            };
+            const element = () => ({
+              offsetTop: 0,
+              classList: {
+                add: () => {},
+                remove: () => {},
+                contains: () => false,
+              },
+              querySelector: () => ({ dataset: { hydrated: '1' } }),
+            });
+            const elements = {
+              'page-2': element(),
+              'note-2': element(),
+              'page-4': element(),
+              'note-4': element(),
+            };
+            global.document = {
+              querySelectorAll: () => [element(), element()],
+              getElementById: id => elements[id] || element(),
+            };
+            const pageRoot = { scrollTop: 12 };
+            const noteRoot = {
+              offsetTop: 0,
+              scrollTop: 34,
+              scrollTo: ({ top }) => {
+                noteRoot.scrollTop = top;
+              },
+            };
+
+            function createComponentToken() {
+              return `token_${currentSlideNumber}`;
+            }
+            function closeChildLayersForSlideChange() {}
+            function hydrateNote() {}
+            function updatePageJumpDisplay() {}
+            function updateSectionSelect() {}
+            function updateRenderedPageImageWindow() {}
+            function renderChatForPage() {}
+            function centerPageAfterImageSettles() {}
+            function ensureNearbyContent() {}
+            function scheduleNearbyContent() {}
+
+            setActive(2);
+            setActive(4);
+
+            if (notifications.length !== 0) {
+              throw new Error(`reader position should be debounced, got ${notifications.length}`);
+            }
+            if (!latestTimer) {
+              throw new Error('reader position notify was not scheduled');
+            }
+            latestTimer();
+
+            if (notifications.length !== 1) {
+              throw new Error(`expected one reader position notification, got ${notifications.length}`);
+            }
+            const payload = notifications[0];
+            if (payload.action !== 'reader_position' || payload.deckId !== 11 || payload.slideNumber !== 4) {
+              throw new Error(JSON.stringify(payload));
+            }
+            if (payload.imageWindowRadius !== 1 || payload.imageWindowSlideNumbers.join(',') !== '3,4,5') {
+              throw new Error(JSON.stringify(payload));
             }
             """
         )
