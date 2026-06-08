@@ -108,6 +108,7 @@ PPT_GENERATION_REFRESH_STATE_KEY = "ppt_generation_last_refresh"
 PPT_GENERATION_MAX_RETRIES = 3
 PPT_STRUCTURE_REFRESH_STATE_KEY = "ppt_structure_last_refresh"
 PPT_STUDY_ASSET_REFRESH_STATE_KEY = "ppt_study_asset_last_refresh"
+PPT_INTERACTIVE_REQUEST_TIMEOUT_SECONDS = 300
 PPT_STUDY_ASSET_REQUEST_TIMEOUT_SECONDS = 300
 PPT_STUDY_ASSET_MAX_ATTEMPTS = 3
 PPT_STUDY_ASSET_RETRY_DELAY_SECONDS = 2.0
@@ -1311,6 +1312,7 @@ def _handle_synced_reader_action(
                 api_key=_active_api_key(),
                 model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
+                request_timeout=PPT_INTERACTIVE_REQUEST_TIMEOUT_SECONDS,
                 user_id=user_id,
             )
         add_slide_question(
@@ -2644,6 +2646,7 @@ def _render_branch_question_form(
                 model_override=st.session_state.get("active_api_model", DEFAULT_MODEL),
                 max_output_tokens=int(st.session_state.get("active_api_max_tokens", 4096)),
                 reasoning_depth=st.session_state.get("active_api_reasoning_depth"),
+                request_timeout=PPT_INTERACTIVE_REQUEST_TIMEOUT_SECONDS,
                 user_id=user_id,
             )
         add_slide_question(

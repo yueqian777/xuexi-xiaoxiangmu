@@ -78,6 +78,10 @@ class PptCanvasQuestionTest(unittest.TestCase):
         self.assertIn("周期信号", prompt_inputs["question"])
         self.assertTrue(prompt_inputs["question"].endswith("为什么这里强调周期信号？"))
         generate_text.assert_called_once()
+        self.assertEqual(
+            generate_text.call_args.kwargs["request_timeout"],
+            ppt_tutor.PPT_INTERACTIVE_REQUEST_TIMEOUT_SECONDS,
+        )
         add_slide_question.assert_called_once_with(
             11,
             9,

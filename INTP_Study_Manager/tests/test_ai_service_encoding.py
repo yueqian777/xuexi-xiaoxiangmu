@@ -13,6 +13,7 @@ if "streamlit" not in sys.modules and importlib.util.find_spec("streamlit") is N
     sys.modules["streamlit"] = streamlit_stub
 
 from services.ai_service import (
+    AIServiceError,
     AIProvider,
     MIMO_TOKEN_PLAN_PROVIDER_KEY,
     MIMO_TOKEN_PLAN_MODELS,
@@ -156,6 +157,41 @@ class AIServiceEncodingTest(unittest.TestCase):
 
         self.assertEqual(output, "ok")
         self.assertEqual(request.call_args.kwargs["timeout"], 300)
+
+    def test_generate_text_surfaces_responses_status_when_no_text_is_returned(self):
+        provider = AIProvider(
+            provider_key="responses",
+            name="Responses",
+            provider_type="openai_responses",
+            base_url="https://api.example.com/v1",
+            model="model-a",
+            api_key_env="",
+            auth_type="none",
+            extra_headers_json="{}",
+            request_template_json="",
+            response_path="choices.0.message.content",
+        )
+        response = Response()
+        response.status_code = 200
+        response._content = json.dumps(
+            {
+                "status": "failed",
+                "error": {"message": "upstream route failed", "type": "api_error"},
+                "output": [],
+            }
+        ).encode("utf-8")
+
+        with (
+            patch("services.ai_service.get_api_provider", return_value=provider),
+            patch("services.ai_service.requests.request", return_value=response),
+            self.assertRaises(AIServiceError) as raised,
+        ):
+            generate_text("ping")
+
+        message = str(raised.exception)
+        self.assertIn("status=failed", message)
+        self.assertIn("upstream route failed", message)
+        self.assertIn("output_len=0", message)
 
 
 if __name__ == "__main__":

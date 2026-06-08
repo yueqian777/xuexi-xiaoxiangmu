@@ -21,7 +21,7 @@ from services.ai_service import (
 )
 from services import api_parallel_benchmark_service as parallel_benchmark
 from services.api_key_ui import render_local_secret_unlock
-from services.api_runtime import ensure_provider_model, provider_model_state_key
+from services.api_runtime import default_provider_key_from_config, ensure_provider_model, provider_model_state_key
 from services.auth_service import require_login
 from services.balance_service import (
     BALANCE_QUERY_TYPES,
@@ -44,6 +44,8 @@ from services.secret_store import (
     secret_store_exists,
     upsert_provider_secret,
 )
+
+API_TEST_REQUEST_TIMEOUT_SECONDS = 300
 
 AUTH_TYPES = {
     "bearer": "Authorization: Bearer <key>",
@@ -737,6 +739,7 @@ def _render_test_provider(providers: list[dict], *, user_id: int) -> None:
     provider_key = st.selectbox(
         "选择测试 Provider",
         [p["provider_key"] for p in enabled],
+        index=_default_test_provider_index(enabled),
         format_func=lambda item_key: provider_label(next(p for p in enabled if p["provider_key"] == item_key)),
         key="test_provider_key",
     )
@@ -778,12 +781,22 @@ def _render_test_provider(providers: list[dict], *, user_id: int) -> None:
                     api_key=api_key,
                     model_override=active_model,
                     max_output_tokens=int(max_tokens),
+                    request_timeout=API_TEST_REQUEST_TIMEOUT_SECONDS,
                     user_id=user_id,
                 )
             st.success("调用成功。")
             st.markdown(output)
         except AIServiceError as exc:
             st.error(str(exc))
+
+
+def _default_test_provider_index(enabled: list[dict]) -> int:
+    default_key = default_provider_key_from_config(enabled)
+    if default_key:
+        for index, provider in enumerate(enabled):
+            if str(provider["provider_key"]) == default_key:
+                return index
+    return 0
 
 
 def _render_secret_vault(providers: list[dict]) -> None:

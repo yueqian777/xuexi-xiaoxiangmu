@@ -100,6 +100,17 @@ class SecretVaultDisplayTest(unittest.TestCase):
 
         self.assertEqual(state["api_key_provider_openai-chat"], "sk-legacy-openai")
 
+    def test_test_provider_select_defaults_to_saved_default_provider(self):
+        providers = [
+            {"provider_key": "local", "enabled": True},
+            {"provider_key": "sub2api", "enabled": True},
+        ]
+
+        with patch.object(api_settings, "default_provider_key_from_config", return_value="sub2api"):
+            index = api_settings._default_test_provider_index(providers)
+
+        self.assertEqual(index, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

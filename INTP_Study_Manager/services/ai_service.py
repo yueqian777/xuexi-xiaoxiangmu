@@ -721,8 +721,11 @@ def generate_text(
         finish_reason = _safe_extract_path(payload, "choices.0.finish_reason")
         if reasoning and finish_reason == "length":
             raise AIServiceError("模型只返回了 reasoning，最终回答为空。请把\"最大输出 token\"调高后重试。")
+        diagnostic = _no_text_payload_diagnostic(payload)
+        diagnostic_suffix = f"\n响应摘要：{diagnostic}" if diagnostic else ""
         raise AIServiceError(
             f"没有从响应中提取到文本。已尝试路径：{', '.join(_candidate_response_paths(provider.response_path or _default_response_path(provider.provider_type), provider.provider_type))}"
+            f"{diagnostic_suffix}"
         )
     output_str = _repair_utf8_mojibake(str(output)).strip()
     # 对 MiniMax 始终执行思考内容移除（MiniMax 的思考内容无论是否开启推理都会出现）
@@ -747,6 +750,91 @@ def is_quota_error(exc: Exception) -> bool:
     if isinstance(exc, AIServiceError) and exc.category == "quota":
         return True
     return _classify_api_error_text(str(exc), None) == "quota"
+
+
+def _no_text_payload_diagnostic(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+
+    parts: list[str] = []
+    status = str(payload.get("status") or "").strip()
+    if status:
+        parts.append(f"status={status}")
+
+    error_message = _payload_error_message(payload.get("error"))
+    if error_message:
+        parts.append(f"error={error_message}")
+
+    incomplete_details = payload.get("incomplete_details")
+    if incomplete_details:
+        parts.append(f"incomplete_details={_compact_payload_fragment(incomplete_details)}")
+
+    refusal = _first_text_for_key(payload, "refusal")
+    if refusal:
+        parts.append(f"refusal={_compact_api_error_message(refusal, limit=240)}")
+
+    output = payload.get("output")
+    if isinstance(output, list):
+        parts.append(f"output_len={len(output)}")
+        output_types: list[str] = []
+        content_types: list[str] = []
+        for item in output[:8]:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip()
+            if item_type:
+                output_types.append(item_type)
+            content = item.get("content")
+            if isinstance(content, list):
+                for content_item in content[:8]:
+                    if isinstance(content_item, dict):
+                        content_type = str(content_item.get("type") or "").strip()
+                        if content_type:
+                            content_types.append(content_type)
+        if output_types:
+            parts.append(f"output_types={','.join(output_types)}")
+        if content_types:
+            parts.append(f"content_types={','.join(content_types)}")
+
+    return "; ".join(parts)
+
+
+def _payload_error_message(error: Any) -> str:
+    if not error:
+        return ""
+    if isinstance(error, dict):
+        for key in ("message", "code", "type"):
+            value = str(error.get(key) or "").strip()
+            if value:
+                return _compact_api_error_message(value, limit=300)
+        return _compact_payload_fragment(error)
+    return _compact_api_error_message(str(error), limit=300)
+
+
+def _compact_payload_fragment(value: Any, limit: int = 300) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        text = str(value)
+    return _compact_api_error_message(text, limit=limit)
+
+
+def _first_text_for_key(payload: Any, target_key: str) -> str:
+    if isinstance(payload, dict):
+        value = payload.get(target_key)
+        text = _coerce_text_output(value).strip()
+        if text:
+            return text
+        for nested in payload.values():
+            text = _first_text_for_key(nested, target_key)
+            if text:
+                return text
+    elif isinstance(payload, list):
+        for item in payload:
+            text = _first_text_for_key(item, target_key)
+            if text:
+                return text
+    return ""
 
 
 def _build_http_error(response: requests.Response) -> AIServiceError:
