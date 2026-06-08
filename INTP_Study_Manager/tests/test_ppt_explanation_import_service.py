@@ -60,6 +60,72 @@ class PptExplanationImportServiceTest(unittest.TestCase):
             archive.writestr("images/slide-001.png", b"fake-png")
         return zip_path
 
+    def _build_multi_deck_package(self):
+        zip_path = self.data_dir / "multi-share.zip"
+        manifest = {
+            "package_type": "ppt_explanation_share",
+            "version": "1.0",
+            "package_id": "ppt-share-multi-test",
+            "subject": "Shared aggregate",
+            "deck_title": "Two public decks",
+            "exported_at": "2026-06-08T09:00:00",
+            "privacy_mode": "public_ppt_explanation_only",
+            "included_sections": ["slide_text", "slide_images", "ai_explanations"],
+            "excluded_sections": ["slide_questions", "knowledge_cards", "review_tasks"],
+            "decks": [
+                {
+                    "source_deck_id": 11,
+                    "subject": "Signals",
+                    "deck_title": "FIR filters",
+                    "filename": "fir.pptx",
+                    "slide_count": 2,
+                    "slides": [
+                        {
+                            "slide_number": 1,
+                            "title": "FIR basics",
+                            "markdown_path": "decks/fir/slides/slide-001.md",
+                            "image_path": "decks/fir/images/slide-001.png",
+                        },
+                        {
+                            "slide_number": 2,
+                            "title": "Windows",
+                            "markdown_path": "decks/fir/slides/slide-002.md",
+                            "image_path": "decks/fir/images/slide-002.png",
+                        },
+                    ],
+                },
+                {
+                    "deck_id": 12,
+                    "subject": "Control",
+                    "deck_title": "PID loops",
+                    "filename": "pid.pptx",
+                    "slide_count": 1,
+                    "slides": [
+                        {
+                            "slide_number": 1,
+                            "title": "PID basics",
+                            "markdown_path": "decks/pid/slides/slide-001.md",
+                            "image_path": "decks/pid/images/slide-001.png",
+                        }
+                    ],
+                },
+            ],
+        }
+        markdown_by_path = {
+            "decks/fir/slides/slide-001.md": "# Slide 001: FIR basics\n\n## Slide Content\n\nfir text 1\n\n## AI Explanation\n\nfir explanation 1",
+            "decks/fir/slides/slide-002.md": "# Slide 002: Windows\n\n## Slide Content\n\nfir text 2\n\n## AI Explanation\n\nfir explanation 2",
+            "decks/pid/slides/slide-001.md": "# Slide 001: PID basics\n\n## PPT/PDF 页面文字\n\npid text 1\n\n## AI 逐页讲解\n\npid explanation 1",
+        }
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
+            for markdown_path, markdown in markdown_by_path.items():
+                archive.writestr(markdown_path, markdown)
+            archive.writestr("decks/fir/images/slide-001.png", b"fake-png-fir-1")
+            archive.writestr("decks/fir/images/slide-002.png", b"fake-png-fir-2")
+            archive.writestr("decks/fir/attachments/original.pptx", b"original")
+            archive.writestr("decks/pid/images/slide-001.png", b"fake-png-pid-1")
+        return zip_path
+
     def test_preview_rejects_invalid_or_incomplete_packages(self):
         with self.assertRaises(ValueError):
             ppt_explanation_import_service.preview_share_package(
@@ -96,6 +162,46 @@ class PptExplanationImportServiceTest(unittest.TestCase):
         self.assertEqual(explanation["model"], "imported_share")
         self.assertIn("public explanation", explanation["explanation"])
         package = db.fetch_one("SELECT * FROM import_packages WHERE package_id = ?", ("ppt-share-test",))
+        self.assertIsNotNone(package)
+        self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM slide_questions")["count"], 0)
+        self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM knowledge_cards")["count"], 0)
+        self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM review_tasks")["count"], 0)
+
+    def test_multi_deck_package_previews_and_imports_each_deck_without_learning_state(self):
+        zip_path = self._build_multi_deck_package()
+
+        preview = ppt_explanation_import_service.preview_share_package(self.user_id, zip_path)
+        result = ppt_explanation_import_service.import_share_package(self.user_id, zip_path)
+
+        self.assertEqual(preview["package_id"], "ppt-share-multi-test")
+        self.assertEqual(preview["deck_count"], 2)
+        self.assertEqual(preview["slide_count"], 3)
+        self.assertTrue(preview["has_original"])
+        self.assertEqual(result["status"], "imported")
+        self.assertEqual(result["package_id"], "ppt-share-multi-test")
+        self.assertEqual(result["deck_count"], 2)
+        self.assertEqual(len(result["deck_ids"]), 2)
+        self.assertEqual(result["deck_id"], result["deck_ids"][0])
+
+        decks = db.fetch_all("SELECT * FROM ppt_decks WHERE user_id = ? ORDER BY id", (self.user_id,))
+        self.assertEqual([deck["title"] for deck in decks], ["FIR filters", "PID loops"])
+        self.assertEqual([deck["subject"] for deck in decks], ["Signals", "Control"])
+        self.assertEqual([deck["filename"] for deck in decks], ["fir.pptx", "pid.pptx"])
+        self.assertEqual([deck["slide_count"] for deck in decks], [2, 1])
+
+        fir_slide = db.fetch_one("SELECT * FROM ppt_slides WHERE deck_id = ? AND slide_number = 2", (result["deck_ids"][0],))
+        self.assertEqual(fir_slide["title"], "Windows")
+        self.assertIn("fir text 2", fir_slide["slide_text"])
+        self.assertTrue(Path(fir_slide["image_path"]).exists())
+        fir_explanation = db.fetch_one("SELECT * FROM slide_explanations WHERE slide_id = ?", (fir_slide["id"],))
+        self.assertIn("fir explanation 2", fir_explanation["explanation"])
+
+        pid_slide = db.fetch_one("SELECT * FROM ppt_slides WHERE deck_id = ? AND slide_number = 1", (result["deck_ids"][1],))
+        self.assertEqual(pid_slide["slide_text"], "pid text 1")
+        pid_explanation = db.fetch_one("SELECT * FROM slide_explanations WHERE slide_id = ?", (pid_slide["id"],))
+        self.assertEqual(pid_explanation["explanation"], "pid explanation 1")
+
+        package = db.fetch_one("SELECT * FROM import_packages WHERE package_id = ?", ("ppt-share-multi-test",))
         self.assertIsNotNone(package)
         self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM slide_questions")["count"], 0)
         self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM knowledge_cards")["count"], 0)

@@ -215,16 +215,24 @@ def _knowledge_card_markdown(card: Mapping[str, Any], links: list[Mapping[str, A
     card_id = int(card["id"])
     outgoing = [link for link in links if int(link["source_knowledge_id"]) == card_id and int(link["target_knowledge_id"]) in card_links]
     incoming = [link for link in links if int(link["target_knowledge_id"]) == card_id and int(link["source_knowledge_id"]) in card_links]
-    link_lines = [f"- [[{card_links[int(link['target_knowledge_id'])]}]] - {link.get('relation_type') or 'related'}" for link in outgoing]
-    link_lines += [f"- Backlink from [[{card_links[int(link['source_knowledge_id'])]}]] - {link.get('relation_type') or 'related'}" for link in incoming]
+    link_lines = [f"- 指向 [[{card_links[int(link['target_knowledge_id'])]}]]：{link.get('relation_type') or '关联'}" for link in outgoing]
+    link_lines += [f"- 来自 [[{card_links[int(link['source_knowledge_id'])]}]]：{link.get('relation_type') or '关联'}" for link in incoming]
+    meta = "\n".join(
+        [
+            f"- 科目：{_text(card.get('subject'))}",
+            f"- 掌握度：{int(card.get('mastery') or 0)}",
+            f"- 需要复习：{_yes_no(card.get('need_review'))}",
+        ]
+    )
     body = "\n\n".join(
         [
-            f"# {card.get('topic')}",
-            "## Core Question\n\n" + _text(card.get("core_question")),
-            "## One Sentence\n\n" + _text(card.get("one_sentence")),
-            "## Logic Or Formula\n\n" + _text(card.get("logic_or_formula")),
-            "## Application\n\n" + _text(card.get("application")),
-            "## Knowledge Links\n\n" + ("\n".join(link_lines) if link_lines else "No links."),
+            f"# 知识卡片：{card.get('topic')}",
+            meta,
+            "## 核心问题\n\n" + _text(card.get("core_question")),
+            "## 一句话理解\n\n" + _text(card.get("one_sentence")),
+            "## 逻辑 / 公式\n\n" + _text(card.get("logic_or_formula")),
+            "## 应用场景\n\n" + _text(card.get("application")),
+            "## 知识关联\n\n" + ("\n".join(link_lines) if link_lines else "暂无关联。"),
         ]
     )
     return _frontmatter("knowledge_cards", card_id, "knowledge", card.get("subject"), card.get("topic"), export_time, user_id=int(card.get("user_id") or 0), mastery=int(card.get("mastery") or 0), body=body) + "\n\n" + body
@@ -233,29 +241,71 @@ def _knowledge_card_markdown(card: Mapping[str, Any], links: list[Mapping[str, A
 def _mistake_markdown(mistake: Mapping[str, Any], card_links: dict[int, str], export_time: str) -> str:
     link = ""
     if mistake.get("knowledge_id") and int(mistake["knowledge_id"]) in card_links:
-        link = f"\n\nKnowledge: [[{card_links[int(mistake['knowledge_id'])]}]]"
-    body = f"# {mistake.get('topic')}\n\n## Original Question\n\n{_text(mistake.get('original_question'))}\n\n## Correct Idea\n\n{_text(mistake.get('correct_idea'))}{link}"
+        link = f"\n\n- 关联知识卡片：[[{card_links[int(mistake['knowledge_id'])]}]]"
+    body = "\n\n".join(
+        [
+            f"# 错题：{mistake.get('topic')}",
+            f"- 科目：{_text(mistake.get('subject'))}",
+            f"- 错因类型：{_text(mistake.get('cause_category'))}",
+            f"- 加入复习：{_yes_no(mistake.get('add_to_review'))}{link}",
+            "## 原题\n\n" + _text(mistake.get("original_question")),
+            "## 正确思路\n\n" + _text(mistake.get("correct_idea")),
+            "## 警示信号\n\n" + _text(mistake.get("warning_signal")),
+            "## 总结\n\n" + _text(mistake.get("summary")),
+        ]
+    )
     return _frontmatter("mistakes", mistake["id"], "mistake", mistake.get("subject"), mistake.get("topic"), export_time, user_id=int(mistake.get("user_id") or 0), body=body) + "\n\n" + body
 
 
 def _session_markdown(session: Mapping[str, Any], export_time: str) -> str:
-    body = f"# {session.get('title')}\n\n## Main Question\n\n{_text(session.get('main_question'))}\n\n## Summary\n\n{_text(session.get('summary'))}"
+    body = "\n\n".join(
+        [
+            f"# 学习记录：{session.get('title')}",
+            f"- 日期：{_text(session.get('date'))}",
+            f"- 科目：{_text(session.get('subject'))}",
+            f"- 章节：{_text(session.get('chapter'))}",
+            f"- 掌握度：{int(session.get('mastery') or 0)}",
+            f"- 需要复习：{_yes_no(session.get('need_review'))}",
+            "## 主问题\n\n" + _text(session.get("main_question")),
+            "## 已掌握内容\n\n" + _text(session.get("mastered_content")),
+            "## 卡点\n\n" + _text(session.get("blockers")),
+            "## 错题记录\n\n" + _text(session.get("wrong_questions")),
+            "## 总结\n\n" + _text(session.get("summary")),
+        ]
+    )
     return _frontmatter("study_sessions", session["id"], "study_session", session.get("subject"), session.get("title"), export_time, user_id=int(session.get("user_id") or 0), mastery=int(session.get("mastery") or 0), body=body) + "\n\n" + body
 
 
 def _parking_markdown(parking: Mapping[str, Any], export_time: str) -> str:
-    body = f"# Parking Question {parking.get('id')}\n\n{_text(parking.get('question'))}\n\nSource: {_text(parking.get('source'))}"
+    body = "\n\n".join(
+        [
+            f"# 暂存问题 {parking.get('id')}",
+            f"- 科目：{_text(parking.get('subject'))}",
+            f"- 来源：{_text(parking.get('source'))}",
+            f"- 状态：{_text(parking.get('status'))}",
+            "## 问题\n\n" + _text(parking.get("question")),
+        ]
+    )
     return _frontmatter("parking_lot", parking["id"], "parking_lot", parking.get("subject") or "Uncategorized", parking.get("question"), export_time, user_id=int(parking.get("user_id") or 0), body=body) + "\n\n" + body
 
 
 def _slide_markdown(deck: Mapping[str, Any], slide: Mapping[str, Any], explanation: Mapping[str, Any], tree: list[dict], card_links: dict[int, str], export_time: str) -> str:
     title = slide.get("title") or f"Slide {slide.get('slide_number')}"
+    meta = "\n".join(
+        [
+            f"- 科目：{_text(deck.get('subject'))}",
+            f"- PPT：{_text(deck.get('title') or deck.get('filename'))}",
+            f"- 页码：{int(slide['slide_number'])}",
+            f"- 标题：{_text(title)}",
+        ]
+    )
     body = "\n\n".join(
         [
             f"# Slide {int(slide['slide_number']):03d}: {title}",
-            "## Slide Text\n\n" + _text(slide.get("slide_text")),
-            "## AI Explanation\n\n" + _text(explanation.get("explanation")),
-            "## Question Tree\n\n" + (_render_question_tree(tree, card_links) if tree else "No questions."),
+            meta,
+            "## PPT/PDF 页面文字\n\n" + _text(slide.get("slide_text")),
+            "## AI 讲解\n\n" + _text(explanation.get("explanation")),
+            "## 插问 / 追问树\n\n" + (_render_question_tree(tree, card_links) if tree else "暂无插问。"),
         ]
     )
     return _frontmatter("ppt_slides", slide["id"], "ppt_slide", deck.get("subject"), title, export_time, user_id=int(slide.get("user_id") or 0), body=body) + "\n\n" + body
@@ -266,13 +316,13 @@ def _render_question_tree(tree: list[dict], card_links: dict[int, str]) -> str:
 
     def visit(node: Mapping[str, Any], prefix: str, depth: int) -> None:
         heading = "#" * min(6, 3 + depth)
-        lines.append(f"{heading} Q{prefix} {_text(node.get('question'))}")
+        lines.append(f"{heading} Q{prefix}")
         lines.append("")
-        lines.append(_text(node.get("answer")))
+        lines.append(f"- 问题：{_text(node.get('question'))}")
+        lines.append(f"- 回答：{_text(node.get('answer'))}")
         knowledge_id = node.get("knowledge_id")
         if knowledge_id and int(knowledge_id) in card_links:
-            lines.append("")
-            lines.append(f"Linked knowledge card: [[{card_links[int(knowledge_id)]}]]")
+            lines.append(f"- 关联知识卡片：[[{card_links[int(knowledge_id)]}]]")
         lines.append("")
         for index, child in enumerate(node.get("children") or [], start=1):
             visit(child, f"{prefix}.{index}", depth + 1)
@@ -284,7 +334,7 @@ def _render_question_tree(tree: list[dict], card_links: dict[int, str]) -> str:
 
 def _global_home(data: Mapping[str, Any], export_time: str, user_id: int) -> str:
     subject_lines = "\n".join(f"- [[{safe_filename(subject, 'Uncategorized')}/_Subject_Home|{subject}]]" for subject in sorted(data["subjects"]))
-    body = f"# Home\n\n## Subjects\n\n{subject_lines}\n\n## Export\n\n{export_time}"
+    body = f"# 私人学习知识库\n\n## 科目\n\n{subject_lines}\n\n## 导出时间\n\n{export_time}"
     return _frontmatter("obsidian_export", "home", "home", "All", "Home", export_time, user_id=user_id, body=body) + "\n\n" + body
 
 
@@ -294,17 +344,24 @@ def _subject_home(subject: str, data: Mapping[str, Any], card_links: dict[int, s
     reviews = [task for task in data["review_tasks"] if task["subject"] == subject]
     questions = sum(1 for deck in data["ppt_decks"] if deck["subject"] == subject)
     card_lines = "\n".join(f"- [[{card_links[int(card['id'])]}]]" for card in cards[:20])
-    body = f"# {subject}\n\nKnowledge count: {len(cards)}\n\nLow mastery count: {len(low)}\n\nPending review count: {len(reviews)}\n\nPPT deck count: {questions}\n\n## Knowledge\n\n{card_lines}"
+    body = (
+        f"# 科目：{subject}\n\n"
+        f"- 知识卡片数：{len(cards)}\n"
+        f"- 低掌握度卡片数：{len(low)}\n"
+        f"- 待复习任务数：{len(reviews)}\n"
+        f"- PPT/PDF 数量：{questions}\n\n"
+        f"## 知识卡片\n\n{card_lines}"
+    )
     return _frontmatter("subject_home", safe_filename(subject), "subject_home", subject, subject, export_time, user_id=user_id, body=body) + "\n\n" + body
 
 
 def _knowledge_index(cards: list[Mapping[str, Any]], card_links: dict[int, str], export_time: str, user_id: int) -> str:
-    body = "# All Knowledge\n\n" + "\n".join(f"- [[{card_links[int(card['id'])]}]]" for card in cards)
+    body = "# 全部知识卡片\n\n" + "\n".join(f"- [[{card_links[int(card['id'])]}]]" for card in cards)
     return _frontmatter("knowledge_cards", "index", "index", "All", "All Knowledge", export_time, user_id=user_id, body=body) + "\n\n" + body
 
 
 def _mistake_index(mistakes: list[Mapping[str, Any]], export_time: str, user_id: int) -> str:
-    body = "# All Mistakes\n\n" + "\n".join(f"- {item.get('subject')} / {item.get('topic')}: {item.get('summary') or item.get('original_question')}" for item in mistakes)
+    body = "# 全部错题\n\n" + "\n".join(f"- {item.get('subject')} / {item.get('topic')}：{item.get('summary') or item.get('original_question')}" for item in mistakes)
     return _frontmatter("mistakes", "index", "index", "All", "All Mistakes", export_time, user_id=user_id, body=body) + "\n\n" + body
 
 
@@ -313,8 +370,8 @@ def _review_index(reviews: list[Mapping[str, Any]], card_links: dict[int, str], 
     for review in reviews:
         card_id = int(review.get("knowledge_id") or 0)
         target = f"[[{card_links[card_id]}]]" if card_id in card_links else review.get("topic", "")
-        lines.append(f"- {review.get('review_date')} {review.get('review_stage')}: {target} ({review.get('status')})")
-    body = "# Reviews\n\n" + ("\n".join(lines) if lines else "No reviews.")
+        lines.append(f"- {review.get('review_date')} {review.get('review_stage')}：{target}（{review.get('status')}）")
+    body = "# 复习任务\n\n" + ("\n".join(lines) if lines else "暂无复习任务。")
     return _frontmatter("review_tasks", "index", "review_index", "All", "Reviews", export_time, user_id=user_id, body=body) + "\n\n" + body
 
 
@@ -342,3 +399,7 @@ def _yaml_value(value: Any) -> str:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _yes_no(value: Any) -> str:
+    return "是" if int(value or 0) else "否"

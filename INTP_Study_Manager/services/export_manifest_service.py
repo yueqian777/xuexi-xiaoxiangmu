@@ -50,5 +50,15 @@ def validate_public_ppt_manifest(manifest: Mapping[str, Any]) -> None:
     if manifest.get("privacy_mode") != PUBLIC_PPT_PRIVACY_MODE:
         raise ValueError("privacy_mode must be public_ppt_explanation_only")
     slides = manifest.get("slides")
-    if not isinstance(slides, list) or not slides:
+    decks = manifest.get("decks")
+    has_slides = isinstance(slides, list) and bool(slides)
+    has_decks = isinstance(decks, list) and bool(decks)
+    if not has_slides and not has_decks:
         raise ValueError("manifest slides must be a non-empty list")
+    if has_decks:
+        for deck in decks:
+            if not isinstance(deck, Mapping):
+                raise ValueError("manifest decks must contain objects")
+            deck_slides = deck.get("slides")
+            if not isinstance(deck_slides, list) or not deck_slides:
+                raise ValueError("manifest deck slides must be a non-empty list")

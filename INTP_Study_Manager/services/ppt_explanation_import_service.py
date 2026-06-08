@@ -18,6 +18,7 @@ def preview_share_package(user_id: int, zip_file: Any) -> dict[str, Any]:
         extract_dir = Path(tmp) / "extract"
         safe_extract_zip(source, extract_dir)
         manifest = _load_and_validate_manifest(extract_dir)
+        decks = _manifest_decks(manifest)
         duplicate = _existing_package(int(user_id), manifest["package_id"]) is not None
         return {
             "package_id": manifest["package_id"],
@@ -25,9 +26,10 @@ def preview_share_package(user_id: int, zip_file: Any) -> dict[str, Any]:
             "version": manifest.get("version", ""),
             "privacy_mode": manifest["privacy_mode"],
             "subject": manifest.get("subject", ""),
-            "deck_title": manifest.get("deck_title", ""),
-            "slide_count": int(manifest.get("slide_count") or len(manifest.get("slides") or [])),
-            "has_original": any((extract_dir / "attachments").glob("original.*")) if (extract_dir / "attachments").exists() else False,
+            "deck_title": _preview_deck_title(manifest, decks),
+            "deck_count": len(decks),
+            "slide_count": sum(int(deck.get("slide_count") or len(deck["slides"])) for deck in decks),
+            "has_original": _package_has_original(extract_dir),
             "already_imported": duplicate,
             "manifest": manifest,
         }
@@ -40,8 +42,15 @@ def import_share_package(user_id: int, zip_file: Any, *, duplicate_policy: str =
         extract_dir = Path(tmp) / "extract"
         safe_extract_zip(source, extract_dir)
         manifest = _load_and_validate_manifest(extract_dir)
+        decks = _manifest_decks(manifest)
         if _existing_package(user_id_int, manifest["package_id"]) and duplicate_policy == "skip":
-            return {"status": "skipped", "package_id": manifest["package_id"], "deck_id": None}
+            return {
+                "status": "skipped",
+                "package_id": manifest["package_id"],
+                "deck_id": None,
+                "deck_ids": [],
+                "deck_count": len(decks),
+            }
 
         asset_key = manifest["package_id"]
         if _existing_package(user_id_int, manifest["package_id"]):
@@ -69,75 +78,129 @@ def import_share_package(user_id: int, zip_file: Any, *, duplicate_policy: str =
                     manifest.get("version", ""),
                     manifest["privacy_mode"],
                     manifest.get("subject", ""),
-                    manifest.get("deck_title", ""),
+                    _preview_deck_title(manifest, decks),
                     Path(str(getattr(zip_file, "name", "share.zip"))).name,
                     json.dumps(manifest, ensure_ascii=False),
                 ),
             )
             import_package_id = int(cursor.lastrowid)
-            deck_cursor = conn.execute(
-                """
-                INSERT INTO ppt_decks (
-                    user_id, filename, title, subject, file_path, slide_count,
-                    import_package_id, source_type, source_package_id, imported_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'ppt_explanation_share', ?, ?)
-                """,
-                (
-                    user_id_int,
-                    f"{manifest['package_id']}.zip",
-                    manifest.get("deck_title") or "Imported deck",
-                    manifest.get("subject") or "",
-                    str(asset_root / "manifest.json"),
-                    int(manifest.get("slide_count") or len(manifest["slides"])),
-                    import_package_id,
-                    manifest["package_id"],
-                    datetime.now().isoformat(timespec="seconds"),
-                ),
-            )
-            deck_id = int(deck_cursor.lastrowid)
-            for slide_item in manifest["slides"]:
-                slide_number = int(slide_item["slide_number"])
-                markdown_path = extract_dir / slide_item["markdown_path"]
-                markdown = markdown_path.read_text(encoding="utf-8")
-                slide_text, explanation = _parse_slide_markdown(markdown)
-                image_path = _copy_import_image(extract_dir, asset_root, slide_item)
-                slide_cursor = conn.execute(
+            deck_ids = []
+            for deck_index, deck in enumerate(decks, start=1):
+                deck_cursor = conn.execute(
                     """
-                    INSERT INTO ppt_slides (user_id, deck_id, slide_number, title, slide_text, image_path)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO ppt_decks (
+                        user_id, filename, title, subject, file_path, slide_count,
+                        import_package_id, source_type, source_package_id, imported_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'ppt_explanation_share', ?, ?)
                     """,
                     (
                         user_id_int,
-                        deck_id,
-                        slide_number,
-                        slide_item.get("title") or f"Slide {slide_number}",
-                        slide_text,
-                        image_path,
+                        deck.get("filename") or f"{manifest['package_id']}.zip",
+                        deck.get("deck_title") or "Imported deck",
+                        deck.get("subject") or "",
+                        str(asset_root / "manifest.json"),
+                        int(deck.get("slide_count") or len(deck["slides"])),
+                        import_package_id,
+                        manifest["package_id"],
+                        datetime.now().isoformat(timespec="seconds"),
                     ),
                 )
-                slide_id = int(slide_cursor.lastrowid)
-                conn.execute(
-                    """
-                    INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
-                    VALUES (?, ?, 'imported_share', ?)
-                    """,
-                    (user_id_int, slide_id, explanation),
-                )
-        return {"status": "imported", "package_id": manifest["package_id"], "deck_id": deck_id}
+                deck_id = int(deck_cursor.lastrowid)
+                deck_ids.append(deck_id)
+                for slide_item in deck["slides"]:
+                    slide_number = int(slide_item["slide_number"])
+                    markdown_path = extract_dir / slide_item["markdown_path"]
+                    markdown = markdown_path.read_text(encoding="utf-8")
+                    slide_text, explanation = _parse_slide_markdown(markdown)
+                    image_path = _copy_import_image(extract_dir, asset_root, slide_item, f"deck-{deck_index}")
+                    slide_cursor = conn.execute(
+                        """
+                        INSERT INTO ppt_slides (user_id, deck_id, slide_number, title, slide_text, image_path)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            user_id_int,
+                            deck_id,
+                            slide_number,
+                            slide_item.get("title") or f"Slide {slide_number}",
+                            slide_text,
+                            image_path,
+                        ),
+                    )
+                    slide_id = int(slide_cursor.lastrowid)
+                    conn.execute(
+                        """
+                        INSERT INTO slide_explanations (user_id, slide_id, model, explanation)
+                        VALUES (?, ?, 'imported_share', ?)
+                        """,
+                        (user_id_int, slide_id, explanation),
+                    )
+        return {
+            "status": "imported",
+            "package_id": manifest["package_id"],
+            "deck_id": deck_ids[0] if deck_ids else None,
+            "deck_ids": deck_ids,
+            "deck_count": len(deck_ids),
+        }
 
 
 def _load_and_validate_manifest(extract_dir: Path) -> dict[str, Any]:
     manifest = read_manifest(extract_dir / "manifest.json")
     validate_public_ppt_manifest(manifest)
-    for slide in manifest["slides"]:
-        markdown_path = extract_dir / str(slide.get("markdown_path") or "")
-        if not markdown_path.exists() or not markdown_path.is_file():
-            raise ValueError(f"slide markdown is missing: {slide.get('markdown_path')}")
-        image_path = str(slide.get("image_path") or "")
-        if image_path and not (extract_dir / image_path).exists():
-            raise ValueError(f"slide image is missing: {image_path}")
+    for deck in _manifest_decks(manifest):
+        for slide in deck["slides"]:
+            markdown_path = extract_dir / str(slide.get("markdown_path") or "")
+            if not markdown_path.exists() or not markdown_path.is_file():
+                raise ValueError(f"slide markdown is missing: {slide.get('markdown_path')}")
+            image_path = str(slide.get("image_path") or "")
+            if image_path and not (extract_dir / image_path).exists():
+                raise ValueError(f"slide image is missing: {image_path}")
     return manifest
+
+
+def _manifest_decks(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    decks = manifest.get("decks")
+    if isinstance(decks, list) and decks:
+        normalized = []
+        for deck in decks:
+            if not isinstance(deck, dict):
+                continue
+            normalized.append(
+                {
+                    "subject": deck.get("subject") or manifest.get("subject", ""),
+                    "deck_title": deck.get("deck_title") or deck.get("title") or manifest.get("deck_title", ""),
+                    "filename": deck.get("filename") or f"{manifest['package_id']}.zip",
+                    "slide_count": int(deck.get("slide_count") or len(deck.get("slides") or [])),
+                    "slides": deck.get("slides") or [],
+                }
+            )
+        return normalized
+    slides = manifest.get("slides") or []
+    return [
+        {
+            "subject": manifest.get("subject", ""),
+            "deck_title": manifest.get("deck_title", ""),
+            "filename": f"{manifest['package_id']}.zip",
+            "slide_count": int(manifest.get("slide_count") or len(slides)),
+            "slides": slides,
+        }
+    ]
+
+
+def _package_has_original(extract_dir: Path) -> bool:
+    return any(path.is_file() and path.parent.name == "attachments" for path in extract_dir.rglob("original.*"))
+
+
+def _preview_deck_title(manifest: dict[str, Any], decks: list[dict[str, Any]]) -> str:
+    if "decks" not in manifest:
+        return manifest.get("deck_title", "")
+    if manifest.get("deck_title"):
+        return str(manifest.get("deck_title"))
+    if len(decks) == 1:
+        return str(decks[0].get("deck_title") or "")
+    first_title = str(decks[0].get("deck_title") or "Imported deck")
+    return f"{first_title} and {len(decks) - 1} more"
 
 
 def _existing_package(user_id: int, package_id: str) -> dict[str, Any] | None:
@@ -155,21 +218,22 @@ def _materialize_zip(zip_file: Any, target: Path) -> Path:
     return target
 
 
-def _copy_import_image(extract_dir: Path, asset_root: Path, slide_item: dict[str, Any]) -> str:
+def _copy_import_image(extract_dir: Path, asset_root: Path, slide_item: dict[str, Any], filename_prefix: str = "") -> str:
     image_path = str(slide_item.get("image_path") or "")
     if not image_path:
         return ""
     source = extract_dir / image_path
     if not source.exists():
         return ""
-    target = asset_root / "images" / safe_filename(source.name, "slide.png")
+    filename = f"{filename_prefix}-{source.name}" if filename_prefix else source.name
+    target = asset_root / "images" / safe_filename(filename, "slide.png")
     shutil.copy2(source, target)
     return str(target)
 
 
 def _parse_slide_markdown(markdown: str) -> tuple[str, str]:
     content = _strip_frontmatter(markdown)
-    slide_text = _section(content, ["Slide Content", "页面内容"])
+    slide_text = _section(content, ["Slide Content", "页面内容", "PPT/PDF 页面文字"])
     explanation = _section(content, ["AI Explanation", "AI 逐页讲解"])
     return slide_text, explanation
 

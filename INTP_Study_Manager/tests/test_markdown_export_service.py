@@ -138,10 +138,19 @@ class MarkdownExportServiceTest(unittest.TestCase):
         card_text = knowledge_files[0].read_text(encoding="utf-8")
         self.assertIn("db_table: knowledge_cards", card_text)
         self.assertIn("[[knowledge-", card_text)
+        self.assertIn("- 科目：Signals", card_text)
+        self.assertIn("- 掌握度：60", card_text)
+        self.assertIn("## 核心问题", card_text)
+        self.assertIn("## 一句话理解", card_text)
+        self.assertNotIn("## Core Question", card_text)
 
         slide_text = (root / "Signals" / "40_PPT" / "deck-1-Signals-deck" / "slide-001.md").read_text(encoding="utf-8")
-        self.assertIn("## Question Tree", slide_text)
-        self.assertIn("### Q1 Why include unit circle?", slide_text)
+        self.assertIn("- PPT：Signals deck", slide_text)
+        self.assertIn("## PPT/PDF 页面文字", slide_text)
+        self.assertIn("## 插问 / 追问树", slide_text)
+        self.assertIn("- 问题：Why include unit circle?", slide_text)
+        self.assertIn("- 回答：Because frequency response.", slide_text)
+        self.assertNotIn("## Question Tree", slide_text)
         self.assertIn("[[knowledge-", slide_text)
         self.assertTrue((root / "Signals" / "20_Mistakes").exists())
         self.assertTrue((root / "Signals" / "30_Sessions").exists())
@@ -185,7 +194,8 @@ class MarkdownExportServiceTest(unittest.TestCase):
         batch_fetch.assert_called_once_with(self.user_id, [10, 11])
         per_slide_fetch.assert_not_called()
         slide_text = (root / "Signals" / "40_PPT" / "deck-3-Deck" / "slide-001.md").read_text(encoding="utf-8")
-        self.assertIn("### Q1 Why?", slide_text)
+        self.assertIn("### Q1", slide_text)
+        self.assertIn("- 问题：Why?", slide_text)
 
 
 if __name__ == "__main__":

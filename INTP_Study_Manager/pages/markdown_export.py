@@ -9,10 +9,35 @@ from services.auth_service import require_login
 from services.markdown_export_service import export_obsidian_vault
 
 
+MARKDOWN_EXPORT_COPY = {
+    "title": "私人 Markdown / Obsidian 导出",
+    "caption": "单向生成私人 Markdown / Obsidian 知识库，适合用 Obsidian、VS Code、Typora 或 Git 备份阅读。",
+    "subject_label": "导出哪些科目",
+    "all_subjects": "全部科目",
+    "mode_label": "遇到已存在的 Markdown 文件时怎么处理",
+    "mode_options": {
+        "incremental": "增量导出（推荐）：只写新增或变化的文件",
+        "overwrite": "覆盖重建：先清空导出目录再重新生成",
+    },
+    "info": (
+        "这是私人 Markdown / Obsidian 导出，可以包含插问树、知识卡片、错因、复习计划、"
+        "学习记录等个人学习资料；不会导出 API Key、密钥库或 API provider 敏感字段。"
+    ),
+    "button": "生成私人 Markdown 知识库",
+    "success_template": "已生成/更新 {files_written} 个 Markdown 文件",
+    "vault_caption": "可以直接用 Obsidian 打开上面的 user vault 目录。",
+}
+
+
+def get_markdown_export_copy() -> dict[str, object]:
+    return MARKDOWN_EXPORT_COPY
+
+
 def render() -> None:
     user = require_login()
-    st.title("私人 Markdown / Obsidian 导出")
-    st.caption("单向导出 SQLite 中的个人学习资料，适合用 Obsidian、VS Code、Typora 或 Git 备份阅读。")
+    copy = get_markdown_export_copy()
+    st.title(copy["title"])
+    st.caption(copy["caption"])
 
     subjects = [
         row["subject"]
@@ -34,17 +59,22 @@ def render() -> None:
             (user.id, user.id, user.id, user.id),
         )
     ]
-    subject_choice = st.selectbox("导出范围", ["全部科目", *subjects], key="markdown_export_subject")
-    mode = st.radio("导出模式", ["incremental", "overwrite"], format_func=lambda item: "增量导出" if item == "incremental" else "覆盖导出", horizontal=True)
+    subject_choice = st.selectbox(copy["subject_label"], [copy["all_subjects"], *subjects], key="markdown_export_subject")
+    mode = st.radio(
+        copy["mode_label"],
+        ["incremental", "overwrite"],
+        format_func=lambda item: copy["mode_options"][item],
+        horizontal=True,
+    )
 
-    st.info("私人导出可以包含插问树、知识卡片、错因、复习计划和学习记录；不会导出 API Key、密钥库或 API provider 敏感字段。")
-    if st.button("开始导出", type="primary"):
+    st.info(copy["info"])
+    if st.button(copy["button"], type="primary"):
         result = export_obsidian_vault(
             user.id,
-            subject=None if subject_choice == "全部科目" else subject_choice,
+            subject=None if subject_choice == copy["all_subjects"] else subject_choice,
             mode=mode,
         )
         root = Path(result["root"])
-        st.success(f"导出完成，写入 {result['files_written']} 个 Markdown 文件。")
+        st.success(copy["success_template"].format(files_written=result["files_written"]))
         st.code(str(root), language="text")
-        st.caption("可以直接用 Obsidian 打开上面的 user vault 目录。")
+        st.caption(copy["vault_caption"])
