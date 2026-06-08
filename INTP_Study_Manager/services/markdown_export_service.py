@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from db import DATA_DIR, fetch_all
-from repositories.ppt_repository import get_slide_question_tree
+from repositories.ppt_repository import slide_question_trees_by_slide_ids
 from services.export_path_service import ensure_clean_dir, safe_filename
 
 
@@ -153,13 +153,15 @@ def _write_ppt_slides(root: Path, data: Mapping[str, Any], card_links: dict[int,
     slides_by_deck: dict[int, list[dict[str, Any]]] = {}
     for slide in data["ppt_slides"]:
         slides_by_deck.setdefault(int(slide["deck_id"]), []).append(slide)
+    slide_ids = [int(slide["id"]) for slide in data["ppt_slides"]]
+    question_trees_by_slide = slide_question_trees_by_slide_ids(int(data["user_id"]), slide_ids)
     for deck in data["ppt_decks"]:
         subject_root = _subject_root(root, deck["subject"] or "Uncategorized")
         deck_dir = subject_root / "40_PPT" / f"deck-{deck['id']}-{safe_filename(deck.get('title'), 'deck')}"
         deck_dir.mkdir(parents=True, exist_ok=True)
         for slide in slides_by_deck.get(int(deck["id"]), []):
             explanation = latest_by_slide.get(int(slide["id"]), {})
-            tree = get_slide_question_tree(int(slide["id"]), int(data["user_id"]))
+            tree = question_trees_by_slide.get(int(slide["id"]), [])
             filename = f"slide-{int(slide['slide_number']):03d}.md"
             _write_file(deck_dir / filename, _slide_markdown(deck, slide, explanation, tree, card_links, export_time), mode, stats)
 

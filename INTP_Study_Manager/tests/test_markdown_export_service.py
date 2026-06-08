@@ -153,6 +153,40 @@ class MarkdownExportServiceTest(unittest.TestCase):
         self.assertNotIn("api_providers", all_text)
         self.assertGreater(result["files_written"], 0)
 
+    def test_write_ppt_slides_fetches_question_trees_in_one_batch(self):
+        root = self.data_dir / "vault"
+        data = {
+            "user_id": self.user_id,
+            "ppt_decks": [
+                {"id": 3, "title": "Deck", "subject": "Signals"},
+            ],
+            "ppt_slides": [
+                {"id": 10, "user_id": self.user_id, "deck_id": 3, "slide_number": 1, "title": "A", "slide_text": "a"},
+                {"id": 11, "user_id": self.user_id, "deck_id": 3, "slide_number": 2, "title": "B", "slide_text": "b"},
+            ],
+            "slide_explanations": [],
+        }
+        tree = [
+            {
+                "id": 100,
+                "question": "Why?",
+                "answer": "Because.",
+                "knowledge_id": None,
+                "children": [],
+            }
+        ]
+        stats = {"files_written": 0}
+        with (
+            patch.object(markdown_export_service, "slide_question_trees_by_slide_ids", return_value={10: tree, 11: []}, create=True) as batch_fetch,
+            patch.object(markdown_export_service, "get_slide_question_tree", return_value=[], create=True) as per_slide_fetch,
+        ):
+            markdown_export_service._write_ppt_slides(root, data, {}, "2026-06-08T10:00:00", "overwrite", stats)
+
+        batch_fetch.assert_called_once_with(self.user_id, [10, 11])
+        per_slide_fetch.assert_not_called()
+        slide_text = (root / "Signals" / "40_PPT" / "deck-3-Deck" / "slide-001.md").read_text(encoding="utf-8")
+        self.assertIn("### Q1 Why?", slide_text)
+
 
 if __name__ == "__main__":
     unittest.main()

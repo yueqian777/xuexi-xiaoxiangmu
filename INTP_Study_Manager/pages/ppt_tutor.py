@@ -145,11 +145,12 @@ def _save_last_reader_position(
     *,
     existing: dict[str, int] | None = None,
 ) -> None:
-    payload = build_reader_position_payload(deck_id, slide_number, existing=existing if existing is not None else _read_last_reader_position(user_id))
+    if existing is None:
+        existing = _read_last_reader_position(user_id)
+    payload = build_reader_position_payload(deck_id, slide_number, existing=existing)
     if not payload:
         return
 
-    existing = existing if existing is not None else _read_last_reader_position(user_id)
     if existing == payload:
         return
 
@@ -3834,8 +3835,13 @@ def _build_reader_payload(
     image_slide_numbers: set[int] | None = None,
 ) -> list[dict]:
     payload = []
-    image_slide_numbers = image_slide_numbers or set()
+    requested_image_slide_numbers = (
+        None
+        if image_slide_numbers is None
+        else {int(number) for number in image_slide_numbers}
+    )
     for slide in slides:
+        slide_number = int(slide["slide_number"])
         image_path = Path(slide.get("image_path") or "")
         latest = latest_by_slide_id.get(int(slide["id"]))
         slide_text = _display_slide_text(slide)
@@ -3843,14 +3849,17 @@ def _build_reader_payload(
         bookmark_title = str(slide.get("bookmark_title") or "").strip() or slide_title
 
         image_available = image_path.exists() and image_path.is_file()
-        if image_available:
+        if image_available and (
+            requested_image_slide_numbers is None
+            or slide_number in requested_image_slide_numbers
+        ):
             image_data = _reader_image_url(image_path)
         else:
             image_data = ""
 
         payload.append(
             {
-                "slideNumber": int(slide["slide_number"]),
+                "slideNumber": slide_number,
                 "title": slide_title,
                 "image": image_data,
                 "imageAvailable": image_available,

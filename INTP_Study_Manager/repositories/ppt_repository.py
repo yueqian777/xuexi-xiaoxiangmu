@@ -428,6 +428,56 @@ def questions_by_slide_ids(user_id: int, slide_ids: list[int]) -> dict[int, list
     return grouped
 
 
+def slide_question_trees_by_slide_ids(user_id: int, slide_ids: list[int]) -> dict[int, list[dict]]:
+    if not slide_ids:
+        return {}
+    grouped: dict[int, list[dict]] = {int(slide_id): [] for slide_id in slide_ids}
+    chunk_size = 900
+    for start in range(0, len(slide_ids), chunk_size):
+        chunk = [int(slide_id) for slide_id in slide_ids[start : start + chunk_size]]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = fetch_all(
+            f"""
+            SELECT
+                id,
+                slide_id,
+                question,
+                quote_text,
+                answer,
+                model,
+                category,
+                status,
+                knowledge_id,
+                COALESCE(converted_to_knowledge, 0) AS converted_to_knowledge,
+                COALESCE(understood, 0) AS understood,
+                COALESCE(need_review, 0) AS need_review,
+                sort_order,
+                COALESCE(root_question_id, id) AS root_question_id,
+                parent_question_id,
+                COALESCE(depth, 0) AS depth,
+                COALESCE(quote_source, 'slide') AS quote_source,
+                quote_source_question_id,
+                created_at
+            FROM slide_questions
+            WHERE user_id = ? AND slide_id IN ({placeholders})
+            ORDER BY
+                slide_id ASC,
+                COALESCE(root_question_id, id) ASC,
+                COALESCE(depth, 0) ASC,
+                sort_order ASC,
+                created_at ASC,
+                id ASC
+            """,
+            (int(user_id), *tuple(chunk)),
+        )
+        rows_by_slide: dict[int, list[dict]] = {}
+        for row in rows:
+            rows_by_slide.setdefault(int(row["slide_id"]), []).append(row)
+        for slide_id, slide_rows in rows_by_slide.items():
+            grouped[slide_id] = _build_slide_question_tree(slide_rows)
+    return grouped
+
+
 def flatten_question_subtree(user_id: int, question_id: int) -> int:
     user_id_int = int(user_id)
     question_id_int = int(question_id)

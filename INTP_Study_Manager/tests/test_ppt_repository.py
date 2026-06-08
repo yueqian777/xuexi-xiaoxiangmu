@@ -139,6 +139,52 @@ class PptRepositoryTest(unittest.TestCase):
 
         self.assertEqual(result, {7: [], 8: []})
 
+    def test_slide_question_trees_by_slide_ids_groups_nested_trees_by_slide(self):
+        rows = [
+            {
+                "id": 10,
+                "slide_id": 7,
+                "question": "root",
+                "answer": "root answer",
+                "sort_order": 1,
+                "created_at": "2026-06-08 10:00:00",
+                "parent_question_id": None,
+                "root_question_id": 10,
+                "depth": 0,
+            },
+            {
+                "id": 11,
+                "slide_id": 7,
+                "question": "child",
+                "answer": "child answer",
+                "sort_order": 1,
+                "created_at": "2026-06-08 10:01:00",
+                "parent_question_id": 10,
+                "root_question_id": 10,
+                "depth": 1,
+            },
+            {
+                "id": 20,
+                "slide_id": 8,
+                "question": "other",
+                "answer": "other answer",
+                "sort_order": 1,
+                "created_at": "2026-06-08 10:02:00",
+                "parent_question_id": None,
+                "root_question_id": 20,
+                "depth": 0,
+            },
+        ]
+        with patch.object(ppt_repository, "fetch_all", return_value=rows) as fetch_all:
+            result = ppt_repository.slide_question_trees_by_slide_ids(4, [7, 8])
+
+        self.assertEqual(result[7][0]["question"], "root")
+        self.assertEqual(result[7][0]["children"][0]["question"], "child")
+        self.assertEqual(result[8][0]["question"], "other")
+        query, params = fetch_all.call_args.args
+        self.assertIn("slide_id IN (?,?)", query)
+        self.assertEqual(params, (4, 7, 8))
+
     def test_questions_by_slide_ids_groups_rows_in_repository(self):
         rows = [
             {

@@ -71,6 +71,16 @@ class PptReaderPositionTest(unittest.TestCase):
         args = execute.call_args.args
         self.assertEqual(json.loads(args[1][2]), {"deck_id": 4})
 
+    def test_save_last_reader_position_reads_existing_position_once(self):
+        with (
+            patch.object(ppt_tutor, "_read_last_reader_position", return_value={"deck_id": 3, "slide_number": 9}) as read_position,
+            patch.object(ppt_tutor, "execute") as execute,
+        ):
+            ppt_tutor._save_last_reader_position(42, 3)
+
+        read_position.assert_called_once_with(42)
+        execute.assert_not_called()
+
     def test_initial_reader_slide_number_uses_valid_remembered_slide(self):
         slides = [{"slide_number": 1}, {"slide_number": 5}]
 
@@ -436,7 +446,7 @@ class PptReaderPositionTest(unittest.TestCase):
         self.assertEqual(payload[0]["slideRole"], "承接定义")
         self.assertEqual(payload[0]["keyPoints"], "边界条件")
 
-    def test_reader_payload_includes_lightweight_image_urls_for_available_pages(self):
+    def test_reader_payload_includes_lightweight_image_urls_only_for_requested_pages(self):
         slides = [
             {"id": 1, "slide_number": 1, "title": "A", "slide_text": "", "image_path": "a.png"},
             {"id": 2, "slide_number": 2, "title": "B", "slide_text": "", "image_path": "b.png"},
@@ -444,7 +454,7 @@ class PptReaderPositionTest(unittest.TestCase):
         with (
             patch.object(ppt_tutor.Path, "exists", return_value=True),
             patch.object(ppt_tutor.Path, "is_file", return_value=True),
-            patch.object(ppt_tutor, "_reader_image_url", side_effect=lambda path: f"_reader_image_cache/{path}"),
+            patch.object(ppt_tutor, "_reader_image_url", side_effect=lambda path: f"_reader_image_cache/{path}") as image_url,
         ):
             payload = ppt_tutor._build_reader_payload(
                 slides,
@@ -454,8 +464,9 @@ class PptReaderPositionTest(unittest.TestCase):
             )
 
         self.assertTrue(payload[0]["imageAvailable"])
-        self.assertEqual(payload[0]["image"], "_reader_image_cache/a.png")
+        self.assertEqual(payload[0]["image"], "")
         self.assertEqual(payload[1]["image"], "_reader_image_cache/b.png")
+        image_url.assert_called_once()
 
     def test_reader_sections_payload_uses_component_key_names(self):
         payload = ppt_tutor._reader_sections_payload(
