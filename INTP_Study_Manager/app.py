@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from db import init_db
 from pages import (
@@ -51,7 +50,7 @@ PAGES = {
 
 
 def _install_browser_dom_guard() -> None:
-    components.html(
+    st.iframe(
         """
         <script>
         (() => {

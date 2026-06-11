@@ -106,7 +106,6 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "saveCurrentSlideState",
             "scheduleScrollStateSave",
             "scheduleProgrammaticScrollStateSave",
-            "notifyReaderPosition",
             "setActive",
         ]
         cls.js_helpers = "\n\n".join(
@@ -218,7 +217,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             """
         )
 
-    def test_new_reader_entry_prefers_backend_initial_slide_over_stored_slide(self):
+    def test_new_reader_entry_prefers_stored_slide_over_backend_initial_slide(self):
         self.run_js(
             r"""
             let pages = [{ slideNumber: 1 }, { slideNumber: 3 }, { slideNumber: 7 }];
@@ -230,8 +229,8 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
               false
             );
 
-            if (target !== 3) {
-              throw new Error(`expected backend initial slide 3, got ${target}`);
+            if (target !== 7) {
+              throw new Error(`expected stored slide 7, got ${target}`);
             }
             """
         )
@@ -254,7 +253,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             """
         )
 
-    def test_set_active_debounces_reader_position_and_sends_prefetch_window(self):
+    def test_set_active_keeps_position_local_without_backend_notify(self):
         self.run_js(
             r"""
             let pages = [
@@ -271,12 +270,8 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             let viewportAnchorTimers = [];
             let viewportAnchorReleaseTimer = null;
             let scrollStateSaveTimer = null;
-            let readerPositionNotifyTimer = null;
-            let lastReaderPositionNotifyKey = '';
-            let pendingReaderPositionNotify = null;
             const IMAGE_PREFETCH_RADIUS = 1;
             const IMAGE_WINDOW_PENDING_TTL_MS = 10000;
-            const READER_POSITION_NOTIFY_IDLE_MS = 0;
             const pageImageCache = new Map();
             const pendingImageRequests = new Map();
             const saved = {};
@@ -345,22 +340,13 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             setActive(4);
 
             if (notifications.length !== 0) {
-              throw new Error(`reader position should be debounced, got ${notifications.length}`);
+              throw new Error(`reader position should remain local, got ${notifications.length}`);
             }
-            if (!latestTimer) {
-              throw new Error('reader position notify was not scheduled');
+            if (latestTimer) {
+              throw new Error('reader position notify should not be scheduled');
             }
-            latestTimer();
-
-            if (notifications.length !== 1) {
-              throw new Error(`expected one reader position notification, got ${notifications.length}`);
-            }
-            const payload = notifications[0];
-            if (payload.action !== 'reader_position' || payload.deckId !== 11 || payload.slideNumber !== 4) {
-              throw new Error(JSON.stringify(payload));
-            }
-            if (payload.imageWindowRadius !== 1 || payload.imageWindowSlideNumbers.join(',') !== '3,4,5') {
-              throw new Error(JSON.stringify(payload));
+            if (currentSlideNumber !== 4) {
+              throw new Error(`expected active slide 4, got ${currentSlideNumber}`);
             }
             """
         )

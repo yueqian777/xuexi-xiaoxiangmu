@@ -21,12 +21,11 @@ from db import BASE_DIR, execute, execute_many, fetch_all, fetch_one, insert_and
 from repositories.ppt_repository import (
     add_slide_explanation,
     add_slide_question,
-    close_slide_question,
     flatten_question_subtree,
     get_slide_question_tree,
     latest_explanation,
     latest_explanations_by_slide_ids,
-    update_slide_question_status,
+    questions_by_slide_ids,
     update_slide_question_answer,
     update_slide_bookmark,
     update_slide_learning_metadata,
@@ -84,9 +83,7 @@ from services.ppt_reader_state import (
 )
 from services.question_to_knowledge_service import (
     convert_question_to_knowledge,
-    ensure_question_review_tasks,
     get_question_knowledge_draft,
-    mark_question_understood,
 )
 from services.study_asset_service import parse_study_assets, save_study_assets
 
@@ -99,7 +96,6 @@ READER_IMAGE_PREFETCH_RADIUS = 3
 READER_IMAGE_WINDOW_MAX_RADIUS = 8
 READER_IMAGE_CACHE_MAX_SLIDES = 15
 READER_IMAGE_URL_CACHE_MAX_SLIDES = READER_IMAGE_CACHE_MAX_SLIDES * 2
-READER_BACKEND_POSITION_STATE_KEY = "ppt_reader_backend_position_hydrated"
 PPT_GENERATION_DEFAULT_PARALLELISM = parallel_benchmark.DEFAULT_PARALLELISM
 PPT_PARALLEL_BENCHMARK_MAX_PARALLELISM = parallel_benchmark.DEFAULT_MAX_PARALLELISM
 PPT_INLINE_BENCHMARK_MIN_SLIDES = parallel_benchmark.INLINE_BENCHMARK_MIN_SAMPLES
@@ -169,27 +165,6 @@ def _save_last_reader_position(
 
 def _default_reader_deck_id(deck_ids: list[int], last_position: dict[str, int]) -> int:
     return default_reader_deck_id(deck_ids, last_position, st.session_state.get(LAST_READER_DECK_STATE_KEY))
-
-
-def _reader_backend_position_signature(last_position: dict[str, int]) -> tuple[int, int]:
-    return (
-        int(last_position.get("deck_id") or 0),
-        int(last_position.get("slide_number") or 0),
-    )
-
-
-def _hydrate_reader_position_from_backend(deck_ids: list[int], last_position: dict[str, int]) -> None:
-    signature = _reader_backend_position_signature(last_position)
-    if st.session_state.get(READER_BACKEND_POSITION_STATE_KEY) == signature:
-        return
-    st.session_state[READER_BACKEND_POSITION_STATE_KEY] = signature
-
-    deck_id, slide_number = signature
-    if deck_id not in deck_ids:
-        return
-    st.session_state[LAST_READER_DECK_STATE_KEY] = deck_id
-    if slide_number > 0:
-        st.session_state[_reader_active_slide_state_key(deck_id)] = slide_number
 
 
 def _remember_reader_deck_selection(user_id: int, deck_id: int, last_position: dict[str, int]) -> None:
@@ -365,7 +340,6 @@ def render() -> None:
     deck_ids = list(deck_by_id)
     last_position = _read_last_reader_position(user.id)
     default_deck_id = _default_reader_deck_id(deck_ids, last_position)
-    _hydrate_reader_position_from_backend(deck_ids, last_position)
     if st.session_state.get(LAST_READER_DECK_STATE_KEY) not in deck_by_id:
         st.session_state[LAST_READER_DECK_STATE_KEY] = default_deck_id
     deck_id = st.selectbox(
@@ -1096,8 +1070,12 @@ def _render_synced_reader(
     user_id = int(user_id) if user_id is not None else int(deck.get("user_id") or require_login().id)
     initial_slide_number = _initial_reader_slide_number(int(deck["id"]), slides, last_position)
     active_state_key = _reader_active_slide_state_key(int(deck["id"]))
-    active_slide_number = initial_slide_number
-    st.session_state[active_state_key] = active_slide_number
+    session_active_slide = st.session_state.get(active_state_key)
+    active_slide_number = (
+        initial_slide_number
+        if session_active_slide is None
+        else _reader_active_slide_number(int(deck["id"]), slides, initial_slide_number)
+    )
     _remember_reader_image_window(int(deck["id"]), slides, active_slide_number)
     image_slide_numbers = _reader_cached_image_slide_numbers(int(deck["id"]), slides)
     active_slide_ids = [
@@ -1154,8 +1132,6 @@ def _handle_synced_reader_action(
         "save_explanation_edit",
         "save_question_answer_edit",
         "merge_question_thread",
-        "close_slide_question",
-        "update_slide_question_status",
         "toggle_slide_bookmark",
         "rename_slide_bookmark",
         "reader_position",
@@ -1185,54 +1161,6 @@ def _handle_synced_reader_action(
             user_id=user_id,
         ):
             st.rerun()
-        return
-
-    if action == "close_slide_question":
-        last_close_token_key = f"ppt_question_close_last_token_{deck['id']}"
-        if token and st.session_state.get(last_close_token_key) == token:
-            return
-        try:
-            question_id = int(payload.get("questionId", 0))
-        except (TypeError, ValueError):
-            return
-        if not question_id:
-            return
-        close_slide_question(question_id, user_id)
-        st.session_state.pop(f"ppt_active_question_id_{deck['id']}", None)
-        st.session_state.pop(f"ppt_parent_question_id_{deck['id']}", None)
-        if token:
-            st.session_state[last_close_token_key] = token
-        st.toast("插问已关闭，并保留在插问树中。")
-        st.rerun()
-        return
-
-    if action == "update_slide_question_status":
-        last_status_token_key = f"ppt_question_status_last_token_{deck['id']}"
-        if token and st.session_state.get(last_status_token_key) == token:
-            return
-        try:
-            question_id = int(payload.get("questionId", 0))
-        except (TypeError, ValueError):
-            return
-        status = str(payload.get("status") or "").strip()
-        if not question_id or not status:
-            return
-        if status == "understood":
-            mark_question_understood(user_id, question_id)
-            toast_text = "Question marked understood."
-        elif status == "review":
-            result = ensure_question_review_tasks(user_id, question_id)
-            toast_text = f"Review tasks ready for knowledge card #{result['knowledge_id']}."
-        elif status == "knowledge_card":
-            st.session_state[_question_to_knowledge_pending_key(int(deck["id"]))] = {"question_id": question_id}
-            toast_text = "Knowledge card draft is ready."
-        else:
-            update_slide_question_status(question_id, user_id, status)
-            toast_text = "Question status updated."
-        if token:
-            st.session_state[last_status_token_key] = token
-        st.toast(toast_text)
-        st.rerun()
         return
 
     if action in {"toggle_slide_bookmark", "rename_slide_bookmark"}:
@@ -3835,11 +3763,6 @@ def _build_reader_payload(
     image_slide_numbers: set[int] | None = None,
 ) -> list[dict]:
     payload = []
-    requested_image_slide_numbers = (
-        None
-        if image_slide_numbers is None
-        else {int(number) for number in image_slide_numbers}
-    )
     for slide in slides:
         slide_number = int(slide["slide_number"])
         image_path = Path(slide.get("image_path") or "")
@@ -3849,10 +3772,7 @@ def _build_reader_payload(
         bookmark_title = str(slide.get("bookmark_title") or "").strip() or slide_title
 
         image_available = image_path.exists() and image_path.is_file()
-        if image_available and (
-            requested_image_slide_numbers is None
-            or slide_number in requested_image_slide_numbers
-        ):
+        if image_available:
             image_data = _reader_image_url(image_path)
         else:
             image_data = ""
@@ -4508,38 +4428,28 @@ def _latest_explanations_by_slide_ids(slide_ids: list[int]) -> dict[int, dict]:
     return latest_explanations_by_slide_ids(require_login().id, slide_ids)
 
 
-def _question_tree_node_payload(row: dict) -> dict:
-    children = row.get("children") or []
-    return {
-        **_branch_question_display_parts(row["question"], row.get("quote_text", "")),
-        "id": row.get("id"),
-        "rootQuestionId": row.get("root_question_id") or row.get("id"),
-        "parentQuestionId": row.get("parent_question_id"),
-        "depth": int(row.get("depth") or 0),
-        "quoteSource": row.get("quote_source") or "slide",
-        "quoteSourceQuestionId": row.get("quote_source_question_id"),
-        "answer": row["answer"],
-        "model": row["model"],
-        "category": row["category"],
-        "status": row["status"],
-        "knowledgeId": row.get("knowledge_id"),
-        "convertedToKnowledge": bool(row.get("converted_to_knowledge")),
-        "understood": bool(row.get("understood")),
-        "needReview": bool(row.get("need_review")),
-        "sortOrder": row["sort_order"],
-        "createdAt": row["created_at"],
-        "children": [_question_tree_node_payload(child) for child in children],
-    }
-
-
 def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
-    user_id = require_login().id
+    grouped = questions_by_slide_ids(require_login().id, slide_ids)
     return {
-        int(slide_id): [
-            _question_tree_node_payload(row)
-            for row in get_slide_question_tree(int(slide_id), user_id)
+        slide_id: [
+            {
+                **_branch_question_display_parts(row["question"], row.get("quote_text", "")),
+                "id": row.get("id"),
+                "rootQuestionId": row.get("root_question_id") or row.get("id"),
+                "parentQuestionId": row.get("parent_question_id"),
+                "depth": int(row.get("depth") or 0),
+                "quoteSource": row.get("quote_source") or "slide",
+                "quoteSourceQuestionId": row.get("quote_source_question_id"),
+                "answer": row["answer"],
+                "model": row["model"],
+                "category": row["category"],
+                "status": row["status"],
+                "sortOrder": row["sort_order"],
+                "createdAt": row["created_at"],
+            }
+            for row in rows
         ]
-        for slide_id in slide_ids
+        for slide_id, rows in grouped.items()
     }
 
 

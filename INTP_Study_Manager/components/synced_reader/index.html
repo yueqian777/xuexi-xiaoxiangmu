@@ -1493,11 +1493,8 @@
     let lastFullscreenState = false;
     let readerStructureSignature = '';
     let positionNotifyTimer = null;
-    let readerPositionNotifyTimer = null;
     let lastPositionNotifyKey = '';
-    let lastReaderPositionNotifyKey = '';
     let pendingImageWindowRequest = null;
-    let pendingReaderPositionNotify = null;
     let nearbyContentTimer = null;
     let pendingNearbySlideNumber = null;
     let typesetFlushTimer = null;
@@ -1517,7 +1514,6 @@
     const MATHJAX_RETRY_MS = 180;
     const NEARBY_CONTENT_IDLE_MS = 90;
     const IMAGE_WINDOW_NOTIFY_IDLE_MS = 160;
-    const READER_POSITION_NOTIFY_IDLE_MS = 120;
     const IMAGE_WINDOW_PENDING_TTL_MS = 6000;
     const PAGE_IMAGE_CACHE_MAX_SLIDES = 13;
     const PAGE_IMAGE_RENDER_RADIUS = 3;
@@ -2290,36 +2286,22 @@
       }
     }
 
-    function sendQuestionClose(questionId) {
+    function sendQuestionThreadMerge(questionId) {
       const targetQuestionId = Number(questionId || 0);
       if (!targetQuestionId) return false;
       Streamlit.setComponentValue({
-        action: 'close_slide_question',
+        action: 'merge_question_thread',
         token: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
         deckId,
         slideNumber: currentSlideNumber,
         questionId: targetQuestionId,
-      });
-      return true;
-    }
-
-    function sendQuestionStatus(questionId, status) {
-      const targetQuestionId = Number(questionId || 0);
-      const targetStatus = String(status || '').trim();
-      if (!targetQuestionId || !targetStatus) return false;
-      Streamlit.setComponentValue({
-        action: 'update_slide_question_status',
-        token: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
-        deckId,
-        slideNumber: currentSlideNumber,
-        questionId: targetQuestionId,
-        status: targetStatus,
       });
       return true;
     }
 
     function closeChildLayersForSlideChange() {
       if (!childChatLayers.length) return;
+      sendQuestionThreadMerge(childChatLayers[0]?.parentQuestionId);
       suppressObserverUntil = Date.now() + VIEWPORT_ANCHOR_MS;
       childChatLayers = [];
       childPanelScrollToBottomLayerId = null;
@@ -2812,10 +2794,10 @@
       };
       const restoredSlide = slideOrZero(restoreScrollAfterRender?.currentSlide);
       if (isSameDeckRefresh && restoredSlide) return restoredSlide;
-      const initialSlide = slideOrZero(args?.initial_slide_number);
-      if (initialSlide) return initialSlide;
       const storedSlide = slideOrZero(stored?.currentSlide);
       if (storedSlide) return storedSlide;
+      const initialSlide = slideOrZero(args?.initial_slide_number);
+      if (initialSlide) return initialSlide;
       if (restoredSlide) return restoredSlide;
       return Number(pages[0]?.slideNumber || 1);
     }
@@ -2946,15 +2928,6 @@
         if (!page || !page.imageAvailable || page.image || cachedImageForPage(page)) return false;
         const pendingUntil = Number(pendingImageRequests.get(pageImageCacheKey(pageNumber)) || 0);
         return pendingUntil <= now;
-      });
-    }
-
-    function markPendingImageWindowSlides(slideNumbers) {
-      const pendingUntil = Date.now() + IMAGE_WINDOW_PENDING_TTL_MS;
-      (Array.isArray(slideNumbers) ? slideNumbers : []).forEach(pageNumber => {
-        const page = pageForSlide(pageNumber);
-        if (!page || !page.imageAvailable || page.image || cachedImageForPage(page)) return;
-        pendingImageRequests.set(pageImageCacheKey(pageNumber), pendingUntil);
       });
     }
 
@@ -3100,7 +3073,10 @@
         if (!request || !pageForSlide(request.slideNumber)) return;
         const latestMissingSlides = missingImageWindowSlides(request.slideNumber);
         if (!latestMissingSlides.length) return;
-        markPendingImageWindowSlides(latestMissingSlides);
+        const pendingUntil = Date.now() + IMAGE_WINDOW_PENDING_TTL_MS;
+        latestMissingSlides.forEach(pageNumber => {
+          pendingImageRequests.set(pageImageCacheKey(pageNumber), pendingUntil);
+        });
         Streamlit.setComponentValue({
           action: 'reader_position',
           token: createComponentToken(),
@@ -3110,42 +3086,6 @@
           imageWindowSlideNumbers: latestMissingSlides,
         });
       }, IMAGE_WINDOW_NOTIFY_IDLE_MS);
-    }
-
-    function notifyReaderPosition(slideNumber = currentSlideNumber, delayMs = READER_POSITION_NOTIFY_IDLE_MS) {
-      const targetSlide = Number(slideNumber || currentSlideNumber || 0);
-      if (!deckId || !pageForSlide(targetSlide)) return;
-      const imageWindowSlideNumbers = desiredImageWindowSlideNumbers(targetSlide);
-      const notifyKey = `${deckId}:${targetSlide}:${imageWindowSlideNumbers.join(',')}`;
-      window.clearTimeout(readerPositionNotifyTimer);
-      readerPositionNotifyTimer = null;
-      if (notifyKey === lastReaderPositionNotifyKey) {
-        pendingReaderPositionNotify = null;
-        return;
-      }
-      pendingReaderPositionNotify = {
-        slideNumber: targetSlide,
-        notifyKey,
-      };
-      readerPositionNotifyTimer = window.setTimeout(() => {
-        const request = pendingReaderPositionNotify;
-        pendingReaderPositionNotify = null;
-        readerPositionNotifyTimer = null;
-        if (!request || !pageForSlide(request.slideNumber)) return;
-        const latestImageWindowSlideNumbers = desiredImageWindowSlideNumbers(request.slideNumber);
-        const latestNotifyKey = `${deckId}:${Number(request.slideNumber)}:${latestImageWindowSlideNumbers.join(',')}`;
-        if (latestNotifyKey === lastReaderPositionNotifyKey) return;
-        lastReaderPositionNotifyKey = latestNotifyKey;
-        markPendingImageWindowSlides(latestImageWindowSlideNumbers);
-        Streamlit.setComponentValue({
-          action: 'reader_position',
-          token: createComponentToken(),
-          deckId,
-          slideNumber: Number(request.slideNumber),
-          imageWindowRadius: IMAGE_PREFETCH_RADIUS,
-          imageWindowSlideNumbers: latestImageWindowSlideNumbers,
-        });
-      }, Math.max(0, Number(delayMs) || 0));
     }
 
     function ensureNearbyContent(slideNumber) {
@@ -3655,7 +3595,6 @@
         } else {
           saveScrollState();
         }
-        notifyReaderPosition(currentSlideNumber);
       }
     }
 
@@ -3949,16 +3888,9 @@
     function questionById(questionId) {
       const targetId = Number(questionId || 0);
       if (!targetId) return null;
-      const findInItems = items => {
-        for (const item of (Array.isArray(items) ? items : [])) {
-          if (Number(questionIdForItem(item)) === targetId) return item;
-          const found = findInItems(item.children);
-          if (found) return found;
-        }
-        return null;
-      };
       for (const page of pages) {
-        const found = findInItems(page.questions);
+        const found = (Array.isArray(page.questions) ? page.questions : [])
+          .find(item => Number(questionIdForItem(item)) === targetId);
         if (found) return found;
       }
       return null;
@@ -3966,8 +3898,6 @@
 
     function childQuestionsFor(parentQuestionId) {
       const parentId = Number(parentQuestionId || 0);
-      const parent = questionById(parentId);
-      if (Array.isArray(parent?.children)) return parent.children;
       return allQuestionsForCurrentPage().filter(item => Number(item.parentQuestionId || 0) === parentId);
     }
 
@@ -4482,15 +4412,11 @@
         pendingImageRequests.clear();
         window.clearTimeout(nearbyContentTimer);
         window.clearTimeout(positionNotifyTimer);
-        window.clearTimeout(readerPositionNotifyTimer);
         nearbyContentTimer = null;
         positionNotifyTimer = null;
-        readerPositionNotifyTimer = null;
         pendingNearbySlideNumber = null;
         pendingImageWindowRequest = null;
-        pendingReaderPositionNotify = null;
         lastPositionNotifyKey = '';
-        lastReaderPositionNotifyKey = '';
         canvasQuestionFocusPending = false;
       }
       deckId = nextDeckId;
@@ -4893,43 +4819,16 @@
       options = options || {};
       const questionId = questionIdForItem(item);
       const isChild = Number(item.parentQuestionId || 0) > 0;
-      const depth = Math.max(0, Number(item.depth || 0));
-      const depthLabel = depth === 0 ? '主插问' : `子插问 L${depth}`;
-      const quoteSource = item.quoteSource ? ` | 引用：${item.quoteSource}` : '';
-      const status = item.status ? ` | 状态：${item.status}` : '';
-      const learningBadges = [
-        item.understood ? 'understood' : '',
-        item.needReview ? 'review' : '',
-        item.knowledgeId ? `knowledge #${item.knowledgeId}` : '',
-      ].filter(Boolean).join(' | ');
-      const learningMeta = learningBadges ? ` | ${learningBadges}` : '';
-      const indent = isChild ? Math.min(depth, 5) * 14 : 0;
       return `
-        <div class="chat-turn ${isChild ? 'child-question' : ''}" data-question-id="${questionId || ''}" data-depth="${depth}" style="${indent ? `margin-left:${indent}px` : ''}">
+        <div class="chat-turn ${isChild ? 'child-question' : ''}" data-question-id="${questionId || ''}" data-depth="${Number(item.depth || 0)}">
           ${renderChatQuestion(item)}
           <div class="chat-answer">
             <div class="chat-answer-body" data-question-id="${questionId || ''}" data-slide-number="${currentSlideNumber}">${renderMarkdown(item.answer || '')}</div>
           </div>
-          <div class="chat-turn-meta">${escapeHtml(depthLabel + status + quoteSource + learningMeta)} | ${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '| ' + escapeHtml(item.createdAt) : ''}</div>
-          ${options.inChildPanel ? '' : `<div class="chat-turn-actions">
-            <button type="button" data-open-child-chat="${questionId || ''}">继续追问</button>
-            <button type="button" data-question-status="understood" data-question-id="${questionId || ''}">标记已理解</button>
-            <button type="button" data-question-status="review" data-question-id="${questionId || ''}">加入复习</button>
-            <button type="button" data-question-status="knowledge_card" data-question-id="${questionId || ''}">转知识卡片</button>
-            <button type="button" data-question-close="${questionId || ''}">关闭</button>
-          </div>`}
+          <div class="chat-turn-meta">${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '· ' + escapeHtml(item.createdAt) : ''}</div>
+          ${options.inChildPanel ? '' : `<div class="chat-turn-actions"><button type="button" data-open-child-chat="${questionId || ''}">子插问</button></div>`}
         </div>
       `;
-    }
-
-    function renderQuestionThread(item, visited = new Set()) {
-      const questionId = questionIdForItem(item);
-      if (questionId && visited.has(questionId)) return '';
-      if (questionId) visited.add(questionId);
-      return [
-        renderChatTurn(item),
-        ...childQuestionsFor(questionId).map(child => renderQuestionThread(child, new Set(visited))),
-      ].join('');
     }
 
     function renderChatForPage(slideNumber, options = {}) {
@@ -4962,7 +4861,13 @@
       const previousScrollTop = canvasMessages.scrollTop;
       const focusQuestionId = Number(options.focusQuestionId || 0)
         || (options.focusLatestQuestion ? Number(questionIdForItem(rootMessages[rootMessages.length - 1]) || 0) : 0);
-      canvasMessages.innerHTML = rootMessages.map(item => renderQuestionThread(item)).join('');
+      canvasMessages.innerHTML = rootMessages.map(item => [
+        renderChatTurn(item),
+        ...messages
+          .filter(child => Number(child.rootQuestionId || child.id || 0) === Number(item.rootQuestionId || item.id || 0)
+            && Number(child.parentQuestionId || 0) > 0)
+          .map(child => renderChatTurn(child)),
+      ].join('')).join('');
       if (options.preserveScroll) {
         canvasMessages.scrollTop = previousScrollTop;
       } else if (focusQuestionId) {
@@ -5062,7 +4967,7 @@
         childChatLayers = childChatLayers.slice(0, index);
         renderChildQuestionStack({ scrollPositions: childScrollPositions });
       });
-      sendQuestionClose(layer.parentQuestionId);
+      sendQuestionThreadMerge(layer.parentQuestionId);
     }
 
     function isNearChatBottom(container, threshold = (typeof CHAT_BOTTOM_THRESHOLD === 'number' ? CHAT_BOTTOM_THRESHOLD : 56)) {
@@ -5456,16 +5361,6 @@
       submitInputOnEnter(event, () => sendChildQuestion(input.dataset.childInput));
     });
     canvasMessages.addEventListener('click', (event) => {
-      const closeButton = event.target?.closest?.('[data-question-close]');
-      if (closeButton) {
-        sendQuestionClose(closeButton.dataset.questionClose);
-        return;
-      }
-      const statusButton = event.target?.closest?.('[data-question-status]');
-      if (statusButton) {
-        sendQuestionStatus(statusButton.dataset.questionId, statusButton.dataset.questionStatus);
-        return;
-      }
       const button = event.target?.closest?.('[data-open-child-chat]');
       if (!button) return;
       const questionId = Number(button.dataset.openChildChat || 0);

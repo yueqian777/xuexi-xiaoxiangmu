@@ -130,7 +130,6 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "wrapMarkdownSelection",
             "renderChatQuestion",
             "renderChatTurn",
-            "renderQuestionThread",
             "scrollChatQuestionToTop",
             "isNearChatBottom",
             "setChatBottomButtonVisible",
@@ -166,7 +165,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "scrollChildPanelToQuestionTop",
             "childLayerScrollPositions",
             "renderChildQuestionStack",
-            "sendQuestionClose",
+            "sendQuestionThreadMerge",
             "closeChildLayersForSlideChange",
             "openChildChatFromQuote",
             "closeChildLayer",
@@ -617,7 +616,6 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             function syncActivePageDom() {}
             function centerPage() {}
             function saveScrollState() {}
-            function notifyReaderPosition() {}
 
             setActive(5, { scrollNote: false });
             if (hydratedSlide !== 5) {
@@ -1384,7 +1382,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             if (suppressObserverUntil <= 0) {
               throw new Error(String(suppressObserverUntil));
             }
-            if (emitted.length !== 1 || emitted[0].action !== 'close_slide_question' || emitted[0].questionId !== 10) {
+            if (emitted.length !== 1 || emitted[0].action !== 'merge_question_thread' || emitted[0].questionId !== 10) {
               throw new Error(JSON.stringify(emitted));
             }
             """
@@ -1583,7 +1581,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             r'<button[^>]+class="[^"]*chat-scroll-bottom[^"]*child-chat-bottom',
         )
 
-    def test_closing_child_layer_marks_closed_anchor_without_reparenting(self):
+    def test_closing_child_layer_sends_merge_for_closed_anchor(self):
         self.run_js(
             r"""
             const emitted = [];
@@ -1610,13 +1608,13 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             if (childChatLayers.length !== 0) {
               throw new Error(JSON.stringify(childChatLayers));
             }
-            if (emitted.length !== 1 || emitted[0].action !== 'close_slide_question' || emitted[0].questionId !== 10) {
+            if (emitted.length !== 1 || emitted[0].action !== 'merge_question_thread' || emitted[0].questionId !== 10) {
               throw new Error(JSON.stringify(emitted));
             }
             """
         )
 
-    def test_slide_change_clears_open_child_stack_without_persisting_status_change(self):
+    def test_slide_change_merges_open_child_stack_before_clearing(self):
         self.run_js(
             r"""
             const emitted = [];
@@ -1636,7 +1634,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             if (childChatLayers.length !== 0) {
               throw new Error(JSON.stringify(childChatLayers));
             }
-            if (emitted.length !== 0) {
+            if (emitted.length !== 1 || emitted[0].action !== 'merge_question_thread' || emitted[0].questionId !== 10) {
               throw new Error(JSON.stringify(emitted));
             }
             """

@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -95,6 +96,24 @@ class StreamlitEnterSubmitShortcutTest(unittest.TestCase):
 
         self.assertIn("enter_submit_shortcut.js", source)
         self.assertIn("ENTER_SUBMIT_SHORTCUT_SCRIPT", source)
+
+    def test_global_dom_guard_uses_streamlit_iframe(self):
+        import app
+
+        calls = []
+
+        def fake_iframe(src, **kwargs):
+            calls.append((src, kwargs))
+
+        with mock.patch.object(app.st, "iframe", side_effect=fake_iframe):
+            app._install_browser_dom_guard()
+
+        self.assertEqual(len(calls), 1)
+        src, kwargs = calls[0]
+        self.assertIn("rootWindow.__intpCopyShortcutGuardInstalled", src)
+        self.assertIn("installEnterSubmitShortcut", src)
+        self.assertEqual(kwargs["height"], 1)
+        self.assertEqual(kwargs["width"], 1)
 
     def test_streamlit_shortcut_submits_enter_without_hijacking_delete(self):
         self.run_js(
