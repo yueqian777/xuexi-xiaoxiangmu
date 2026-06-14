@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+import sqlite3
 import unittest
 from unittest.mock import patch
 
@@ -411,6 +412,40 @@ class PptCanvasQuestionTest(unittest.TestCase):
 
         generate_text.assert_not_called()
         update_bookmark.assert_called_once_with(11, 9, enabled=True, title="Chapter start")
+
+    def test_bookmark_write_error_is_reported_without_traceback(self):
+        deck = {"id": 3, "title": "Deck", "subject": "Subject"}
+        slide = {"id": 9, "slide_number": 2, "title": "Signals", "slide_text": ""}
+        payload = {
+            "action": "rename_slide_bookmark",
+            "deckId": 3,
+            "slideNumber": 2,
+            "token": "tok-readonly-bookmark",
+            "title": "Chapter start",
+        }
+        session_state = {}
+
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor.st, "toast") as toast,
+            patch.object(ppt_tutor.st, "error") as error,
+            patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 11})()),
+            patch.object(ppt_tutor, "generate_text") as generate_text,
+            patch.object(
+                ppt_tutor,
+                "update_slide_bookmark",
+                side_effect=sqlite3.OperationalError("attempt to write a readonly database"),
+            ),
+        ):
+            ppt_tutor._handle_synced_reader_action(deck, [slide], {}, payload, [])
+
+        generate_text.assert_not_called()
+        toast.assert_not_called()
+        error.assert_called_once()
+        self.assertEqual(
+            session_state["ppt_slide_bookmark_last_token_3"],
+            "tok-readonly-bookmark",
+        )
 
 
 if __name__ == "__main__":

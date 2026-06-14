@@ -1505,6 +1505,7 @@
     const pageImageCache = new Map();
     const pendingImageRequests = new Map();
     const pendingExplanationSaves = new Map();
+    const pendingBookmarkSaves = new Map();
     const noteBodySourceMaps = new WeakMap();
     const PENDING_SAVE_TTL_MS = 30000;
     const VIEWPORT_ANCHOR_MS = 1400;
@@ -3192,6 +3193,30 @@
         .sort((a, b) => Number(a.slideNumber || 0) - Number(b.slideNumber || 0));
     }
 
+    function applyPendingBookmarkOverrides(nextPages) {
+      const now = Date.now();
+      return nextPages.map(page => {
+        const slideNumber = Number(page.slideNumber);
+        const pending = pendingBookmarkSaves.get(slideNumber);
+        if (!pending) return page;
+        if (now - pending.startedAt > PENDING_SAVE_TTL_MS) {
+          pendingBookmarkSaves.delete(slideNumber);
+          return page;
+        }
+        const pendingEnabled = Boolean(pending.enabled);
+        const pendingTitle = String(pending.title ?? '').trim();
+        const titleMatches = pending.title === undefined
+          || String(page.bookmarkTitle || '').trim() === pendingTitle;
+        if (Boolean(page.bookmarkEnabled) === pendingEnabled && titleMatches) {
+          pendingBookmarkSaves.delete(slideNumber);
+          return page;
+        }
+        const nextPage = { ...page, bookmarkEnabled: pendingEnabled };
+        if (pending.title !== undefined) nextPage.bookmarkTitle = pendingTitle;
+        return nextPage;
+      });
+    }
+
     function renderBookmarkIcon(active) {
       const fill = active ? 'currentColor' : 'none';
       return `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="${fill}" d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>`;
@@ -3230,6 +3255,10 @@
       return bookmarkPopover.innerHTML;
     }
 
+    function isEditingBookmarkTitle() {
+      return Boolean(document?.activeElement?.closest?.('.bookmark-title-input'));
+    }
+
     function updatePageBookmarkButton(page) {
       if (typeof document === 'undefined') return;
       const slideNumber = Number(page?.slideNumber || 0);
@@ -3243,20 +3272,27 @@
       button.innerHTML = renderBookmarkIcon(enabled);
     }
 
-    function updateBookmarkControls() {
+    function updateBookmarkControls(options) {
+      options = options || {};
       const count = bookmarkedPages().length;
       pages.forEach(updatePageBookmarkButton);
       if (bookmarkMenuButton) {
         bookmarkMenuButton.classList.toggle('active', count > 0);
         bookmarkMenuButton.innerHTML = `${renderBookmarkIcon(count > 0)}<span>书签</span><span class="bookmark-count">${count}</span>`;
       }
-      if (bookmarkPopover && !bookmarkPopover.hidden) {
+      const shouldRenderPanel = options.renderPanel !== false && !isEditingBookmarkTitle();
+      if (bookmarkPopover && !bookmarkPopover.hidden && shouldRenderPanel) {
         renderBookmarkPanel();
       }
     }
 
     function sendBookmarkUpdate(page, enabled, title, action) {
       if (!page || !deckId) return false;
+      pendingBookmarkSaves.set(Number(page.slideNumber), {
+        enabled: Boolean(enabled),
+        title: title === undefined ? undefined : String(title ?? '').trim(),
+        startedAt: Date.now(),
+      });
       const payload = {
         action: action || 'toggle_slide_bookmark',
         token: createComponentToken(),
@@ -4410,6 +4446,7 @@
       if (nextDeckId && nextDeckId !== deckId) {
         hasCenteredOnEntry = false;
         pendingExplanationSaves.clear();
+        pendingBookmarkSaves.clear();
         hydratingNotePromises.clear();
         pendingTypesetTargets.clear();
         pageImageCache.clear();
@@ -4424,7 +4461,7 @@
         canvasQuestionFocusPending = false;
       }
       deckId = nextDeckId;
-      const rawNextPages = applyPendingExplanationOverrides(incomingPages);
+      const rawNextPages = applyPendingBookmarkOverrides(applyPendingExplanationOverrides(incomingPages));
       pages = rawNextPages;
       const stored = readScrollState();
       const targetSlide = initialReaderTargetSlide(args, stored, isSameDeckRefresh);

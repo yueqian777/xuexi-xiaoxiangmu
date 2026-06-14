@@ -172,9 +172,11 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "closeChildLayer",
             "bookmarkTitleForPage",
             "bookmarkedPages",
+            "applyPendingBookmarkOverrides",
             "renderBookmarkIcon",
             "renderBookmarkList",
             "renderBookmarkPanel",
+            "isEditingBookmarkTitle",
             "updateBookmarkControls",
             "updatePageBookmarkButton",
             "sendBookmarkUpdate",
@@ -1720,6 +1722,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             var document = { querySelector() { return null; } };
             var bookmarkMenuButton = null;
             var bookmarkPopover = null;
+            const pendingBookmarkSaves = new Map();
 
             togglePageBookmark(2);
             if (!pages[0].bookmarkEnabled) {
@@ -1730,6 +1733,74 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             }
             if ('title' in emitted[0]) {
               throw new Error(JSON.stringify(emitted[0]));
+            }
+            """
+        )
+
+    def test_pending_bookmark_override_prevents_immediate_server_echo_revert(self):
+        self.run_js(
+            r"""
+            const pendingBookmarkSaves = new Map();
+            const PENDING_SAVE_TTL_MS = 10000;
+            pendingBookmarkSaves.set(2, {
+              enabled: true,
+              title: 'Chapter start',
+              startedAt: Date.now(),
+            });
+
+            const result = applyPendingBookmarkOverrides([{
+              slideNumber: 2,
+              title: 'Signals',
+              bookmarkEnabled: false,
+              bookmarkTitle: '',
+            }]);
+
+            if (!result[0].bookmarkEnabled || result[0].bookmarkTitle !== 'Chapter start') {
+              throw new Error(JSON.stringify(result[0]));
+            }
+            """
+        )
+
+    def test_update_bookmark_controls_preserves_open_editor_dom(self):
+        self.run_js(
+            r"""
+            var pages = [
+              { slideNumber: 2, title: 'Signals', bookmarkEnabled: true, bookmarkTitle: 'Draft title' },
+            ];
+            const activeInput = {
+              closest(selector) {
+                return selector === '.bookmark-title-input' ? this : null;
+              },
+            };
+            var document = {
+              activeElement: activeInput,
+              querySelector() { return null; },
+            };
+            var bookmarkMenuButton = {
+              classList: { toggle() {} },
+              innerHTML: '',
+            };
+            let renderCount = 0;
+            var bookmarkPopover = {
+              hidden: false,
+              set innerHTML(value) {
+                renderCount += 1;
+                this._html = value;
+              },
+              get innerHTML() {
+                return this._html || '';
+              },
+            };
+
+            updateBookmarkControls();
+            if (renderCount !== 0) {
+              throw new Error(`unexpected render while editing: ${renderCount}`);
+            }
+
+            document.activeElement = null;
+            updateBookmarkControls();
+            if (renderCount !== 1) {
+              throw new Error(`expected render after edit blur: ${renderCount}`);
             }
             """
         )
@@ -1746,8 +1817,57 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             var document = { querySelector() { return null; } };
             var bookmarkMenuButton = null;
             var bookmarkPopover = null;
+            const pendingBookmarkSaves = new Map();
 
             renameBookmark(2, '  Chapter start  ');
+            if (!pages[0].bookmarkEnabled || pages[0].bookmarkTitle !== 'Chapter start') {
+              throw new Error(JSON.stringify(pages[0]));
+            }
+            if (emitted.length !== 1 || emitted[0].action !== 'rename_slide_bookmark' || emitted[0].title !== 'Chapter start') {
+              throw new Error(JSON.stringify(emitted));
+            }
+            """
+        )
+
+    def test_rename_bookmark_does_not_replace_focused_title_input(self):
+        self.run_js(
+            r"""
+            const emitted = [];
+            var pages = [
+              { slideNumber: 2, title: 'Signals', bookmarkEnabled: true, bookmarkTitle: 'Old title' },
+            ];
+            var deckId = 7;
+            var Streamlit = { setComponentValue: value => emitted.push(value) };
+            const activeInput = {
+              closest(selector) {
+                return selector === '.bookmark-title-input' ? this : null;
+              },
+            };
+            var document = {
+              activeElement: activeInput,
+              querySelector() { return null; },
+            };
+            var bookmarkMenuButton = {
+              classList: { toggle() {} },
+              innerHTML: '',
+            };
+            let renderCount = 0;
+            var bookmarkPopover = {
+              hidden: false,
+              set innerHTML(value) {
+                renderCount += 1;
+                this._html = value;
+              },
+              get innerHTML() {
+                return this._html || '';
+              },
+            };
+            const pendingBookmarkSaves = new Map();
+
+            renameBookmark(2, 'Chapter start');
+            if (renderCount !== 0) {
+              throw new Error(`bookmark editor was replaced: ${renderCount}`);
+            }
             if (!pages[0].bookmarkEnabled || pages[0].bookmarkTitle !== 'Chapter start') {
               throw new Error(JSON.stringify(pages[0]));
             }

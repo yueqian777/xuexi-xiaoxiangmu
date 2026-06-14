@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date
@@ -1167,11 +1168,17 @@ def _handle_synced_reader_action(
         last_bookmark_token_key = f"ppt_slide_bookmark_last_token_{deck['id']}"
         if token and st.session_state.get(last_bookmark_token_key) == token:
             return
-        if action == "toggle_slide_bookmark":
-            update_slide_bookmark(user_id, int(slide["id"]), enabled=bool(payload.get("enabled")))
-        else:
-            title = str(payload.get("title") or "").strip()
-            update_slide_bookmark(user_id, int(slide["id"]), enabled=True, title=title)
+        try:
+            if action == "toggle_slide_bookmark":
+                update_slide_bookmark(user_id, int(slide["id"]), enabled=bool(payload.get("enabled")))
+            else:
+                title = str(payload.get("title") or "").strip()
+                update_slide_bookmark(user_id, int(slide["id"]), enabled=True, title=title)
+        except sqlite3.Error as exc:
+            if token:
+                st.session_state[last_bookmark_token_key] = token
+            st.error(f"书签保存失败：{exc}")
+            return
         if token:
             st.session_state[last_bookmark_token_key] = token
         st.toast(f"第 {slide['slide_number']} 页书签已更新。")
