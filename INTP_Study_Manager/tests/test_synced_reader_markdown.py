@@ -95,6 +95,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "restoreHighlightSegments",
             "renderFallbackCodeSegment",
             "renderFallbackMarkdown",
+            "replaceLiteral",
             "renderMarkdown",
             "renderSafeExplanationMarkdown",
             "noteDisplayMarkdown",
@@ -657,6 +658,42 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             ]);
             if (restored !== huge) {
               throw new Error(`unexpected rewrite length=${restored.length}`);
+            }
+            """
+        )
+
+    def test_restore_markdown_code_segments_keeps_dollar_backtick_literal(self):
+        self.run_js(
+            r"""
+            const restored = restoreMarkdownCodeSegments('before TOKEN after', [
+              { token: 'TOKEN', segment: '`$31:25$`' },
+            ]);
+            if (restored !== 'before `$31:25$` after') {
+              throw new Error(restored);
+            }
+            """
+        )
+
+    def test_fallback_markdown_keeps_bit_range_code_spans_near_page_heading(self):
+        self.run_js(
+            r"""
+            global.window = {};
+            const source = [
+              '- `funct7`: bit `$31:25$`, 7 bits.',
+              '## \u7b2c 279 \u9875\uff1a279',
+              '- `rs2`: bit `$24:20$`, 5 bits.',
+            ].join('\n');
+
+            const rendered = renderMarkdown(source);
+            const headingCount = (rendered.match(/\u7b2c 279 \u9875/g) || []).length;
+            if (headingCount !== 1) {
+              throw new Error(rendered);
+            }
+            if (!rendered.includes('<code>$31:25$</code>') || !rendered.includes('<code>$24:20$</code>')) {
+              throw new Error(rendered);
+            }
+            if (rendered.includes('$31:25##') || rendered.includes('$31:25- <code>funct7')) {
+              throw new Error(rendered);
             }
             """
         )

@@ -1528,6 +1528,10 @@
         .replaceAll("'", '&#039;');
     }
 
+    function replaceLiteral(value, token, replacement) {
+      return String(value ?? '').split(String(token)).join(String(replacement ?? ''));
+    }
+
     function findUnescaped(source, token, start) {
       let index = start;
       while (index < source.length) {
@@ -1787,7 +1791,7 @@
       const sourceLength = output.length;
       segments.forEach(({ token, segment }) => {
         if (sourceLength > 500000 && !output.includes(token)) return;
-        output = output.replaceAll(token, segment);
+        output = replaceLiteral(output, token, segment);
       });
       return output;
     }
@@ -1820,8 +1824,8 @@
       let html = String(value ?? '');
       segments.forEach(({ token, segment }) => {
         const mathText = escapeHtml(segment);
-        html = html.replaceAll(new RegExp(`<code>\\s*${token}\\s*</code>`, 'g'), mathText);
-        html = html.replaceAll(token, mathText);
+        html = html.replaceAll(new RegExp(`<code>\\s*${token}\\s*</code>`, 'g'), () => mathText);
+        html = replaceLiteral(html, token, mathText);
       });
       return html;
     }
@@ -1851,7 +1855,7 @@
     function restoreHighlightSegments(value, segments) {
       let html = String(value ?? '');
       segments.forEach(({ token, segment }) => {
-        html = html.replaceAll(token, `<mark class="reader-highlight">${escapeHtml(segment)}</mark>`);
+        html = replaceLiteral(html, token, `<mark class="reader-highlight">${escapeHtml(segment)}</mark>`);
       });
       return html;
     }
