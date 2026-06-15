@@ -8,6 +8,9 @@ OCR / 原始页标题（仅作参考，不要直接照抄为最终标题）：{s
 当前页内容：
 {slide_text}
 
+本页动画过程：
+{animation_summary}
+
 文档 / 目录块上下文：
 {context_package}
 

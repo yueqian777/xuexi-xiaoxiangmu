@@ -52,6 +52,17 @@ def _init_page_edit_schema(conn: sqlite3.Connection) -> None:
             slide_id INTEGER NOT NULL,
             question TEXT DEFAULT ''
         );
+        CREATE TABLE ppt_slide_animation_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            deck_id INTEGER NOT NULL,
+            slide_id INTEGER NOT NULL,
+            slide_number INTEGER NOT NULL,
+            state_index INTEGER NOT NULL,
+            label TEXT DEFAULT '',
+            image_path TEXT DEFAULT '',
+            step_summary TEXT DEFAULT ''
+        );
         CREATE TABLE ppt_sections (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -83,6 +94,18 @@ def _init_page_edit_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute("INSERT INTO slide_explanations (user_id, slide_id, explanation) VALUES (7, 102, 'explain page 2')")
     conn.execute("INSERT INTO slide_questions (user_id, slide_id, question) VALUES (7, 103, 'question page 3')")
+    conn.executemany(
+        """
+        INSERT INTO ppt_slide_animation_states (
+            user_id, deck_id, slide_id, slide_number, state_index, label, image_path, step_summary
+        )
+        VALUES (7, 5, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (102, 2, 0, "page 2 start", "p2-0.png", "page 2 start"),
+            (103, 3, 0, "page 3 start", "p3-0.png", "page 3 start"),
+        ],
+    )
     conn.execute(
         """
         INSERT INTO ppt_sections (user_id, deck_id, section_index, start_slide, end_slide)
@@ -130,6 +153,10 @@ class PptServicePageEditTest(unittest.TestCase):
         question = conn.execute("SELECT slide_id, question FROM slide_questions").fetchone()
         self.assertEqual(explanation, (102, "explain page 2"))
         self.assertEqual(question, (103, "question page 3"))
+        animation_rows = conn.execute(
+            "SELECT slide_id, slide_number, image_path FROM ppt_slide_animation_states ORDER BY slide_id"
+        ).fetchall()
+        self.assertEqual(animation_rows, [(102, 3, "p2-0.png"), (103, 4, "p3-0.png")])
         self.assertEqual(conn.execute("SELECT slide_count FROM ppt_decks WHERE id = 5").fetchone()[0], 4)
         self.assertEqual(conn.execute("SELECT start_slide, end_slide FROM ppt_sections").fetchone(), (1, 4))
         self.assertEqual(conn.execute("SELECT slide_number FROM ppt_study_asset_pages").fetchone()[0], 4)
@@ -162,6 +189,8 @@ class PptServicePageEditTest(unittest.TestCase):
         self.assertEqual(slide, (102, 2, "Replacement Page", "replacement text", "replacement notes", "replacement.png"))
         self.assertEqual(conn.execute("SELECT slide_id, explanation FROM slide_explanations").fetchone(), (102, "explain page 2"))
         self.assertEqual(conn.execute("SELECT slide_id, question FROM slide_questions").fetchone(), (103, "question page 3"))
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM ppt_slide_animation_states WHERE slide_id = 102").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM ppt_slide_animation_states WHERE slide_id = 103").fetchone()[0], 1)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM ppt_slides").fetchone()[0], 3)
         self.assertEqual(conn.execute("SELECT slide_count FROM ppt_decks WHERE id = 5").fetchone()[0], 3)
 
@@ -182,7 +211,12 @@ class PptServicePageEditTest(unittest.TestCase):
         self.assertEqual(rows, [(101, 1, "Page 1"), (103, 2, "Page 3")])
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM slide_explanations WHERE slide_id = 102").fetchone()[0], 0)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM slide_questions WHERE slide_id = 102").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM ppt_slide_animation_states WHERE slide_id = 102").fetchone()[0], 0)
         self.assertEqual(conn.execute("SELECT slide_id, question FROM slide_questions").fetchone(), (103, "question page 3"))
+        self.assertEqual(
+            conn.execute("SELECT slide_id, slide_number FROM ppt_slide_animation_states WHERE slide_id = 103").fetchone(),
+            (103, 2),
+        )
         self.assertEqual(conn.execute("SELECT slide_count FROM ppt_decks WHERE id = 5").fetchone()[0], 2)
         self.assertEqual(conn.execute("SELECT start_slide, end_slide FROM ppt_sections").fetchone(), (1, 2))
         self.assertEqual(conn.execute("SELECT slide_number FROM ppt_study_asset_pages").fetchone()[0], 2)

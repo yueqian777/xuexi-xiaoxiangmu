@@ -185,6 +185,9 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "jumpToBookmark",
             "closeBookmarkPanel",
             "toggleBookmarkPanel",
+            "animationStateKey",
+            "stopAnimationPlayback",
+            "resetAnimationStateForSlide",
             "setActive",
         ]
         cls.js_helpers = "\n\n".join(

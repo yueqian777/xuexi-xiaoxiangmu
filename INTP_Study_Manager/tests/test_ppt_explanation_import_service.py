@@ -28,7 +28,14 @@ class PptExplanationImportServiceTest(unittest.TestCase):
         db.init_db()
         self.user_id = 3
 
-    def _build_package(self, *, package_type="ppt_explanation_share", privacy_mode="public_ppt_explanation_only", omit_slide=False):
+    def _build_package(
+        self,
+        *,
+        package_type="ppt_explanation_share",
+        privacy_mode="public_ppt_explanation_only",
+        omit_slide=False,
+        slide_markdown=None,
+    ):
         zip_path = self.data_dir / "share.zip"
         manifest = {
             "package_type": package_type,
@@ -55,7 +62,8 @@ class PptExplanationImportServiceTest(unittest.TestCase):
             if not omit_slide:
                 archive.writestr(
                     "slides/slide-001.md",
-                    "# Slide 001: FIR basics\n\n## Slide Content\n\npublic text\n\n## AI Explanation\n\npublic explanation",
+                    slide_markdown
+                    or "# Slide 001: FIR basics\n\n## Slide Content\n\npublic text\n\n## AI Explanation\n\npublic explanation",
                 )
             archive.writestr("images/slide-001.png", b"fake-png")
         return zip_path
@@ -167,6 +175,33 @@ class PptExplanationImportServiceTest(unittest.TestCase):
         self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM knowledge_cards")["count"], 0)
         self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM review_tasks")["count"], 0)
 
+    def test_import_preserves_explanation_that_starts_with_markdown_heading(self):
+        zip_path = self._build_package(
+            slide_markdown=(
+                "# Slide 001: FIR basics\n\n"
+                "## PPT/PDF 页面文字\n\n"
+                "public text\n\n"
+                "## 页面图片\n\n"
+                "![页面图片](../images/slide-001.png)\n\n"
+                "## AI 逐页讲解\n\n"
+                "## 第 1 页：FIR basics\n\n"
+                "### 本页核心\n"
+                "- explanation body\n\n"
+                "## 自动摘要\n\n"
+                "summary should not be imported as explanation\n\n"
+                "## 导航\n\n"
+                "- 下一页：无"
+            )
+        )
+
+        result = ppt_explanation_import_service.import_share_package(self.user_id, zip_path)
+
+        slide = db.fetch_one("SELECT * FROM ppt_slides WHERE deck_id = ?", (result["deck_id"],))
+        explanation = db.fetch_one("SELECT * FROM slide_explanations WHERE slide_id = ?", (slide["id"],))
+        self.assertIn("## 第 1 页：FIR basics", explanation["explanation"])
+        self.assertIn("explanation body", explanation["explanation"])
+        self.assertNotIn("summary should not be imported", explanation["explanation"])
+
     def test_multi_deck_package_previews_and_imports_each_deck_without_learning_state(self):
         zip_path = self._build_multi_deck_package()
 
@@ -219,6 +254,31 @@ class PptExplanationImportServiceTest(unittest.TestCase):
             db.fetch_one("SELECT COUNT(*) AS count FROM ppt_decks WHERE user_id = ?", (self.user_id,))["count"],
             2,
         )
+
+    def test_orphan_package_record_does_not_block_reimport(self):
+        zip_path = self._build_package()
+        db.insert_and_get_id(
+            """
+            INSERT INTO import_packages (
+                user_id, package_id, package_type, package_version, privacy_mode,
+                subject, title, source_filename, manifest_json
+            )
+            VALUES (?, 'ppt-share-test', 'ppt_explanation_share', '1.0', 'public_ppt_explanation_only',
+                    'Signals', 'FIR filters', 'share.zip', '{}')
+            """,
+            (self.user_id,),
+        )
+
+        preview = ppt_explanation_import_service.preview_share_package(self.user_id, zip_path)
+        result = ppt_explanation_import_service.import_share_package(
+            self.user_id,
+            zip_path,
+            duplicate_policy="skip",
+        )
+
+        self.assertFalse(preview["already_imported"])
+        self.assertEqual(result["status"], "imported")
+        self.assertIsNotNone(result["deck_id"])
 
 
 if __name__ == "__main__":

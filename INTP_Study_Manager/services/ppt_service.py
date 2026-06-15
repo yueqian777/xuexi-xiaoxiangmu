@@ -437,6 +437,20 @@ def apply_source_page_to_deck(
 
         if target < 1 or target > max_slide_number:
             raise RuntimeError(f"替换位置必须在 1 到 {max_slide_number} 之间。")
+        target_row = conn.execute(
+            """
+            SELECT id
+            FROM ppt_slides
+            WHERE user_id = ? AND deck_id = ? AND slide_number = ?
+            """,
+            (user.id, deck_id, target),
+        ).fetchone()
+        if target_row is None:
+            raise RuntimeError(f"未找到第 {target} 页，无法替换。")
+        conn.execute(
+            "DELETE FROM ppt_slide_animation_states WHERE user_id = ? AND slide_id = ?",
+            (user.id, int(target_row[0])),
+        )
         cursor = conn.execute(
             """
             UPDATE ppt_slides
@@ -471,6 +485,7 @@ def delete_deck_page(deck: dict, *, target_slide_number: int) -> dict[str, int]:
         slide_id = int(row[0])
         conn.execute("DELETE FROM slide_questions WHERE user_id = ? AND slide_id = ?", (user.id, slide_id))
         conn.execute("DELETE FROM slide_explanations WHERE user_id = ? AND slide_id = ?", (user.id, slide_id))
+        conn.execute("DELETE FROM ppt_slide_animation_states WHERE user_id = ? AND slide_id = ?", (user.id, slide_id))
         conn.execute("DELETE FROM ppt_slides WHERE user_id = ? AND id = ?", (user.id, slide_id))
         conn.execute(
             "DELETE FROM ppt_study_asset_pages WHERE user_id = ? AND deck_id = ? AND slide_number = ?",
@@ -540,6 +555,14 @@ def _shift_slide_numbers_up(conn, user_id: int, deck_id: int, start_slide_number
     )
     conn.execute(
         """
+        UPDATE ppt_slide_animation_states
+        SET slide_number = slide_number + 1
+        WHERE user_id = ? AND deck_id = ? AND slide_number >= ?
+        """,
+        (user_id, deck_id, start_slide_number),
+    )
+    conn.execute(
+        """
         UPDATE ppt_study_asset_pages
         SET slide_number = slide_number + 1
         WHERE user_id = ? AND deck_id = ? AND slide_number >= ?
@@ -575,6 +598,14 @@ def _shift_slide_numbers_down(conn, user_id: int, deck_id: int, deleted_slide_nu
         WHERE user_id = ? AND deck_id = ? AND slide_number < 0
         """,
         (user_id, deck_id),
+    )
+    conn.execute(
+        """
+        UPDATE ppt_slide_animation_states
+        SET slide_number = slide_number - 1
+        WHERE user_id = ? AND deck_id = ? AND slide_number > ?
+        """,
+        (user_id, deck_id, deleted_slide_number),
     )
     conn.execute(
         """

@@ -272,6 +272,22 @@ def _run_init_db() -> None:
                 FOREIGN KEY (slide_id) REFERENCES ppt_slides(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS ppt_slide_animation_states (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                deck_id INTEGER NOT NULL,
+                slide_id INTEGER NOT NULL,
+                slide_number INTEGER NOT NULL,
+                state_index INTEGER NOT NULL,
+                label TEXT DEFAULT '',
+                image_path TEXT DEFAULT '',
+                step_summary TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                FOREIGN KEY (deck_id) REFERENCES ppt_decks(id) ON DELETE CASCADE,
+                FOREIGN KEY (slide_id) REFERENCES ppt_slides(id) ON DELETE CASCADE,
+                UNIQUE(user_id, slide_id, state_index)
+            );
+
             CREATE TABLE IF NOT EXISTS slide_questions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL DEFAULT 0,
@@ -499,6 +515,12 @@ def _run_init_db() -> None:
                 ON slide_explanations(user_id, slide_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_slide_explanations_slide
                 ON slide_explanations(slide_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ppt_slide_animation_states_user_slide_index
+                ON ppt_slide_animation_states(user_id, slide_id, state_index);
+            CREATE INDEX IF NOT EXISTS idx_ppt_slide_animation_states_user_deck_slide
+                ON ppt_slide_animation_states(user_id, deck_id, slide_number ASC, state_index ASC);
+            CREATE INDEX IF NOT EXISTS idx_ppt_slide_animation_states_slide
+                ON ppt_slide_animation_states(slide_id, state_index ASC);
             CREATE INDEX IF NOT EXISTS idx_slide_questions_user_slide_created
                 ON slide_questions(user_id, slide_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_slide_questions_user_slide_parent_order

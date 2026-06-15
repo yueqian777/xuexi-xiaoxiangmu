@@ -71,6 +71,84 @@ def update_slide_bookmark(
     )
 
 
+def replace_slide_animation_states(
+    user_id: int,
+    deck_id: int,
+    slide_id: int,
+    slide_number: int,
+    states: list[dict],
+) -> int:
+    user_id_int = int(user_id)
+    deck_id_int = int(deck_id)
+    slide_id_int = int(slide_id)
+    slide_number_int = int(slide_number)
+    normalized = [_normalize_animation_state(state) for state in states]
+    with write_transaction() as conn:
+        conn.execute(
+            """
+            DELETE FROM ppt_slide_animation_states
+            WHERE user_id = ? AND slide_id = ?
+            """,
+            (user_id_int, slide_id_int),
+        )
+        for state in normalized:
+            conn.execute(
+                """
+                INSERT INTO ppt_slide_animation_states (
+                    user_id, deck_id, slide_id, slide_number, state_index,
+                    label, image_path, step_summary
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id_int,
+                    deck_id_int,
+                    slide_id_int,
+                    slide_number_int,
+                    int(state["state_index"]),
+                    state["label"],
+                    state["image_path"],
+                    state["step_summary"],
+                ),
+            )
+    return len(normalized)
+
+
+def animation_states_by_slide_ids(user_id: int, slide_ids: list[int]) -> dict[int, list[dict]]:
+    if not slide_ids:
+        return {}
+    requested = [int(slide_id) for slide_id in slide_ids]
+    result: dict[int, list[dict]] = {slide_id: [] for slide_id in requested}
+    chunk_size = 900
+    for start in range(0, len(requested), chunk_size):
+        chunk = requested[start : start + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = fetch_all(
+            f"""
+            SELECT id, user_id, deck_id, slide_id, slide_number, state_index,
+                   label, image_path, step_summary, created_at
+            FROM ppt_slide_animation_states
+            WHERE user_id = ? AND slide_id IN ({placeholders})
+            ORDER BY slide_number ASC, state_index ASC, id ASC
+            """,
+            (int(user_id), *tuple(chunk)),
+        )
+        for row in rows:
+            slide_id = int(row["slide_id"])
+            if slide_id in result:
+                result[slide_id].append(row)
+    return result
+
+
+def _normalize_animation_state(state: dict) -> dict[str, int | str]:
+    return {
+        "state_index": int(state.get("state_index") or 0),
+        "label": str(state.get("label") or "").strip()[:80],
+        "image_path": str(state.get("image_path") or "").strip(),
+        "step_summary": str(state.get("step_summary") or "").strip()[:500],
+    }
+
+
 def latest_explanation(user_id: int, slide_id: int) -> dict | None:
     return fetch_one(
         """

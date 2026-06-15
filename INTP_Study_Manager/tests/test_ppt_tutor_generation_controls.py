@@ -39,6 +39,11 @@ class PptTutorGenerationControlsTest(unittest.TestCase):
             for node in cls.tree.body
             if isinstance(node, ast.FunctionDef) and node.name == "_render_deck_actions"
         )
+        cls.render_upload_form = next(
+            node
+            for node in cls.tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_render_upload_form"
+        )
         cls.source_page_editor = next(
             node
             for node in cls.tree.body
@@ -133,6 +138,19 @@ class PptTutorGenerationControlsTest(unittest.TestCase):
         self.assertIn("extract_source_pages", nested_calls)
         self.assertIn("apply_source_page_to_deck", nested_calls)
         self.assertIn("delete_deck_page", nested_calls)
+
+    def test_animation_state_generation_hooks_are_exposed(self):
+        action_constants = {
+            item.value
+            for item in ast.walk(self.render_deck_actions)
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        }
+        action_calls = {_call_name(item) for item in ast.walk(self.render_deck_actions) if isinstance(item, ast.Call)}
+        upload_calls = {_call_name(item) for item in ast.walk(self.render_upload_form) if isinstance(item, ast.Call)}
+
+        self.assertIn("生成 / 修复动画状态", action_constants)
+        self.assertIn("_generate_deck_animation_states_best_effort", action_calls)
+        self.assertIn("_generate_deck_animation_states_best_effort", upload_calls)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 from contextlib import nullcontext
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from pages import ppt_tutor
@@ -308,6 +310,48 @@ class PptCanvasQuestionTest(unittest.TestCase):
 
         self.assertTrue(result[0]["bookmarkEnabled"])
         self.assertEqual(result[0]["bookmarkTitle"], "Signals")
+
+    def test_build_reader_payload_includes_animation_states_and_summary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "state-001.png"
+            image_path.write_bytes(b"png")
+            slides = [
+                {
+                    "id": 9,
+                    "slide_number": 2,
+                    "title": "Signals",
+                    "slide_text": "",
+                    "image_path": "",
+                }
+            ]
+
+            with patch.object(ppt_tutor, "_reader_image_url", side_effect=lambda path: f"cache/{Path(path).name}"):
+                result = ppt_tutor._build_reader_payload(
+                    slides,
+                    {},
+                    {},
+                    image_slide_numbers={2},
+                    animation_by_slide_id={
+                        9: [
+                            {
+                                "state_index": 0,
+                                "label": "初始",
+                                "image_path": str(image_path),
+                                "step_summary": "初始状态",
+                            },
+                            {
+                                "state_index": 1,
+                                "label": "第 1 步",
+                                "image_path": str(image_path),
+                                "step_summary": "出现关键公式",
+                            },
+                        ]
+                    },
+                )
+
+        self.assertEqual(len(result[0]["animationStates"]), 2)
+        self.assertEqual(result[0]["animationStates"][1]["image"], "cache/state-001.png")
+        self.assertIn("第 1 步：出现关键公式", result[0]["animationSummary"])
 
     def test_build_reader_payload_normalizes_mineru_latex_for_display(self):
         slides = [

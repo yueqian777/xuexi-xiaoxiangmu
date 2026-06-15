@@ -22,6 +22,7 @@ from db import BASE_DIR, execute, execute_many, fetch_all, fetch_one, insert_and
 from repositories.ppt_repository import (
     add_slide_explanation,
     add_slide_question,
+    animation_states_by_slide_ids,
     flatten_question_subtree,
     get_slide_question_tree,
     latest_explanation,
@@ -45,6 +46,7 @@ from services.api_key_ui import render_local_secret_unlock
 from services.api_runtime import ensure_active_provider, ensure_provider_model, provider_model_state_key, set_active_provider
 from services.auth_service import require_login
 from services.knowledge_card_service import knowledge_card_preview_markdown
+from services.ppt_animation_service import generate_deck_animation_states
 from services.ppt_context_service import (
     build_lightweight_explanation,
     build_slide_context_map,
@@ -487,6 +489,7 @@ def _render_upload_form(*, expanded: bool = False) -> None:
             (user.id, deck_id),
         )
         if deck and slides:
+            _generate_deck_animation_states_best_effort(deck, slides, user=user)
             _activate_newly_uploaded_deck(deck_id, slides)
             _start_document_structure_generation(deck, slides, source="upload")
         st.rerun()
@@ -503,6 +506,7 @@ def _render_deck_actions(
     st.subheader("整份资料逐页分析")
     missing_images = [slide for slide in slides if not _image_exists(slide)]
     can_render_source = _deck_can_render_page_images(deck)
+    can_generate_animation = _deck_can_generate_animation_states(deck)
     cols = st.columns([1.3, 1.3, 2])
     if cols[0].button("生成 / 修复原页面图片", disabled=(not missing_images or not can_render_source)):
         try:
@@ -514,6 +518,12 @@ def _render_deck_actions(
             st.error(f"生成原页面图片失败：{exc}")
     if missing_images and not can_render_source:
         cols[0].caption("导入的公开分享包没有原始 PPT/PDF 时，不能重新渲染原页面图片。")
+    if cols[1].button("生成 / 修复动画状态", disabled=not can_generate_animation):
+        result = _generate_deck_animation_states_best_effort(deck, slides, notify=True)
+        if result and not result.skipped_reason:
+            st.rerun()
+    if not can_generate_animation:
+        cols[1].caption("仅原始 PPTX 文件支持动画状态缓存。")
 
     _render_source_page_editor(deck, slides)
 
@@ -1085,11 +1095,13 @@ def _render_synced_reader(
         if int(slide["slide_number"]) in image_slide_numbers
     ]
     question_by_slide_id = _questions_by_slide_ids(active_slide_ids)
+    animation_by_slide_id = animation_states_by_slide_ids(user_id, active_slide_ids)
     payload = _build_reader_payload(
         slides,
         latest_by_slide_id,
         question_by_slide_id,
         image_slide_numbers=image_slide_numbers,
+        animation_by_slide_id=animation_by_slide_id,
     )
     if not payload:
         st.warning("当前资料没有任何幻灯片数据。")
@@ -3768,8 +3780,10 @@ def _build_reader_payload(
     question_by_slide_id: dict[int, list[dict]],
     *,
     image_slide_numbers: set[int] | None = None,
+    animation_by_slide_id: dict[int, list[dict]] | None = None,
 ) -> list[dict]:
     payload = []
+    animation_by_slide_id = animation_by_slide_id or {}
     for slide in slides:
         slide_number = int(slide["slide_number"])
         image_path = Path(slide.get("image_path") or "")
@@ -3784,6 +3798,7 @@ def _build_reader_payload(
         else:
             image_data = ""
 
+        animation_states = _animation_state_payloads(animation_by_slide_id.get(int(slide["id"]), []))
         payload.append(
             {
                 "slideNumber": slide_number,
@@ -3803,9 +3818,40 @@ def _build_reader_payload(
                 "bookmarkEnabled": bool(slide.get("bookmark_enabled")),
                 "bookmarkTitle": bookmark_title,
                 "questions": question_by_slide_id.get(int(slide["id"]), []),
+                "animationStates": animation_states,
+                "animationSummary": _animation_summary_from_states(animation_states),
             }
         )
     return payload
+
+
+def _animation_state_payloads(states: list[dict]) -> list[dict]:
+    payload = []
+    for state in sorted(states, key=lambda item: int(item.get("state_index") or item.get("stateIndex") or 0)):
+        image_path = Path(str(state.get("image_path") or state.get("imagePath") or ""))
+        if not image_path.exists() or not image_path.is_file():
+            continue
+        payload.append(
+            {
+                "stateIndex": int(state.get("state_index") or state.get("stateIndex") or 0),
+                "label": str(state.get("label") or "").strip(),
+                "image": _reader_image_url(image_path),
+                "stepSummary": str(state.get("step_summary") or state.get("stepSummary") or "").strip(),
+            }
+        )
+    return payload
+
+
+def _animation_summary_from_states(states: list[dict]) -> str:
+    lines = []
+    for state in states:
+        summary = str(state.get("stepSummary") or state.get("step_summary") or "").strip()
+        if not summary:
+            continue
+        state_index = state.get("stateIndex") if "stateIndex" in state else state.get("state_index")
+        label = str(state.get("label") or "").strip() or f"状态 {int(state_index or 0)}"
+        lines.append(f"{label}：{summary}")
+    return "\n".join(lines)
 
 
 def _reader_sections_payload(sections: list[dict]) -> list[dict]:
@@ -4406,6 +4452,45 @@ def _deck_can_render_page_images(deck: dict) -> bool:
     return path.exists()
 
 
+def _deck_can_generate_animation_states(deck: dict) -> bool:
+    file_path = str(deck.get("file_path") or "").strip()
+    if not file_path:
+        return False
+    path = Path(file_path)
+    return path.suffix.lower() == ".pptx" and path.exists() and path.is_file()
+
+
+def _generate_deck_animation_states_best_effort(
+    deck: dict,
+    slides: list[dict],
+    *,
+    user=None,
+    notify: bool = False,
+):
+    if not _deck_can_generate_animation_states(deck):
+        if notify:
+            st.warning("动画状态只支持本机原始 PPTX 文件。")
+        return None
+    try:
+        if notify:
+            with st.spinner("正在生成 PPTX 动画状态..."):
+                result = generate_deck_animation_states(deck, slides, user=user)
+        else:
+            result = generate_deck_animation_states(deck, slides, user=user)
+    except Exception as exc:
+        if notify:
+            st.warning(f"动画状态生成失败，已保留静态阅读：{exc}")
+        return None
+    if result.skipped_reason:
+        if notify:
+            st.warning(f"动画状态未生成：{result.skipped_reason}")
+        return result
+    if notify:
+        frame_count = sum(result.generated_by_slide.values())
+        st.success(f"动画状态已生成：{len(result.generated_by_slide)} 页，{frame_count} 帧。")
+    return result
+
+
 def _image_paths_for_generation(
     slide: dict,
     send_image_when_no_text: bool,
@@ -4480,6 +4565,7 @@ def _build_slide_prompt(
         slide_text = "这一页没有提取到可用文字。我会随请求附上该页原图，请直接根据页面图片内容讲解；不要编造图片中不存在的信息。"
     elif not slide_text.strip() and _image_exists(slide):
         slide_text = "这一页没有提取到可用文字，当前请求没有附带页面图片。请提醒我：需要切换支持图片输入的视觉模型，或先对 PDF 做 OCR 后重新导入。"
+    animation_summary = _slide_animation_summary(user_id, slide.get("id"))
     return render_template(
         "ppt_slide_explain.md",
         {
@@ -4488,12 +4574,22 @@ def _build_slide_prompt(
             "slide_number": str(slide["slide_number"]),
             "slide_title": slide["title"] or "未命名页面",
             "slide_text": slide_text or "这一页没有解析到文字。",
+            "animation_summary": animation_summary or "暂无动画状态缓存。",
             "context_package": format_slide_context_package(context),
             "related_knowledge": related_knowledge
             if related_knowledge is not None
             else _related_knowledge_context(subject, user_id=user_id),
         },
     )
+
+
+def _slide_animation_summary(user_id: int | None, slide_id: int | str | None) -> str:
+    if not slide_id:
+        return ""
+    scoped_user_id = int(user_id or require_login().id)
+    normalized_slide_id = int(slide_id)
+    grouped = animation_states_by_slide_ids(scoped_user_id, [normalized_slide_id])
+    return _animation_summary_from_states(grouped.get(normalized_slide_id, []))
 
 
 def _related_knowledge_context(subject: str, limit: int = 8, *, user_id: int | None = None) -> str:

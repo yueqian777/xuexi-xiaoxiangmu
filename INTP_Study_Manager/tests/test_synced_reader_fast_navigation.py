@@ -102,6 +102,16 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "missingImageWindowSlides",
             "markPendingImageWindowSlides",
             "requestImageWindowIfNeeded",
+            "animationStatesForPage",
+            "animationStateKey",
+            "clampAnimationStateIndex",
+            "activeAnimationStateIndexForPage",
+            "activeAnimationStateForPage",
+            "visualImageForPage",
+            "stopAnimationPlayback",
+            "resetAnimationStateForSlide",
+            "setAnimationStateForSlide",
+            "renderAnimationControls",
             "saveScrollState",
             "saveCurrentSlideState",
             "scheduleScrollStateSave",
@@ -706,6 +716,60 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             }
             """
         )
+
+    def test_animation_visual_uses_active_state_image(self):
+        self.run_js(
+            r"""
+            const PAGE_IMAGE_RENDER_RADIUS = 3;
+            let deckId = 4;
+            let currentSlideNumber = 1;
+            const animationStateBySlide = new Map([[animationStateKey(1), 1]]);
+            const page = {
+              slideNumber: 1,
+              imageAvailable: true,
+              image: 'static.png',
+              animationStates: [
+                { stateIndex: 0, image: 'state-0.png', label: '初始' },
+                { stateIndex: 1, image: 'state-1.png', label: '第 1 步' },
+              ],
+            };
+            let pages = [page];
+
+            if (visualImageForPage(page) !== 'state-1.png') {
+              throw new Error('active animation image was not selected');
+            }
+            animationStateBySlide.set(animationStateKey(1), 0);
+            if (pageVisualRenderKey(page, 1) === 'image:slide:1:11:static.png:static.png') {
+              throw new Error('animation state must participate in render key');
+            }
+            """
+        )
+
+    def test_animation_controls_hide_without_states_and_show_expected_actions(self):
+        self.run_js(
+            r"""
+            let currentSlideNumber = 1;
+            const animationStateBySlide = new Map();
+            if (renderAnimationControls({ slideNumber: 1, animationStates: [] }) !== '') {
+              throw new Error('controls should be hidden without animation states');
+            }
+            const html = renderAnimationControls({
+              slideNumber: 1,
+              animationStates: [
+                { stateIndex: 0, image: 'state-0.png', label: '初始' },
+                { stateIndex: 1, image: 'state-1.png', label: '第 1 步' },
+              ],
+            });
+            for (const action of ['reset', 'prev', 'play', 'next']) {
+              if (!html.includes(`data-animation-action="${action}"`)) {
+                throw new Error(`missing animation action ${action}`);
+              }
+            }
+            """
+        )
+
+    def test_set_active_resets_animation_state_on_slide_change(self):
+        self.assertIn("resetAnimationStateForSlide(currentSlideNumber)", self.source)
 
     def test_sync_active_page_dom_moves_active_classes_after_patch_target_change(self):
         self.run_js(

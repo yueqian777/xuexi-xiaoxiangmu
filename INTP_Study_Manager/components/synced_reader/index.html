@@ -583,6 +583,51 @@
       font-weight: 800;
       text-align: center;
     }
+    .page-animation-controls {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 34px;
+      margin-top: 9px;
+      color: #426a74;
+      font-size: var(--reader-small-size);
+      font-weight: 800;
+    }
+    .page-animation-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
+      border: 1px solid #bfdde3;
+      border-radius: 999px;
+      background: #ffffff;
+      color: #24606f;
+      font: inherit;
+      font-weight: 900;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow: 0 4px 12px rgba(24, 111, 130, 0.08);
+    }
+    .page-animation-button:hover:not(:disabled) {
+      border-color: var(--accent);
+      background: var(--soft-green);
+      color: #087b70;
+    }
+    .page-animation-button:disabled {
+      opacity: 0.42;
+      cursor: default;
+      box-shadow: none;
+    }
+    .page-animation-status {
+      min-width: 108px;
+      max-width: min(220px, 42%);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: center;
+    }
     .notes {
       padding: 22px 20px 80px;
       background: var(--panel);
@@ -1504,6 +1549,8 @@
     const hydratingNotePromises = new Map();
     const pageImageCache = new Map();
     const pendingImageRequests = new Map();
+    const animationStateBySlide = new Map();
+    const animationPlaybackTimers = new Map();
     const pendingExplanationSaves = new Map();
     const pendingBookmarkSaves = new Map();
     const noteBodySourceMaps = new WeakMap();
@@ -2938,25 +2985,174 @@
 
     function shouldRenderPageImage(page, centerSlideNumber = currentSlideNumber) {
       return Boolean(
-        page?.image
+        visualImageForPage(page)
         && pageIndexDistance(Number(page.slideNumber), Number(centerSlideNumber || currentSlideNumber || 1)) <= PAGE_IMAGE_RENDER_RADIUS
       );
     }
 
+    function animationStatesForPage(page) {
+      if (!Array.isArray(page?.animationStates)) return [];
+      return page.animationStates.filter(state => state && state.image);
+    }
+
+    function animationStateKey(slideNumber) {
+      return Number(slideNumber || 0);
+    }
+
+    function clampAnimationStateIndex(page, index) {
+      const states = animationStatesForPage(page);
+      if (!states.length) return 0;
+      const rawIndex = Number(index);
+      const normalized = Number.isFinite(rawIndex) ? Math.round(rawIndex) : 0;
+      return Math.max(0, Math.min(states.length - 1, normalized));
+    }
+
+    function activeAnimationStateIndexForPage(page) {
+      const states = animationStatesForPage(page);
+      if (!states.length) return 0;
+      const key = animationStateKey(page.slideNumber);
+      const stored = typeof animationStateBySlide !== 'undefined' && animationStateBySlide.has(key)
+        ? animationStateBySlide.get(key)
+        : 0;
+      return clampAnimationStateIndex(page, stored);
+    }
+
+    function activeAnimationStateForPage(page) {
+      const states = animationStatesForPage(page);
+      if (!states.length) return null;
+      return states[activeAnimationStateIndexForPage(page)] || states[0] || null;
+    }
+
+    function visualImageForPage(page) {
+      const animationState = activeAnimationStateForPage(page);
+      return String(animationState?.image || page?.image || '');
+    }
+
     function pageVisualRenderKey(page, centerSlideNumber = currentSlideNumber) {
       if (shouldRenderPageImage(page, centerSlideNumber)) {
-        const image = String(page.image || '');
-        return `image:${pageImageCacheKey(page.slideNumber)}:${image.length}:${image.slice(0, 32)}:${image.slice(-32)}`;
+        const image = visualImageForPage(page);
+        const animationState = activeAnimationStateForPage(page);
+        const animationIndex = animationState ? activeAnimationStateIndexForPage(page) : 'static';
+        return `image:${pageImageCacheKey(page.slideNumber)}:${animationIndex}:${image.length}:${image.slice(0, 32)}:${image.slice(-32)}`;
       }
       return `placeholder:${page.imageAvailable ? 'loading' : 'missing'}`;
     }
 
     function renderPageVisual(page, centerSlideNumber = currentSlideNumber) {
       if (shouldRenderPageImage(page, centerSlideNumber)) {
-        return `<img src="${page.image}" alt="第 ${page.slideNumber} 页原页面" loading="lazy" />`;
+        return `<img src="${escapeHtml(visualImageForPage(page))}" alt="第 ${page.slideNumber} 页原页面" loading="lazy" />`;
       }
       const text = page.imageAvailable ? '原页面按需加载中' : '暂无原页面图片';
       return `<div class="page-placeholder">${escapeHtml(text)}</div>`;
+    }
+
+    function resetAnimationStateForSlide(slideNumber) {
+      stopAnimationPlayback(slideNumber);
+      if (typeof animationStateBySlide !== 'undefined') {
+        animationStateBySlide.set(animationStateKey(slideNumber), 0);
+      }
+    }
+
+    function setAnimationStateForSlide(slideNumber, index) {
+      const normalizedSlide = Number(slideNumber || 0);
+      const page = pageForSlide(normalizedSlide);
+      if (!page) return;
+      const nextIndex = clampAnimationStateIndex(page, index);
+      if (typeof animationStateBySlide !== 'undefined') {
+        animationStateBySlide.set(animationStateKey(normalizedSlide), nextIndex);
+      }
+      updateRenderedPageImageWindow(normalizedSlide);
+      updateAnimationControlsForSlide(normalizedSlide);
+    }
+
+    function renderAnimationControls(page) {
+      const states = animationStatesForPage(page);
+      if (states.length <= 1) return '';
+      const currentIndex = activeAnimationStateIndexForPage(page);
+      const currentState = states[currentIndex] || {};
+      const key = animationStateKey(page.slideNumber);
+      const isPlaying = typeof animationPlaybackTimers !== 'undefined' && animationPlaybackTimers.has(key);
+      const label = currentState.label || `状态 ${currentIndex}`;
+      return `
+        <div class="page-animation-controls" data-animation-controls="${page.slideNumber}">
+          <button type="button" class="page-animation-button" data-animation-slide="${page.slideNumber}" data-animation-action="reset" title="回到起点" ${currentIndex === 0 ? 'disabled' : ''}>↺</button>
+          <button type="button" class="page-animation-button" data-animation-slide="${page.slideNumber}" data-animation-action="prev" title="上一步" ${currentIndex === 0 ? 'disabled' : ''}>‹</button>
+          <span class="page-animation-status" title="${escapeHtml(label)}">${escapeHtml(label)} · ${currentIndex + 1}/${states.length}</span>
+          <button type="button" class="page-animation-button" data-animation-slide="${page.slideNumber}" data-animation-action="play" title="${isPlaying ? '暂停' : '播放'}">${isPlaying ? 'Ⅱ' : '▶'}</button>
+          <button type="button" class="page-animation-button" data-animation-slide="${page.slideNumber}" data-animation-action="next" title="下一步" ${currentIndex >= states.length - 1 ? 'disabled' : ''}>›</button>
+        </div>
+      `;
+    }
+
+    function updateAnimationControlsForSlide(slideNumber) {
+      const normalizedSlide = Number(slideNumber || 0);
+      const page = pageForSlide(normalizedSlide);
+      const controls = document.querySelector(`[data-animation-controls="${normalizedSlide}"]`);
+      if (!page || !controls) return;
+      controls.outerHTML = renderAnimationControls(page);
+    }
+
+    function stopAnimationPlayback(slideNumber) {
+      if (typeof animationPlaybackTimers === 'undefined') return;
+      if (slideNumber === undefined || slideNumber === null) {
+        animationPlaybackTimers.forEach(timer => window.clearInterval(timer));
+        animationPlaybackTimers.clear();
+        return;
+      }
+      const key = animationStateKey(slideNumber);
+      const timer = animationPlaybackTimers.get(key);
+      if (timer) window.clearInterval(timer);
+      animationPlaybackTimers.delete(key);
+    }
+
+    function startAnimationPlayback(slideNumber) {
+      const normalizedSlide = Number(slideNumber || 0);
+      const page = pageForSlide(normalizedSlide);
+      const states = animationStatesForPage(page);
+      if (states.length <= 1 || typeof animationPlaybackTimers === 'undefined') return;
+      stopAnimationPlayback(normalizedSlide);
+      const key = animationStateKey(normalizedSlide);
+      const timer = window.setInterval(() => {
+        const currentPage = pageForSlide(normalizedSlide);
+        const currentStates = animationStatesForPage(currentPage);
+        if (currentStates.length <= 1) {
+          stopAnimationPlayback(normalizedSlide);
+          updateAnimationControlsForSlide(normalizedSlide);
+          return;
+        }
+        const currentIndex = activeAnimationStateIndexForPage(currentPage);
+        const nextIndex = currentIndex >= currentStates.length - 1 ? 0 : currentIndex + 1;
+        setAnimationStateForSlide(normalizedSlide, nextIndex);
+      }, 900);
+      animationPlaybackTimers.set(key, timer);
+      updateAnimationControlsForSlide(normalizedSlide);
+    }
+
+    function handleAnimationControl(button) {
+      const slideNumber = Number(button.dataset.animationSlide || currentSlideNumber || 0);
+      const page = pageForSlide(slideNumber);
+      const states = animationStatesForPage(page);
+      if (states.length <= 1) return;
+      const action = button.dataset.animationAction || '';
+      const currentIndex = activeAnimationStateIndexForPage(page);
+      if (action === 'reset') {
+        resetAnimationStateForSlide(slideNumber);
+        setAnimationStateForSlide(slideNumber, 0);
+      } else if (action === 'prev') {
+        stopAnimationPlayback(slideNumber);
+        setAnimationStateForSlide(slideNumber, currentIndex - 1);
+      } else if (action === 'next') {
+        stopAnimationPlayback(slideNumber);
+        setAnimationStateForSlide(slideNumber, currentIndex + 1);
+      } else if (action === 'play') {
+        const key = animationStateKey(slideNumber);
+        if (typeof animationPlaybackTimers !== 'undefined' && animationPlaybackTimers.has(key)) {
+          stopAnimationPlayback(slideNumber);
+          updateAnimationControlsForSlide(slideNumber);
+        } else {
+          startAnimationPlayback(slideNumber);
+        }
+      }
     }
 
     function syncActivePageDom(slideNumber) {
@@ -3584,7 +3780,10 @@
         window.clearTimeout(viewportAnchorReleaseTimer);
       }
       const sameSlide = nextSlideNumber === currentSlideNumber;
-      if (!sameSlide) closeChildLayersForSlideChange();
+      if (!sameSlide) {
+        stopAnimationPlayback(currentSlideNumber);
+        closeChildLayersForSlideChange();
+      }
       const currentPage = document.getElementById(`page-${nextSlideNumber}`);
       const currentNote = document.getElementById(`note-${nextSlideNumber}`);
       if (
@@ -3602,6 +3801,7 @@
         return;
       }
       currentSlideNumber = nextSlideNumber;
+      if (!sameSlide) resetAnimationStateForSlide(currentSlideNumber);
       syncActivePageDom(currentSlideNumber);
       const page = document.getElementById(`page-${currentSlideNumber}`);
       const note = document.getElementById(`note-${currentSlideNumber}`);
@@ -4575,6 +4775,7 @@
             <div class="page-visual" data-render-key="${escapeHtml(pageVisualRenderKey(page, targetSlide))}">
               ${renderPageVisual(page, targetSlide)}
             </div>
+            ${renderAnimationControls(page)}
           </article>
         `;
       }).join('');
@@ -5358,6 +5559,13 @@
     });
     pageRoot.addEventListener('scroll', scheduleScrollStateSave, { passive: true });
     pageRoot.addEventListener('click', (event) => {
+      const animationButton = event.target?.closest?.('[data-animation-action]');
+      if (animationButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        handleAnimationControl(animationButton);
+        return;
+      }
       const button = event.target?.closest?.('[data-bookmark-slide]');
       if (!button) return;
       event.preventDefault();

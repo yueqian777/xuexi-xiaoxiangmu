@@ -11,6 +11,27 @@ from db import DATA_DIR, fetch_one, write_transaction
 from services.export_manifest_service import read_manifest, validate_public_ppt_manifest
 from services.export_path_service import safe_extract_zip, safe_filename
 
+SLIDE_TEXT_STOP_HEADINGS = [
+    "页面图片",
+    "Page Image",
+    "Slide Image",
+    "Slide Images",
+    "AI Explanation",
+    "AI 逐页讲解",
+    "自动摘要",
+    "Auto Summary",
+    "Summary",
+    "导航",
+    "Navigation",
+]
+EXPLANATION_STOP_HEADINGS = [
+    "自动摘要",
+    "Auto Summary",
+    "Summary",
+    "导航",
+    "Navigation",
+]
+
 
 def preview_share_package(user_id: int, zip_file: Any) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -205,7 +226,23 @@ def _preview_deck_title(manifest: dict[str, Any], decks: list[dict[str, Any]]) -
 
 def _existing_package(user_id: int, package_id: str) -> dict[str, Any] | None:
     return fetch_one(
-        "SELECT * FROM import_packages WHERE user_id = ? AND package_id = ? ORDER BY imported_at DESC, id DESC LIMIT 1",
+        """
+        SELECT ip.*
+        FROM import_packages ip
+        WHERE ip.user_id = ?
+          AND ip.package_id = ?
+          AND EXISTS (
+              SELECT 1
+              FROM ppt_decks d
+              WHERE d.user_id = ip.user_id
+                AND (
+                    d.import_package_id = ip.id
+                    OR d.source_package_id = ip.package_id
+                )
+          )
+        ORDER BY ip.imported_at DESC, ip.id DESC
+        LIMIT 1
+        """,
         (int(user_id), package_id),
     )
 
@@ -233,8 +270,16 @@ def _copy_import_image(extract_dir: Path, asset_root: Path, slide_item: dict[str
 
 def _parse_slide_markdown(markdown: str) -> tuple[str, str]:
     content = _strip_frontmatter(markdown)
-    slide_text = _section(content, ["Slide Content", "页面内容", "PPT/PDF 页面文字"])
-    explanation = _section(content, ["AI Explanation", "AI 逐页讲解"])
+    slide_text = _section(
+        content,
+        ["Slide Content", "页面内容", "PPT/PDF 页面文字"],
+        stop_headings=SLIDE_TEXT_STOP_HEADINGS,
+    )
+    explanation = _section(
+        content,
+        ["AI Explanation", "AI 逐页讲解"],
+        stop_headings=EXPLANATION_STOP_HEADINGS,
+    )
     return slide_text, explanation
 
 
@@ -248,18 +293,28 @@ def _strip_frontmatter(markdown: str) -> str:
     return markdown
 
 
-def _section(markdown: str, headings: list[str]) -> str:
+def _section(markdown: str, headings: list[str], *, stop_headings: list[str] | None = None) -> str:
     lines = markdown.splitlines()
     start = None
     for index, line in enumerate(lines):
-        if any(line.strip().lower() == f"## {heading}".lower() for heading in headings):
+        if _matches_heading(line, headings):
             start = index + 1
             break
     if start is None:
         return markdown.strip()
     end = len(lines)
     for index in range(start, len(lines)):
-        if lines[index].startswith("## "):
+        if stop_headings is None:
+            if lines[index].startswith("## "):
+                end = index
+                break
+            continue
+        if _matches_heading(lines[index], stop_headings):
             end = index
             break
     return "\n".join(lines[start:end]).strip()
+
+
+def _matches_heading(line: str, headings: list[str]) -> bool:
+    normalized = line.strip().lower()
+    return any(normalized == f"## {heading}".lower() for heading in headings)

@@ -133,6 +133,39 @@ class PptRepositoryTest(unittest.TestCase):
         self.assertNotIn("bookmark_title = ?", query)
         self.assertEqual(params, (0, 9, 4))
 
+    def test_replace_slide_animation_states_deletes_old_rows_and_inserts_new_rows(self):
+        conn = FakeConnection()
+        states = [
+            {"state_index": "0", "label": "初始", "image_path": "state-0.png", "step_summary": "初始状态"},
+            {"state_index": 1, "label": "第 1 步", "image_path": "state-1.png", "step_summary": "显示公式"},
+        ]
+
+        with patch.object(ppt_repository, "write_transaction", fake_transaction(conn)):
+            count = ppt_repository.replace_slide_animation_states("4", "6", "9", "2", states)
+
+        self.assertEqual(count, 2)
+        delete_query, delete_params = conn.calls[0]
+        self.assertIn("DELETE FROM ppt_slide_animation_states", delete_query)
+        self.assertEqual(delete_params, (4, 9))
+        insert_query, first_params = conn.calls[1]
+        self.assertIn("INSERT INTO ppt_slide_animation_states", insert_query)
+        self.assertIn("state_index", insert_query)
+        self.assertEqual(first_params, (4, 6, 9, 2, 0, "初始", "state-0.png", "初始状态"))
+
+    def test_animation_states_by_slide_ids_groups_rows_by_slide_id(self):
+        rows = [
+            {"slide_id": 9, "state_index": 0, "label": "初始"},
+            {"slide_id": 9, "state_index": 1, "label": "第 1 步"},
+        ]
+        with patch.object(ppt_repository, "fetch_all", return_value=rows) as fetch_all:
+            result = ppt_repository.animation_states_by_slide_ids("4", ["9", "10"])
+
+        self.assertEqual(result, {9: rows, 10: []})
+        query, params = fetch_all.call_args.args
+        self.assertIn("FROM ppt_slide_animation_states", query)
+        self.assertIn("user_id = ?", query)
+        self.assertEqual(params, (4, 9, 10))
+
     def test_questions_by_slide_ids_returns_empty_lists_for_requested_slides(self):
         with patch.object(ppt_repository, "fetch_all", return_value=[]):
             result = ppt_repository.questions_by_slide_ids(4, [7, 8])
@@ -337,6 +370,44 @@ class PptRepositorySqliteIntegrationTest(unittest.TestCase):
         row = db.fetch_one("SELECT * FROM slide_questions WHERE id = ?", (question_id,))
         self.assertIsNotNone(row)
         return row
+
+    def test_init_db_creates_slide_animation_state_table_with_unique_index(self):
+        conn = db.get_connection()
+        try:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(ppt_slide_animation_states)").fetchall()}
+            indexes = {row["name"] for row in conn.execute("PRAGMA index_list(ppt_slide_animation_states)").fetchall()}
+        finally:
+            conn.close()
+
+        self.assertIn("user_id", columns)
+        self.assertIn("deck_id", columns)
+        self.assertIn("slide_id", columns)
+        self.assertIn("state_index", columns)
+        self.assertIn("step_summary", columns)
+        self.assertIn("idx_ppt_slide_animation_states_user_slide_index", indexes)
+
+    def test_animation_states_by_slide_ids_keeps_user_scope(self):
+        other_slide_id = self._create_slide(user_id=12)
+        ppt_repository.replace_slide_animation_states(
+            11,
+            1,
+            self.slide_id,
+            1,
+            [{"state_index": 0, "label": "初始", "image_path": "owner.png", "step_summary": "owner"}],
+        )
+        ppt_repository.replace_slide_animation_states(
+            12,
+            2,
+            other_slide_id,
+            1,
+            [{"state_index": 0, "label": "初始", "image_path": "other.png", "step_summary": "other"}],
+        )
+
+        result = ppt_repository.animation_states_by_slide_ids(11, [self.slide_id, other_slide_id])
+
+        self.assertEqual(len(result[self.slide_id]), 1)
+        self.assertEqual(result[self.slide_id][0]["image_path"], "owner.png")
+        self.assertEqual(result[other_slide_id], [])
 
     def test_create_slide_question_tree_node_persists_root_child_depth_and_sort_order(self):
         root_1 = ppt_repository.create_slide_question_tree_node(

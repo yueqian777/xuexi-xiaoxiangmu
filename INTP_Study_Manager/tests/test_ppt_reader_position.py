@@ -552,6 +552,22 @@ class PptReaderPositionTest(unittest.TestCase):
         self.assertIn("当前目录块：收敛域", prompt)
         self.assertIn("ROC 怎么决定系统性质？", prompt)
 
+    def test_slide_prompt_includes_animation_summary_once(self):
+        with (
+            patch.object(ppt_tutor, "_related_knowledge_context", return_value="暂无同科目知识卡片。"),
+            patch.object(ppt_tutor, "_image_exists", return_value=False),
+            patch.object(ppt_tutor, "_slide_animation_summary", return_value="第 1 步：出现关键公式"),
+        ):
+            prompt = ppt_tutor._build_slide_prompt(
+                {"title": "Z 变换", "subject": "信号与系统"},
+                {"id": 9, "slide_number": 3, "title": "ROC 定义", "slide_text": "ROC 是收敛域。"},
+                context={},
+                user_id=11,
+            )
+
+        self.assertEqual(prompt.count("本页动画过程"), 1)
+        self.assertIn("第 1 步：出现关键公式", prompt)
+
     def test_document_structure_generation_fills_prompt_variables(self):
         captured = {}
 
