@@ -118,6 +118,69 @@ class PptExplanationExportServiceTest(unittest.TestCase):
         with zipfile.ZipFile(result["zip_path"]) as archive:
             self.assertIn("attachments/original.pdf", set(archive.namelist()))
 
+    def test_export_share_package_includes_bookmarks_and_ai_structure(self):
+        deck_id = self._seed_deck()
+        slide = db.fetch_one("SELECT * FROM ppt_slides WHERE deck_id = ?", (deck_id,))
+        db.execute(
+            """
+            UPDATE ppt_decks
+            SET outline = '滤波器学习主线'
+            WHERE id = ?
+            """,
+            (deck_id,),
+        )
+        db.insert_and_get_id(
+            """
+            INSERT INTO ppt_sections (
+                user_id, deck_id, section_index, title, topic, core_question, summary,
+                key_terms_json, prerequisite_concepts_json, start_slide, end_slide
+            )
+            VALUES (?, ?, 1, '第一块：低通滤波器', '滤波器', '为什么低通能保留慢变信号？',
+                    '先建立频率选择的直觉。', '["低通", "截止频率"]', '["频域"]', 1, 1)
+            """,
+            (self.user_id, deck_id),
+        )
+        db.execute(
+            """
+            UPDATE ppt_slides
+            SET section_index = 1,
+                page_type = '公式页',
+                one_sentence_summary = '低通滤波器保留低频。',
+                slide_role = '核心定义',
+                key_points = '区分通带与阻带',
+                bookmark_enabled = 1,
+                bookmark_title = '重点公式页'
+            WHERE id = ?
+            """,
+            (slide["id"],),
+        )
+
+        result = ppt_explanation_export_service.export_deck_share_package(
+            self.user_id,
+            deck_id,
+            include_original=False,
+        )
+
+        with zipfile.ZipFile(result["zip_path"]) as archive:
+            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+            deck_entry = manifest["decks"][0]
+            slide_entry = deck_entry["slides"][0]
+            slide_md = archive.read(slide_entry["markdown_path"]).decode("utf-8")
+
+        self.assertIn("bookmarks", manifest["included_sections"])
+        self.assertIn("document_structure", manifest["included_sections"])
+        self.assertEqual(deck_entry["document_structure"]["outline"], "滤波器学习主线")
+        self.assertEqual(deck_entry["document_structure"]["sections"][0]["title"], "第一块：低通滤波器")
+        self.assertEqual(deck_entry["document_structure"]["sections"][0]["key_terms"], ["低通", "截止频率"])
+        self.assertEqual(slide_entry["bookmark"], {"enabled": True, "title": "重点公式页"})
+        self.assertEqual(slide_entry["page_metadata"]["page_type"], "公式页")
+        self.assertEqual(slide_entry["page_metadata"]["one_sentence_summary"], "低通滤波器保留低频。")
+        self.assertIn("## 书签", slide_md)
+        self.assertIn("重点公式页", slide_md)
+        self.assertIn("## AI 分块", slide_md)
+        self.assertIn("第一块：低通滤波器", slide_md)
+        self.assertIn("页面类型：公式页", slide_md)
+
     def test_export_multi_deck_share_package_uses_deck_scoped_paths_and_readable_markdown(self):
         first_deck_id = self._seed_deck()
         second_deck_id = self._seed_deck(

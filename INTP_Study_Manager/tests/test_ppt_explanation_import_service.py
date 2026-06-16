@@ -134,6 +134,74 @@ class PptExplanationImportServiceTest(unittest.TestCase):
             archive.writestr("decks/pid/images/slide-001.png", b"fake-png-pid-1")
         return zip_path
 
+    def _build_package_with_bookmarks_and_ai_structure(self):
+        zip_path = self.data_dir / "structured-share.zip"
+        manifest = {
+            "package_type": "ppt_explanation_share",
+            "version": "1.0",
+            "package_id": "ppt-share-structured-test",
+            "subject": "Signals",
+            "deck_title": "FIR filters",
+            "exported_at": "2026-06-16T10:00:00",
+            "privacy_mode": "public_ppt_explanation_only",
+            "included_sections": [
+                "slide_text",
+                "slide_images",
+                "ai_explanations",
+                "bookmarks",
+                "document_structure",
+            ],
+            "excluded_sections": ["slide_questions", "knowledge_cards", "review_tasks"],
+            "decks": [
+                {
+                    "subject": "Signals",
+                    "deck_title": "FIR filters",
+                    "filename": "fir.pptx",
+                    "slide_count": 1,
+                    "document_structure": {
+                        "outline": "滤波器学习主线",
+                        "sections": [
+                            {
+                                "section_index": 1,
+                                "title": "第一块：低通滤波器",
+                                "topic": "滤波器",
+                                "core_question": "为什么低通能保留慢变信号？",
+                                "summary": "先建立频率选择的直觉。",
+                                "key_terms": ["低通", "截止频率"],
+                                "prerequisite_concepts": ["频域"],
+                                "start_slide": 1,
+                                "end_slide": 1,
+                            }
+                        ],
+                    },
+                    "slides": [
+                        {
+                            "slide_number": 1,
+                            "title": "FIR basics",
+                            "markdown_path": "slides/slide-001.md",
+                            "image_path": "images/slide-001.png",
+                            "bookmark": {"enabled": True, "title": "重点公式页"},
+                            "page_metadata": {
+                                "section_index": 1,
+                                "page_type": "公式页",
+                                "one_sentence_summary": "低通滤波器保留低频。",
+                                "slide_role": "核心定义",
+                                "key_points": "区分通带与阻带",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
+            archive.writestr(
+                "slides/slide-001.md",
+                "# Slide 001: FIR basics\n\n## PPT/PDF 页面文字\n\npublic text\n\n## AI 逐页讲解\n\npublic explanation",
+            )
+            archive.writestr("images/slide-001.png", b"fake-png")
+        return zip_path
+
     def test_preview_rejects_invalid_or_incomplete_packages(self):
         with self.assertRaises(ValueError):
             ppt_explanation_import_service.preview_share_package(
@@ -171,6 +239,32 @@ class PptExplanationImportServiceTest(unittest.TestCase):
         self.assertIn("public explanation", explanation["explanation"])
         package = db.fetch_one("SELECT * FROM import_packages WHERE package_id = ?", ("ppt-share-test",))
         self.assertIsNotNone(package)
+        self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM slide_questions")["count"], 0)
+        self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM knowledge_cards")["count"], 0)
+        self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM review_tasks")["count"], 0)
+
+    def test_import_preserves_bookmarks_and_ai_structure(self):
+        zip_path = self._build_package_with_bookmarks_and_ai_structure()
+
+        result = ppt_explanation_import_service.import_share_package(self.user_id, zip_path)
+
+        deck = db.fetch_one("SELECT * FROM ppt_decks WHERE id = ?", (result["deck_id"],))
+        self.assertEqual(deck["outline"], "滤波器学习主线")
+        section = db.fetch_one("SELECT * FROM ppt_sections WHERE deck_id = ?", (result["deck_id"],))
+        self.assertEqual(section["section_index"], 1)
+        self.assertEqual(section["title"], "第一块：低通滤波器")
+        self.assertEqual(section["topic"], "滤波器")
+        self.assertEqual(section["core_question"], "为什么低通能保留慢变信号？")
+        self.assertEqual(json.loads(section["key_terms_json"]), ["低通", "截止频率"])
+        self.assertEqual(json.loads(section["prerequisite_concepts_json"]), ["频域"])
+        slide = db.fetch_one("SELECT * FROM ppt_slides WHERE deck_id = ?", (result["deck_id"],))
+        self.assertEqual(slide["section_index"], 1)
+        self.assertEqual(slide["page_type"], "公式页")
+        self.assertEqual(slide["one_sentence_summary"], "低通滤波器保留低频。")
+        self.assertEqual(slide["slide_role"], "核心定义")
+        self.assertEqual(slide["key_points"], "区分通带与阻带")
+        self.assertEqual(slide["bookmark_enabled"], 1)
+        self.assertEqual(slide["bookmark_title"], "重点公式页")
         self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM slide_questions")["count"], 0)
         self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM knowledge_cards")["count"], 0)
         self.assertEqual(db.fetch_one("SELECT COUNT(*) AS count FROM review_tasks")["count"], 0)

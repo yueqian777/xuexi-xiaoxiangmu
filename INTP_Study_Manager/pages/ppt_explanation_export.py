@@ -30,7 +30,7 @@ PUBLIC_EXCLUDED_SECTION_LABELS = {
 PPT_SHARE_EXPORT_COPY = {
     "title": "PPT 讲解分享包",
     "boundary": (
-        "公开分享包：只给别人看 PPT 页面、页面图片和 AI 逐页讲解；不会导出你的学习记录，"
+        "公开分享包：只给别人看 PPT 页面、页面图片、AI 逐页讲解、书签和 AI 分块；不会导出你的学习记录，"
         "也不会导出插问、知识卡片、错因、复习任务、掌握度或账号/API 配置。"
     ),
     "empty": "还没有可导出的 PPT / PDF。",

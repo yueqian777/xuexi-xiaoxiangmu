@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import uuid
+import json
 from datetime import datetime
 from pathlib import Path
 import posixpath
@@ -35,6 +36,7 @@ def _export_share_package(user_id: int, deck_ids: list[int], *, include_original
     user_id_int = int(user_id)
     decks = _load_decks(user_id_int, deck_ids)
     slides_by_deck = _slides_by_deck(user_id_int, deck_ids)
+    sections_by_deck = _sections_by_deck(user_id_int, deck_ids)
     all_slides = [slide for deck_id in deck_ids for slide in slides_by_deck.get(int(deck_id), [])]
     latest = _latest_explanations_by_slide(user_id_int, [int(slide["id"]) for slide in all_slides])
     exported_at = datetime.now().isoformat(timespec="seconds")
@@ -50,15 +52,23 @@ def _export_share_package(user_id: int, deck_ids: list[int], *, include_original
         _ensure_deck_dirs(root, deck_rel)
         slide_manifest: list[dict[str, Any]] = []
         slides = slides_by_deck.get(deck_id, [])
+        sections = sections_by_deck.get(deck_id, [])
+        section_by_index = {int(section["section_index"]): section for section in sections}
         for slide in slides:
             slide_number = int(slide["slide_number"])
             image_path = _copy_slide_image(slide, root, slide_number, relative_dir=_relative_dir(deck_rel, "images"))
             markdown_path = _relative_file(deck_rel, "slides", f"slide-{slide_number:03d}.md")
             explanation = latest.get(int(slide["id"]), {})
+            page_metadata = _page_metadata(slide)
+            bookmark = _bookmark(slide)
+            section = section_by_index.get(int(page_metadata.get("section_index") or 0), {})
             slide_md = _slide_markdown(
                 deck,
                 slide,
                 explanation,
+                section=section,
+                bookmark=bookmark,
+                page_metadata=page_metadata,
                 image_path=image_path,
                 markdown_path=markdown_path,
                 exported_at=exported_at,
@@ -74,6 +84,8 @@ def _export_share_package(user_id: int, deck_ids: list[int], *, include_original
                 "title": slide.get("title") or f"Slide {slide_number}",
                 "markdown_path": markdown_path,
                 "image_path": image_path,
+                "bookmark": bookmark,
+                "page_metadata": page_metadata,
             }
             slide_manifest.append(item)
             flattened_slides.append(item)
@@ -85,6 +97,7 @@ def _export_share_package(user_id: int, deck_ids: list[int], *, include_original
             "deck_title": deck.get("title") or "",
             "filename": deck.get("filename") or "",
             "slide_count": len(slides),
+            "document_structure": _document_structure(deck, sections),
             "slides": slide_manifest,
         }
         if original_path:
@@ -160,6 +173,26 @@ def _slides_by_deck(user_id: int, deck_ids: list[int]) -> dict[int, list[dict[st
     grouped = {int(deck_id): [] for deck_id in deck_ids}
     for row in rows:
         grouped.setdefault(int(row["deck_id"]), []).append(row)
+    return grouped
+
+
+def _sections_by_deck(user_id: int, deck_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    placeholders = ",".join("?" for _ in deck_ids)
+    rows = fetch_all(
+        f"""
+        SELECT *
+        FROM ppt_sections
+        WHERE user_id = ? AND deck_id IN ({placeholders})
+        ORDER BY deck_id ASC, section_index ASC
+        """,
+        (int(user_id), *tuple(deck_ids)),
+    )
+    grouped: dict[int, list[dict[str, Any]]] = {int(deck_id): [] for deck_id in deck_ids}
+    for row in rows:
+        item = dict(row)
+        item["key_terms"] = _json_list(item.get("key_terms_json"))
+        item["prerequisite_concepts"] = _json_list(item.get("prerequisite_concepts_json"))
+        grouped.setdefault(int(item["deck_id"]), []).append(item)
     return grouped
 
 
@@ -244,6 +277,9 @@ def _slide_markdown(
     slide: dict,
     explanation: dict,
     *,
+    section: dict,
+    bookmark: dict[str, Any],
+    page_metadata: dict[str, Any],
     image_path: str,
     markdown_path: str,
     exported_at: str,
@@ -277,11 +313,96 @@ def _slide_markdown(
             facts,
             "## PPT/PDF 页面文字\n\n" + str(slide.get("slide_text") or ""),
             "## 页面图片\n\n" + image_section,
+            "## 书签\n\n" + _bookmark_markdown(bookmark),
+            "## AI 分块\n\n" + _ai_structure_markdown(section, page_metadata),
             "## AI 逐页讲解\n\n" + str(explanation.get("explanation") or ""),
             "## 自动摘要\n\n" + _summary(explanation.get("explanation") or slide.get("slide_text") or ""),
             "## 导航\n\n" + _navigation(slide_number, slide_count),
         ]
     )
+
+
+def _document_structure(deck: dict, sections: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "outline": str(deck.get("outline") or ""),
+        "sections": [
+            {
+                "section_index": int(section.get("section_index") or 0),
+                "title": str(section.get("title") or ""),
+                "topic": str(section.get("topic") or ""),
+                "core_question": str(section.get("core_question") or ""),
+                "summary": str(section.get("summary") or ""),
+                "key_terms": _json_list(section.get("key_terms", section.get("key_terms_json"))),
+                "prerequisite_concepts": _json_list(
+                    section.get("prerequisite_concepts", section.get("prerequisite_concepts_json"))
+                ),
+                "start_slide": int(section.get("start_slide") or 0),
+                "end_slide": int(section.get("end_slide") or 0),
+            }
+            for section in sections
+        ],
+    }
+
+
+def _page_metadata(slide: dict) -> dict[str, Any]:
+    return {
+        "section_index": int(slide.get("section_index") or 0),
+        "page_type": str(slide.get("page_type") or ""),
+        "one_sentence_summary": str(slide.get("one_sentence_summary") or ""),
+        "slide_role": str(slide.get("slide_role") or ""),
+        "key_points": str(slide.get("key_points") or ""),
+    }
+
+
+def _bookmark(slide: dict) -> dict[str, Any]:
+    return {
+        "enabled": bool(slide.get("bookmark_enabled")),
+        "title": str(slide.get("bookmark_title") or ""),
+    }
+
+
+def _bookmark_markdown(bookmark: dict[str, Any]) -> str:
+    if not bookmark.get("enabled"):
+        return "未设置书签。"
+    title = str(bookmark.get("title") or "").strip()
+    return "\n".join(["- 状态：已添加", f"- 标题：{title or '未命名书签'}"])
+
+
+def _ai_structure_markdown(section: dict, page_metadata: dict[str, Any]) -> str:
+    lines = [
+        f"- 目录块：{_section_title(section)}",
+        f"- 页面类型：{page_metadata.get('page_type') or '未标注'}",
+        f"- 一句话摘要：{page_metadata.get('one_sentence_summary') or '暂无'}",
+        f"- 当前页作用：{page_metadata.get('slide_role') or '暂无'}",
+        f"- 考点 / 学习抓手：{page_metadata.get('key_points') or '暂无'}",
+    ]
+    if section:
+        if section.get("core_question"):
+            lines.append(f"- 核心问题：{section['core_question']}")
+        if section.get("summary"):
+            lines.append(f"- 分块摘要：{section['summary']}")
+    return "\n".join(lines)
+
+
+def _section_title(section: dict) -> str:
+    if not section:
+        return "未分块"
+    index = int(section.get("section_index") or 0)
+    title = str(section.get("title") or "").strip() or "未命名目录块"
+    return f"{index}. {title}" if index else title
+
+
+def _json_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed]
+    return []
 
 
 def _image_link(markdown_path: str, image_path: str) -> str:

@@ -16,6 +16,11 @@ SLIDE_TEXT_STOP_HEADINGS = [
     "Page Image",
     "Slide Image",
     "Slide Images",
+    "书签",
+    "Bookmarks",
+    "AI 分块",
+    "AI Chunks",
+    "Document Structure",
     "AI Explanation",
     "AI 逐页讲解",
     "自动摘要",
@@ -25,6 +30,11 @@ SLIDE_TEXT_STOP_HEADINGS = [
     "Navigation",
 ]
 EXPLANATION_STOP_HEADINGS = [
+    "书签",
+    "Bookmarks",
+    "AI 分块",
+    "AI Chunks",
+    "Document Structure",
     "自动摘要",
     "Auto Summary",
     "Summary",
@@ -107,13 +117,14 @@ def import_share_package(user_id: int, zip_file: Any, *, duplicate_policy: str =
             import_package_id = int(cursor.lastrowid)
             deck_ids = []
             for deck_index, deck in enumerate(decks, start=1):
+                document_structure = _document_structure(deck)
                 deck_cursor = conn.execute(
                     """
                     INSERT INTO ppt_decks (
                         user_id, filename, title, subject, file_path, slide_count,
-                        import_package_id, source_type, source_package_id, imported_at
+                        outline, import_package_id, source_type, source_package_id, imported_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'ppt_explanation_share', ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ppt_explanation_share', ?, ?)
                     """,
                     (
                         user_id_int,
@@ -122,6 +133,7 @@ def import_share_package(user_id: int, zip_file: Any, *, duplicate_policy: str =
                         deck.get("subject") or "",
                         str(asset_root / "manifest.json"),
                         int(deck.get("slide_count") or len(deck["slides"])),
+                        _text(document_structure.get("outline")),
                         import_package_id,
                         manifest["package_id"],
                         datetime.now().isoformat(timespec="seconds"),
@@ -129,16 +141,23 @@ def import_share_package(user_id: int, zip_file: Any, *, duplicate_policy: str =
                 )
                 deck_id = int(deck_cursor.lastrowid)
                 deck_ids.append(deck_id)
+                _insert_sections(conn, user_id_int, deck_id, document_structure)
                 for slide_item in deck["slides"]:
                     slide_number = int(slide_item["slide_number"])
                     markdown_path = extract_dir / slide_item["markdown_path"]
                     markdown = markdown_path.read_text(encoding="utf-8")
                     slide_text, explanation = _parse_slide_markdown(markdown)
                     image_path = _copy_import_image(extract_dir, asset_root, slide_item, f"deck-{deck_index}")
+                    bookmark = _slide_bookmark(slide_item)
+                    page_metadata = _slide_page_metadata(slide_item)
                     slide_cursor = conn.execute(
                         """
-                        INSERT INTO ppt_slides (user_id, deck_id, slide_number, title, slide_text, image_path)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO ppt_slides (
+                            user_id, deck_id, slide_number, title, slide_text, image_path,
+                            section_index, page_type, one_sentence_summary, slide_role, key_points,
+                            bookmark_enabled, bookmark_title
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             user_id_int,
@@ -147,6 +166,13 @@ def import_share_package(user_id: int, zip_file: Any, *, duplicate_policy: str =
                             slide_item.get("title") or f"Slide {slide_number}",
                             slide_text,
                             image_path,
+                            int(page_metadata.get("section_index") or 0),
+                            _text(page_metadata.get("page_type")),
+                            _text(page_metadata.get("one_sentence_summary")),
+                            _text(page_metadata.get("slide_role")),
+                            _text(page_metadata.get("key_points")),
+                            1 if bookmark.get("enabled") else 0,
+                            _text(bookmark.get("title"))[:120],
                         ),
                     )
                     slide_id = int(slide_cursor.lastrowid)
@@ -193,6 +219,7 @@ def _manifest_decks(manifest: dict[str, Any]) -> list[dict[str, Any]]:
                     "deck_title": deck.get("deck_title") or deck.get("title") or manifest.get("deck_title", ""),
                     "filename": deck.get("filename") or f"{manifest['package_id']}.zip",
                     "slide_count": int(deck.get("slide_count") or len(deck.get("slides") or [])),
+                    "document_structure": deck.get("document_structure") or {},
                     "slides": deck.get("slides") or [],
                 }
             )
@@ -204,9 +231,126 @@ def _manifest_decks(manifest: dict[str, Any]) -> list[dict[str, Any]]:
             "deck_title": manifest.get("deck_title", ""),
             "filename": f"{manifest['package_id']}.zip",
             "slide_count": int(manifest.get("slide_count") or len(slides)),
+            "document_structure": manifest.get("document_structure") or {},
             "slides": slides,
         }
     ]
+
+
+def _insert_sections(conn: Any, user_id: int, deck_id: int, document_structure: dict[str, Any]) -> None:
+    sections = _sections_for_import(document_structure)
+    if not sections:
+        return
+    conn.executemany(
+        """
+        INSERT INTO ppt_sections (
+            user_id, deck_id, section_index, title, topic, core_question, summary,
+            key_terms_json, prerequisite_concepts_json, start_slide, end_slide
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                int(user_id),
+                int(deck_id),
+                int(section["section_index"]),
+                section["title"],
+                section["topic"],
+                section["core_question"],
+                section["summary"],
+                json.dumps(section["key_terms"], ensure_ascii=False),
+                json.dumps(section["prerequisite_concepts"], ensure_ascii=False),
+                int(section["start_slide"]),
+                int(section["end_slide"]),
+            )
+            for section in sections
+        ),
+    )
+
+
+def _document_structure(deck: dict[str, Any]) -> dict[str, Any]:
+    value = deck.get("document_structure")
+    if not isinstance(value, dict):
+        return {"outline": "", "sections": []}
+    return {
+        "outline": _text(value.get("outline")),
+        "sections": value.get("sections") if isinstance(value.get("sections"), list) else [],
+    }
+
+
+def _sections_for_import(document_structure: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_sections = document_structure.get("sections")
+    if not isinstance(raw_sections, list):
+        return []
+    sections: list[dict[str, Any]] = []
+    for position, raw in enumerate(raw_sections, start=1):
+        if not isinstance(raw, dict):
+            continue
+        section_index = _positive_int(raw.get("section_index"), position)
+        sections.append(
+            {
+                "section_index": section_index,
+                "title": _text(raw.get("title")) or f"目录块 {section_index}",
+                "topic": _text(raw.get("topic")),
+                "core_question": _text(raw.get("core_question")),
+                "summary": _text(raw.get("summary")),
+                "key_terms": _string_list(raw.get("key_terms")),
+                "prerequisite_concepts": _string_list(raw.get("prerequisite_concepts")),
+                "start_slide": _positive_int(raw.get("start_slide"), 0),
+                "end_slide": _positive_int(raw.get("end_slide"), 0),
+            }
+        )
+    return sections
+
+
+def _slide_bookmark(slide_item: dict[str, Any]) -> dict[str, Any]:
+    value = slide_item.get("bookmark")
+    if not isinstance(value, dict):
+        return {"enabled": False, "title": ""}
+    return {
+        "enabled": _bool(value.get("enabled")),
+        "title": _text(value.get("title")),
+    }
+
+
+def _slide_page_metadata(slide_item: dict[str, Any]) -> dict[str, Any]:
+    value = slide_item.get("page_metadata")
+    source = value if isinstance(value, dict) else slide_item
+    return {
+        "section_index": _positive_int(source.get("section_index"), 0),
+        "page_type": _text(source.get("page_type")),
+        "one_sentence_summary": _text(source.get("one_sentence_summary")),
+        "slide_role": _text(source.get("slide_role")),
+        "key_points": _text(source.get("key_points")),
+    }
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    return number if number > 0 else int(default)
+
+
+def _bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on", "已添加"}
+    return False
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def _package_has_original(extract_dir: Path) -> bool:

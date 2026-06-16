@@ -8,7 +8,10 @@ class PptExplanationExportPageCopyTest(unittest.TestCase):
         copy = ppt_explanation_export.get_ppt_share_export_copy()
 
         self.assertEqual(copy["deck_label"], "选择要打包的 PPT / PDF（可多选）")
-        self.assertIn("只给别人看 PPT 页面、页面图片和 AI 逐页讲解", copy["boundary"])
+        self.assertIn("PPT 页面", copy["boundary"])
+        self.assertIn("页面图片", copy["boundary"])
+        self.assertIn("AI 逐页讲解", copy["boundary"])
+        self.assertIn("书签和 AI 分块", copy["boundary"])
         self.assertIn("不会导出你的学习记录", copy["boundary"])
         self.assertEqual(copy["button"], "生成公开分享 ZIP")
         self.assertIn("默认关闭", copy["include_original_label"])

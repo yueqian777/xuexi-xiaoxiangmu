@@ -9,7 +9,7 @@ PPT_EXPLANATION_SHARE_TYPE = "ppt_explanation_share"
 PPT_EXPLANATION_SHARE_VERSION = "1.0"
 PUBLIC_PPT_PRIVACY_MODE = "public_ppt_explanation_only"
 
-PUBLIC_INCLUDED_SECTIONS = ["slide_text", "slide_images", "ai_explanations"]
+PUBLIC_INCLUDED_SECTIONS = ["slide_text", "slide_images", "ai_explanations", "bookmarks", "document_structure"]
 PUBLIC_EXCLUDED_SECTIONS = [
     "slide_questions",
     "branch_questions",
