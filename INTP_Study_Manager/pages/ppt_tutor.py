@@ -102,6 +102,7 @@ READER_IMAGE_URL_CACHE_MAX_SLIDES = READER_IMAGE_CACHE_MAX_SLIDES * 2
 PPT_GENERATION_DEFAULT_PARALLELISM = parallel_benchmark.DEFAULT_PARALLELISM
 PPT_PARALLEL_BENCHMARK_MAX_PARALLELISM = parallel_benchmark.DEFAULT_MAX_PARALLELISM
 PPT_INLINE_BENCHMARK_MIN_SLIDES = parallel_benchmark.INLINE_BENCHMARK_MIN_SAMPLES
+READER_BACKEND_POSITION_STATE_KEY = "ppt_reader_backend_position"
 PPT_PARALLEL_BENCHMARK_STATE_KEY = "ppt_parallel_benchmark_results"
 PPT_GENERATION_REFRESH_SECONDS = 1.5
 PPT_GENERATION_REFRESH_STATE_KEY = "ppt_generation_last_refresh"
@@ -198,6 +199,18 @@ def _reader_active_slide_number(deck_id: int, slides: list[dict], initial_slide_
 
 def _reader_image_window_slide_numbers(slides: list[dict], active_slide_number: int) -> set[int]:
     return reader_image_window_slide_numbers(slides, active_slide_number, radius=READER_IMAGE_WINDOW_RADIUS)
+
+
+def _hydrate_reader_position_from_backend(deck_id: int, slides: list[dict], last_position: dict[str, int]) -> int:
+    initial_slide_number = _initial_reader_slide_number(deck_id, slides, last_position)
+    remembered_deck_id = int(last_position.get("deck_id") or 0)
+    remembered_slide_number = int(last_position.get("slide_number") or 0)
+    signature = (int(deck_id), int(initial_slide_number))
+    if remembered_deck_id == int(deck_id) and remembered_slide_number == int(initial_slide_number):
+        if st.session_state.get(READER_BACKEND_POSITION_STATE_KEY) != signature:
+            st.session_state[_reader_active_slide_state_key(int(deck_id))] = int(initial_slide_number)
+            st.session_state[READER_BACKEND_POSITION_STATE_KEY] = signature
+    return _reader_active_slide_number(deck_id, slides, initial_slide_number)
 
 
 def _reader_image_cache_state_key(deck_id: int) -> str:
@@ -1079,14 +1092,7 @@ def _render_synced_reader(
     st.subheader("同步阅读器")
     st.caption("提示：右侧固定插问栏会绑定当前页。你可以直接提问，或选中讲解文字后引用到插问。")
     user_id = int(user_id) if user_id is not None else int(deck.get("user_id") or require_login().id)
-    initial_slide_number = _initial_reader_slide_number(int(deck["id"]), slides, last_position)
-    active_state_key = _reader_active_slide_state_key(int(deck["id"]))
-    session_active_slide = st.session_state.get(active_state_key)
-    active_slide_number = (
-        initial_slide_number
-        if session_active_slide is None
-        else _reader_active_slide_number(int(deck["id"]), slides, initial_slide_number)
-    )
+    active_slide_number = _hydrate_reader_position_from_backend(int(deck["id"]), slides, last_position)
     _remember_reader_image_window(int(deck["id"]), slides, active_slide_number)
     image_slide_numbers = _reader_cached_image_slide_numbers(int(deck["id"]), slides)
     active_slide_ids = [
@@ -1172,7 +1178,7 @@ def _handle_synced_reader_action(
             image_window_slide_numbers=payload.get("imageWindowSlideNumbers"),
             image_window_radius=payload.get("imageWindowRadius"),
             user_id=user_id,
-        ):
+        ) and not bool(payload.get("persistOnly")):
             st.rerun()
         return
 

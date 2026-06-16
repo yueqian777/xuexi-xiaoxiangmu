@@ -1538,7 +1538,10 @@
     let lastFullscreenState = false;
     let readerStructureSignature = '';
     let positionNotifyTimer = null;
+    let positionCheckpointTimer = null;
     let lastPositionNotifyKey = '';
+    let lastPositionCheckpointAt = Date.now();
+    let lastPositionCheckpointSlideNumber = 0;
     let pendingImageWindowRequest = null;
     let nearbyContentTimer = null;
     let pendingNearbySlideNumber = null;
@@ -1565,6 +1568,8 @@
     const IMAGE_WINDOW_PENDING_TTL_MS = 6000;
     const PAGE_IMAGE_CACHE_MAX_SLIDES = 13;
     const PAGE_IMAGE_RENDER_RADIUS = 3;
+    const POSITION_CHECKPOINT_INTERVAL_MS = 30000;
+    const POSITION_CHECKPOINT_IDLE_MS = 800;
     const CHAT_BOTTOM_THRESHOLD = 56;
 
     function escapeHtml(value) {
@@ -2846,10 +2851,10 @@
       };
       const restoredSlide = slideOrZero(restoreScrollAfterRender?.currentSlide);
       if (isSameDeckRefresh && restoredSlide) return restoredSlide;
-      const storedSlide = slideOrZero(stored?.currentSlide);
-      if (storedSlide) return storedSlide;
       const initialSlide = slideOrZero(args?.initial_slide_number);
       if (initialSlide) return initialSlide;
+      const storedSlide = slideOrZero(stored?.currentSlide);
+      if (storedSlide) return storedSlide;
       if (restoredSlide) return restoredSlide;
       return Number(pages[0]?.slideNumber || 1);
     }
@@ -3278,6 +3283,8 @@
         latestMissingSlides.forEach(pageNumber => {
           pendingImageRequests.set(pageImageCacheKey(pageNumber), pendingUntil);
         });
+        lastPositionCheckpointAt = Date.now();
+        lastPositionCheckpointSlideNumber = Number(request.slideNumber);
         Streamlit.setComponentValue({
           action: 'reader_position',
           token: createComponentToken(),
@@ -3287,6 +3294,50 @@
           imageWindowSlideNumbers: latestMissingSlides,
         });
       }, IMAGE_WINDOW_NOTIFY_IDLE_MS);
+    }
+
+    function emitReaderPositionCheckpoint(reason = 'periodic', options) {
+      options = options || {};
+      const slideNumber = Number(currentSlideNumber || 0);
+      if (!deckId || !pageForSlide(slideNumber)) return false;
+      const force = Boolean(options.force);
+      const now = Date.now();
+      if (!force && now - Number(lastPositionCheckpointAt || 0) < POSITION_CHECKPOINT_INTERVAL_MS) {
+        return false;
+      }
+      if (!force && Number(lastPositionCheckpointSlideNumber || 0) === slideNumber) {
+        lastPositionCheckpointAt = now;
+        return false;
+      }
+      lastPositionCheckpointAt = now;
+      lastPositionCheckpointSlideNumber = slideNumber;
+      Streamlit.setComponentValue({
+        action: 'reader_position',
+        token: createComponentToken(),
+        deckId,
+        slideNumber,
+        checkpointReason: reason,
+        persistOnly: true,
+      });
+      return true;
+    }
+
+    function scheduleReaderPositionCheckpoint(reason = 'periodic') {
+      if (!deckId) return;
+      if (Date.now() - Number(lastPositionCheckpointAt || 0) < POSITION_CHECKPOINT_INTERVAL_MS) {
+        return;
+      }
+      window.clearTimeout(positionCheckpointTimer);
+      positionCheckpointTimer = window.setTimeout(() => {
+        positionCheckpointTimer = null;
+        emitReaderPositionCheckpoint(reason);
+      }, POSITION_CHECKPOINT_IDLE_MS);
+    }
+
+    function flushReaderPositionCheckpoint(reason = 'flush') {
+      window.clearTimeout(positionCheckpointTimer);
+      positionCheckpointTimer = null;
+      return emitReaderPositionCheckpoint(reason, { force: true });
     }
 
     function ensureNearbyContent(slideNumber) {
@@ -3836,6 +3887,7 @@
           saveScrollState();
         }
       }
+      if (!sameSlide) scheduleReaderPositionCheckpoint('periodic');
     }
 
     function startEditExplanation(slideNumber) {
@@ -4653,11 +4705,15 @@
         pendingImageRequests.clear();
         window.clearTimeout(nearbyContentTimer);
         window.clearTimeout(positionNotifyTimer);
+        window.clearTimeout(positionCheckpointTimer);
         nearbyContentTimer = null;
         positionNotifyTimer = null;
+        positionCheckpointTimer = null;
         pendingNearbySlideNumber = null;
         pendingImageWindowRequest = null;
         lastPositionNotifyKey = '';
+        lastPositionCheckpointAt = Date.now();
+        lastPositionCheckpointSlideNumber = 0;
         canvasQuestionFocusPending = false;
       }
       deckId = nextDeckId;
@@ -4665,6 +4721,10 @@
       pages = rawNextPages;
       const stored = readScrollState();
       const targetSlide = initialReaderTargetSlide(args, stored, isSameDeckRefresh);
+      if (!isSameDeckRefresh) {
+        lastPositionCheckpointAt = Date.now();
+        lastPositionCheckpointSlideNumber = Number(targetSlide || 0);
+      }
       const nextPages = applyCachedPageImages(rawNextPages, targetSlide);
       const nextStructureSignature = buildReaderStructureSignature(nextDeckId, nextPages, incomingSections);
       const canPatchRenderedReader = Boolean(
@@ -5706,6 +5766,7 @@
       lastFullscreenState = isFullscreen;
       syncFullscreenState(isFullscreen);
       preserveCurrentSlideAfterViewportChange(currentSlideNumber);
+      flushReaderPositionCheckpoint(isFullscreen ? 'fullscreen_enter' : 'fullscreen_exit');
       if (exitedFullscreen) {
         scheduleParentReaderCenter({ behavior: 'auto', delay: 180 });
       }
@@ -5714,6 +5775,14 @@
       if (document.fullscreenElement || document.body.classList.contains('reader-fullscreen')) {
         preserveCurrentSlideAfterViewportChange(currentSlideNumber);
       }
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        flushReaderPositionCheckpoint('visibility_hidden');
+      }
+    });
+    window.addEventListener('pagehide', () => {
+      flushReaderPositionCheckpoint('pagehide');
     });
 
     window.addEventListener('message', (event) => {

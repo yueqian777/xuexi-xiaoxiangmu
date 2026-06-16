@@ -102,6 +102,9 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "missingImageWindowSlides",
             "markPendingImageWindowSlides",
             "requestImageWindowIfNeeded",
+            "emitReaderPositionCheckpoint",
+            "scheduleReaderPositionCheckpoint",
+            "flushReaderPositionCheckpoint",
             "animationStatesForPage",
             "animationStateKey",
             "clampAnimationStateIndex",
@@ -227,7 +230,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             """
         )
 
-    def test_new_reader_entry_prefers_stored_slide_over_backend_initial_slide(self):
+    def test_new_reader_entry_prefers_backend_initial_slide_over_stored_slide(self):
         self.run_js(
             r"""
             let pages = [{ slideNumber: 1 }, { slideNumber: 3 }, { slideNumber: 7 }];
@@ -239,8 +242,8 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
               false
             );
 
-            if (target !== 7) {
-              throw new Error(`expected stored slide 7, got ${target}`);
+            if (target !== 3) {
+              throw new Error(`expected backend slide 3, got ${target}`);
             }
             """
         )
@@ -263,7 +266,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             """
         )
 
-    def test_set_active_keeps_position_local_without_backend_notify(self):
+    def test_set_active_keeps_position_local_when_checkpoint_interval_is_not_due(self):
         self.run_js(
             r"""
             let pages = [
@@ -287,6 +290,12 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             const saved = {};
             const notifications = [];
             let latestTimer = null;
+            const POSITION_CHECKPOINT_INTERVAL_MS = 30000;
+            const POSITION_CHECKPOINT_IDLE_MS = 800;
+            let positionCheckpointTimer = null;
+            let lastPositionCheckpointAt = 100000;
+            let lastPositionCheckpointSlideNumber = 1;
+            Date.now = () => 101000;
 
             const Streamlit = {
               setComponentValue: value => notifications.push(value),
@@ -352,13 +361,157 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             if (notifications.length !== 0) {
               throw new Error(`reader position should remain local, got ${notifications.length}`);
             }
-            if (latestTimer) {
-              throw new Error('reader position notify should not be scheduled');
+            if (positionCheckpointTimer || latestTimer) {
+              throw new Error('checkpoint should not be scheduled before interval is due');
             }
             if (currentSlideNumber !== 4) {
               throw new Error(`expected active slide 4, got ${currentSlideNumber}`);
             }
             """
+        )
+
+    def test_position_checkpoint_batches_slide_changes_after_interval(self):
+        self.run_js(
+            r"""
+            let pages = [
+              { slideNumber: 1 },
+              { slideNumber: 2 },
+              { slideNumber: 3 },
+              { slideNumber: 4 },
+            ];
+            let deckId = 11;
+            let currentSlideNumber = 1;
+            let childChatLayers = [];
+            let viewportAnchorState = null;
+            let viewportAnchorTimers = [];
+            let viewportAnchorReleaseTimer = null;
+            let scrollStateSaveTimer = null;
+            const IMAGE_PREFETCH_RADIUS = 1;
+            const POSITION_CHECKPOINT_INTERVAL_MS = 30000;
+            const POSITION_CHECKPOINT_IDLE_MS = 800;
+            let positionCheckpointTimer = null;
+            let lastPositionCheckpointAt = 0;
+            let lastPositionCheckpointSlideNumber = 1;
+            const saved = {};
+            const notifications = [];
+            let scheduledCheckpoint = null;
+            Date.now = () => 40000;
+
+            const Streamlit = {
+              setComponentValue: value => notifications.push(value),
+            };
+            global.localStorage = {
+              setItem: (key, value) => {
+                saved[key] = String(value);
+              },
+            };
+            global.window = {
+              clearTimeout: () => {
+                scheduledCheckpoint = null;
+              },
+              setTimeout: fn => {
+                scheduledCheckpoint = fn;
+                return 1;
+              },
+            };
+            const element = () => ({
+              offsetTop: 0,
+              classList: {
+                add: () => {},
+                remove: () => {},
+                contains: () => false,
+              },
+              querySelector: () => ({ dataset: { hydrated: '1' } }),
+            });
+            const elements = {
+              'page-2': element(),
+              'note-2': element(),
+              'page-4': element(),
+              'note-4': element(),
+            };
+            global.document = {
+              querySelectorAll: () => [element(), element()],
+              getElementById: id => elements[id] || element(),
+            };
+            const pageRoot = { scrollTop: 12 };
+            const noteRoot = {
+              offsetTop: 0,
+              scrollTop: 34,
+              scrollTo: ({ top }) => {
+                noteRoot.scrollTop = top;
+              },
+            };
+
+            function createComponentToken() {
+              return `token_${currentSlideNumber}`;
+            }
+            function closeChildLayersForSlideChange() {}
+            function hydrateNote() {}
+            function updatePageJumpDisplay() {}
+            function updateSectionSelect() {}
+            function updateRenderedPageImageWindow() {}
+            function renderChatForPage() {}
+            function centerPageAfterImageSettles() {}
+            function ensureNearbyContent() {}
+            function scheduleNearbyContent() {}
+
+            setActive(2);
+            setActive(4);
+
+            if (notifications.length !== 0) {
+              throw new Error(`checkpoint should wait for idle timer, got ${notifications.length}`);
+            }
+            if (!scheduledCheckpoint) {
+              throw new Error('checkpoint was not scheduled');
+            }
+
+            scheduledCheckpoint();
+
+            if (notifications.length !== 1) {
+              throw new Error(`expected one checkpoint, got ${notifications.length}`);
+            }
+            const payload = notifications[0];
+            if (payload.action !== 'reader_position' || payload.slideNumber !== 4 || payload.checkpointReason !== 'periodic') {
+              throw new Error(JSON.stringify(payload));
+            }
+          """
+        )
+
+    def test_forced_position_checkpoint_records_current_slide_immediately(self):
+        self.run_js(
+            r"""
+            let pages = [{ slideNumber: 1 }, { slideNumber: 4 }];
+            let deckId = 11;
+            let currentSlideNumber = 4;
+            const notifications = [];
+            const POSITION_CHECKPOINT_INTERVAL_MS = 30000;
+            const POSITION_CHECKPOINT_IDLE_MS = 800;
+            let positionCheckpointTimer = 1;
+            let lastPositionCheckpointAt = 100000;
+            let lastPositionCheckpointSlideNumber = 1;
+            Date.now = () => 101000;
+            const Streamlit = {
+              setComponentValue: value => notifications.push(value),
+            };
+            global.window = {
+              clearTimeout: () => {
+                positionCheckpointTimer = null;
+              },
+            };
+            function createComponentToken() {
+              return 'forced-token';
+            }
+
+            flushReaderPositionCheckpoint('fullscreen');
+
+            if (notifications.length !== 1) {
+              throw new Error(`expected forced checkpoint, got ${notifications.length}`);
+            }
+            const payload = notifications[0];
+            if (payload.action !== 'reader_position' || payload.slideNumber !== 4 || payload.checkpointReason !== 'fullscreen') {
+              throw new Error(JSON.stringify(payload));
+            }
+          """
         )
 
     def test_patchable_note_metadata_does_not_change_reader_structure_signature(self):

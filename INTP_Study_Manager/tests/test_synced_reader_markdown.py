@@ -622,6 +622,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             function syncActivePageDom() {}
             function centerPage() {}
             function saveScrollState() {}
+            function scheduleReaderPositionCheckpoint() {}
 
             setActive(5, { scrollNote: false });
             if (hydratedSlide !== 5) {
