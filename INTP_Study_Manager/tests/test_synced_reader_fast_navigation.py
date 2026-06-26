@@ -230,7 +230,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             """
         )
 
-    def test_new_reader_entry_prefers_backend_initial_slide_over_stored_slide(self):
+    def test_new_reader_entry_prefers_browser_saved_slide_over_sparse_backend_checkpoint(self):
         self.run_js(
             r"""
             let pages = [{ slideNumber: 1 }, { slideNumber: 3 }, { slideNumber: 7 }];
@@ -239,6 +239,24 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             const target = initialReaderTargetSlide(
               { initial_slide_number: 3 },
               { currentSlide: 7 },
+              false
+            );
+
+            if (target !== 7) {
+              throw new Error(`expected browser-saved slide 7, got ${target}`);
+            }
+            """
+        )
+
+    def test_new_reader_entry_uses_backend_initial_slide_without_browser_saved_slide(self):
+        self.run_js(
+            r"""
+            let pages = [{ slideNumber: 1 }, { slideNumber: 3 }, { slideNumber: 7 }];
+            let restoreScrollAfterRender = { currentSlide: 7 };
+
+            const target = initialReaderTargetSlide(
+              { initial_slide_number: 3 },
+              null,
               false
             );
 
@@ -264,6 +282,15 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
               throw new Error(`expected restored slide 7, got ${target}`);
             }
             """
+        )
+
+    def test_initial_target_activation_scrolls_page_before_observer_can_override_it(self):
+        self.assertIn(
+            "setActive(targetSlide, {\n"
+            "          behavior: 'auto',\n"
+            "          noteBehavior: 'auto',\n"
+            "          scrollPage: true,",
+            self.source,
         )
 
     def test_set_active_keeps_position_local_when_checkpoint_interval_is_not_due(self):

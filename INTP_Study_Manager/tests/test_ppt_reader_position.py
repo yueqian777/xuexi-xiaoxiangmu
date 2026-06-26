@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,6 +43,28 @@ class PptReaderPositionTest(unittest.TestCase):
         self.assertEqual(
             ppt_reader_state.default_reader_deck_id([2, 4], {"deck_id": 99}, "4"),
             4,
+        )
+
+    def test_reader_deck_selection_restores_memory_on_page_entry(self):
+        self.assertEqual(
+            ppt_tutor._reader_deck_id_for_render(
+                [7, 24],
+                {"deck_id": 7, "slide_number": 301},
+                24,
+                page_just_entered=True,
+            ),
+            7,
+        )
+
+    def test_reader_deck_selection_keeps_manual_deck_inside_page(self):
+        self.assertEqual(
+            ppt_tutor._reader_deck_id_for_render(
+                [7, 24],
+                {"deck_id": 7, "slide_number": 301},
+                24,
+                page_just_entered=False,
+            ),
+            24,
         )
 
     def test_reader_image_window_slide_numbers_clips_edges(self):
@@ -376,6 +399,33 @@ class PptReaderPositionTest(unittest.TestCase):
             ppt_tutor._handle_synced_reader_action(deck, slides, {}, payload, [], user_id=42)
 
         save_last_reader_position.assert_called_once_with(42, 3, 5)
+        rerun.assert_not_called()
+
+    def test_reader_position_write_error_is_reported_without_traceback(self):
+        session_state = {}
+        deck = {"id": 3, "user_id": 42}
+        slides = [{"id": 5, "slide_number": 5}]
+        payload = {
+            "action": "reader_position",
+            "deckId": 3,
+            "slideNumber": 5,
+            "token": "tok-readonly-position",
+        }
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(
+                ppt_tutor,
+                "_save_last_reader_position",
+                side_effect=sqlite3.OperationalError("attempt to write a readonly database"),
+            ),
+            patch.object(ppt_tutor.st, "error") as error,
+            patch.object(ppt_tutor.st, "rerun") as rerun,
+        ):
+            ppt_tutor._handle_synced_reader_action(deck, slides, {}, payload, [], user_id=42)
+
+        error.assert_called_once()
+        self.assertIn("readonly database", str(error.call_args.args[0]))
+        self.assertEqual(session_state["ppt_reader_position_last_token_3"], "tok-readonly-position")
         rerun.assert_not_called()
 
     def test_auto_refresh_running_generation_skips_unchanged_recent_task(self):

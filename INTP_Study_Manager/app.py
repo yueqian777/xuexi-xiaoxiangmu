@@ -48,6 +48,18 @@ PAGES = {
     "PPT 讲解包导入": ppt_explanation_import.render,
 }
 
+ACTIVE_PAGE_STATE_KEY = "app_active_page_name"
+PAGE_JUST_ENTERED_STATE_KEY = "app_page_just_entered"
+
+
+def _mark_active_page(page_name: str, state: dict | None = None) -> bool:
+    state = st.session_state if state is None else state
+    previous_page = state.get(ACTIVE_PAGE_STATE_KEY)
+    just_entered = previous_page != page_name
+    state[ACTIVE_PAGE_STATE_KEY] = page_name
+    state[PAGE_JUST_ENTERED_STATE_KEY] = just_entered
+    return just_entered
+
 
 def _install_browser_dom_guard() -> None:
     st.iframe(
@@ -144,6 +156,7 @@ def main() -> None:
     st.sidebar.title("INTP Study Manager")
     st.sidebar.caption("问题驱动 · 闭卷回忆 · 错因分析 · 间隔复习")
     page_name = st.sidebar.radio("页面", list(PAGES.keys()))
+    _mark_active_page(page_name)
     st.sidebar.divider()
     st.sidebar.markdown("**70% 原则**")
     st.sidebar.caption("掌握度达到 70% 可前进，低于 70% 自动进入重点关注。")

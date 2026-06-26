@@ -2851,10 +2851,10 @@
       };
       const restoredSlide = slideOrZero(restoreScrollAfterRender?.currentSlide);
       if (isSameDeckRefresh && restoredSlide) return restoredSlide;
-      const initialSlide = slideOrZero(args?.initial_slide_number);
-      if (initialSlide) return initialSlide;
       const storedSlide = slideOrZero(stored?.currentSlide);
       if (storedSlide) return storedSlide;
+      const initialSlide = slideOrZero(args?.initial_slide_number);
+      if (initialSlide) return initialSlide;
       if (restoredSlide) return restoredSlide;
       return Number(pages[0]?.slideNumber || 1);
     }
@@ -4888,6 +4888,7 @@
         setActive(targetSlide, {
           behavior: 'auto',
           noteBehavior: 'auto',
+          scrollPage: true,
           scrollNote: !isSameDeckRefresh,
           immediateNearbyContent: true,
         });

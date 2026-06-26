@@ -102,6 +102,7 @@ READER_IMAGE_URL_CACHE_MAX_SLIDES = READER_IMAGE_CACHE_MAX_SLIDES * 2
 PPT_GENERATION_DEFAULT_PARALLELISM = parallel_benchmark.DEFAULT_PARALLELISM
 PPT_PARALLEL_BENCHMARK_MAX_PARALLELISM = parallel_benchmark.DEFAULT_MAX_PARALLELISM
 PPT_INLINE_BENCHMARK_MIN_SLIDES = parallel_benchmark.INLINE_BENCHMARK_MIN_SAMPLES
+APP_PAGE_JUST_ENTERED_STATE_KEY = "app_page_just_entered"
 READER_BACKEND_POSITION_STATE_KEY = "ppt_reader_backend_position"
 PPT_PARALLEL_BENCHMARK_STATE_KEY = "ppt_parallel_benchmark_results"
 PPT_GENERATION_REFRESH_SECONDS = 1.5
@@ -169,6 +170,33 @@ def _save_last_reader_position(
 
 def _default_reader_deck_id(deck_ids: list[int], last_position: dict[str, int]) -> int:
     return default_reader_deck_id(deck_ids, last_position, st.session_state.get(LAST_READER_DECK_STATE_KEY))
+
+
+def _reader_deck_id_for_render(
+    deck_ids: list[int],
+    last_position: dict[str, int],
+    state_deck_id: object,
+    *,
+    page_just_entered: bool,
+) -> int:
+    if not deck_ids:
+        return 0
+
+    remembered_deck_id = int(last_position.get("deck_id") or 0)
+    if page_just_entered and remembered_deck_id in deck_ids:
+        return remembered_deck_id
+
+    try:
+        current_deck_id = int(state_deck_id or 0)
+    except (TypeError, ValueError):
+        current_deck_id = 0
+    if current_deck_id in deck_ids:
+        return current_deck_id
+
+    if remembered_deck_id in deck_ids:
+        return remembered_deck_id
+
+    return deck_ids[0]
 
 
 def _remember_reader_deck_selection(user_id: int, deck_id: int, last_position: dict[str, int]) -> None:
@@ -355,9 +383,14 @@ def render() -> None:
     deck_by_id = {int(deck["id"]): deck for deck in decks}
     deck_ids = list(deck_by_id)
     last_position = _read_last_reader_position(user.id)
-    default_deck_id = _default_reader_deck_id(deck_ids, last_position)
-    if st.session_state.get(LAST_READER_DECK_STATE_KEY) not in deck_by_id:
-        st.session_state[LAST_READER_DECK_STATE_KEY] = default_deck_id
+    selected_deck_id = _reader_deck_id_for_render(
+        deck_ids,
+        last_position,
+        st.session_state.get(LAST_READER_DECK_STATE_KEY),
+        page_just_entered=bool(st.session_state.get(APP_PAGE_JUST_ENTERED_STATE_KEY)),
+    )
+    if st.session_state.get(LAST_READER_DECK_STATE_KEY) != selected_deck_id:
+        st.session_state[LAST_READER_DECK_STATE_KEY] = selected_deck_id
     deck_id = st.selectbox(
         "选择 PPT",
         deck_ids,
@@ -1170,15 +1203,20 @@ def _handle_synced_reader_action(
 
     token = str(payload.get("token") or "").strip()
     if action == "reader_position":
-        if _handle_reader_position_update(
-            deck,
-            slide_number,
-            token,
-            slides=slides,
-            image_window_slide_numbers=payload.get("imageWindowSlideNumbers"),
-            image_window_radius=payload.get("imageWindowRadius"),
-            user_id=user_id,
-        ) and not bool(payload.get("persistOnly")):
+        try:
+            should_rerun = _handle_reader_position_update(
+                deck,
+                slide_number,
+                token,
+                slides=slides,
+                image_window_slide_numbers=payload.get("imageWindowSlideNumbers"),
+                image_window_radius=payload.get("imageWindowRadius"),
+                user_id=user_id,
+            )
+        except sqlite3.Error as exc:
+            st.error(f"阅读位置保存失败：{exc}")
+            return
+        if should_rerun and not bool(payload.get("persistOnly")):
             st.rerun()
         return
 
