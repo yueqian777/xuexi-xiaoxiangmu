@@ -89,6 +89,7 @@ from services.question_to_knowledge_service import (
     get_question_knowledge_draft,
 )
 from services.study_asset_service import parse_study_assets, save_study_assets
+from services.ui_helpers import render_workbench_header
 
 SYNCED_READER_COMPONENT_PATH = BASE_DIR / "components" / "synced_reader"
 SYNCED_READER_IMAGE_CACHE_PATH = SYNCED_READER_COMPONENT_PATH / "_reader_image_cache"
@@ -348,12 +349,10 @@ def _remember_reader_image_window(
 
 def render() -> None:
     user = require_login()
-    st.title("PPT 逐页讲解")
-    st.caption("边看 PPT 边让 GPT 按页讲解；插问单独进入浮窗，不覆盖当前页主线讲解。")
+    render_workbench_header("PPT 学习工作台", "按资料准备、生成讲解、同步阅读和学习沉淀组织 PPT / PDF 学习流程。")
 
     _resume_interrupted_structure_generation()
     generation_task = _resume_interrupted_generation()
-    _render_api_settings(user.id)
     decks = fetch_all(
         """
         SELECT *
@@ -374,7 +373,15 @@ def render() -> None:
         """,
         (user.id,),
     )
-    _render_upload_form(expanded=not bool(decks))
+    workbench_mode = st.radio(
+        "工作模式",
+        ["阅读", "资料准备", "生成讲解", "学习沉淀"],
+        horizontal=True,
+        key="ppt_workbench_mode",
+        help="阅读是默认学习界面；低频维护和批量生成被收进独立模式，减少页面干扰。",
+    )
+    if workbench_mode == "资料准备" or not decks:
+        _render_upload_form(expanded=not bool(decks))
 
     if not decks:
         st.info("请先上传一个 PPTX 或 PDF 文件。当前版本会解析每页文字内容，后续可继续增强真实页面渲染和 OCR。")
@@ -412,14 +419,22 @@ def render() -> None:
     sections = fetch_deck_sections(int(deck["id"]), user_id=user.id)
 
     st.divider()
-    _render_deck_actions(deck, slides, latest_by_slide_id, sections, user_id=user.id)
-    _render_question_to_knowledge_panel(deck, user_id=user.id)
-    _render_synced_reader(deck, slides, latest_by_slide_id, last_position, sections, user_id=user.id)
+    if workbench_mode == "资料准备":
+        _render_source_preparation(deck, slides)
+        _render_document_structure_controls(deck, slides, sections)
+    elif workbench_mode == "生成讲解":
+        _render_api_settings(user.id)
+        _render_generation_controls(deck, slides, latest_by_slide_id, sections, user_id=user.id)
+    elif workbench_mode == "学习沉淀":
+        _render_question_to_knowledge_panel(deck, user_id=user.id)
+        _render_study_asset_generator(deck, sections, slides, latest_by_slide_id)
+    else:
+        _render_api_settings(user.id)
+        _render_question_to_knowledge_panel(deck, user_id=user.id)
+        _render_synced_reader(deck, slides, latest_by_slide_id, last_position, sections, user_id=user.id)
+
     _auto_refresh_structure_generation(st.session_state.get("ppt_structure_task"))
     _auto_refresh_running_generation(generation_task)
-
-    st.divider()
-    _render_study_asset_generator(deck, sections, slides, latest_by_slide_id)
 
 
 def _render_api_settings(user_id: int) -> None:
@@ -539,6 +554,155 @@ def _render_upload_form(*, expanded: bool = False) -> None:
             _activate_newly_uploaded_deck(deck_id, slides)
             _start_document_structure_generation(deck, slides, source="upload")
         st.rerun()
+
+
+def _render_source_preparation(deck: dict, slides: list[dict]) -> None:
+    st.subheader("资料准备")
+    st.caption("上传后的低频维护集中在这里：原页面图片、动画状态、单页插入替换和删除。")
+    missing_images = [slide for slide in slides if not _image_exists(slide)]
+    can_render_source = _deck_can_render_page_images(deck)
+    can_generate_animation = _deck_can_generate_animation_states(deck)
+    cols = st.columns([1.3, 1.3, 2])
+    if cols[0].button("生成 / 修复原页面图片", disabled=(not missing_images or not can_render_source)):
+        try:
+            with st.spinner("正在生成原页面图片..."):
+                render_missing_page_images(deck, slides)
+            st.success("原页面图片已生成。")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"生成原页面图片失败：{exc}")
+    if missing_images and not can_render_source:
+        cols[0].caption("导入的公开分享包没有原始 PPT/PDF 时，不能重新渲染原页面图片。")
+    if cols[1].button("生成 / 修复动画状态", disabled=not can_generate_animation):
+        result = _generate_deck_animation_states_best_effort(deck, slides, notify=True)
+        if result and not result.skipped_reason:
+            st.rerun()
+    if not can_generate_animation:
+        cols[1].caption("仅原始 PPTX 文件支持动画状态缓存。")
+
+    _render_source_page_editor(deck, slides)
+
+
+def _render_generation_controls(
+    deck: dict,
+    slides: list[dict],
+    latest_by_slide_id: dict[int, dict],
+    sections: list[dict],
+    *,
+    user_id: int,
+) -> None:
+    st.subheader("生成讲解")
+    st.caption("目录分块、页面范围、API 组和后台批量生成集中在这里；阅读时默认不展开这些低频控制。")
+    _render_document_structure_controls(deck, slides, sections)
+
+    with st.expander("逐页讲解生成配置", expanded=True):
+        only_missing = st.checkbox("只生成缺失讲解", value=True)
+        input_mode = st.radio(
+            "页面内容发送方式",
+            ("文字优先，缺文字时发原图", "只用识别文字，不发原图", "直接发原图，不使用识别文字"),
+            horizontal=True,
+            help="公式、符号或扫描页识别不准时，可选择直接把原页面图片发给支持视觉输入的 API。",
+            key=f"ppt_generation_input_mode_{deck['id']}",
+        )
+        send_image_when_no_text = input_mode != "只用识别文字，不发原图"
+        force_image_input = input_mode == "直接发原图，不使用识别文字"
+        selected_slides, range_label, force_regenerate = _select_generation_range(slides, sections)
+        enabled_providers = list_api_providers(enabled_only=True, user_id=user_id)
+        active_provider_key = str(st.session_state.get("active_api_provider_key") or "")
+        provider_by_key = {str(provider["provider_key"]): provider for provider in enabled_providers}
+        default_provider_keys = [active_provider_key] if active_provider_key in provider_by_key else list(provider_by_key)[:1]
+        selected_provider_keys = st.multiselect(
+            "本次生成使用的 API 组",
+            list(provider_by_key),
+            default=default_provider_keys,
+            format_func=lambda item_key: provider_label(provider_by_key[item_key]),
+            help="可同时选择多个已启用 Provider；后台生成会按各 Provider 的并行上限分配页面。",
+            key=f"ppt_generation_provider_group_{deck['id']}",
+        )
+        provider_pool = _build_generation_provider_pool(
+            enabled_providers,
+            selected_provider_keys=selected_provider_keys,
+            active_provider_key=active_provider_key,
+        )
+        provider_pool = _apply_parallel_benchmark_results(provider_pool)
+        benchmark_cols = st.columns([1.1, 2])
+        if benchmark_cols[0].button("测速最大并行路数", disabled=not provider_pool, key=f"ppt_parallel_benchmark_{deck['id']}"):
+            if not provider_pool:
+                st.warning("请先选择至少一个 API。")
+            else:
+                with st.spinner("正在测速当前 API 组的最大稳定并行路数..."):
+                    benchmark_result = _benchmark_generation_provider_pool(provider_pool)
+                _store_parallel_benchmark_results(benchmark_result)
+                provider_pool = _apply_parallel_benchmark_results(provider_pool)
+                st.success(_format_parallel_benchmark_result(benchmark_result))
+        benchmark_summary = _format_parallel_benchmark_summary(provider_pool)
+        if benchmark_summary:
+            benchmark_cols[1].caption(benchmark_summary)
+        benchmark_during_generation = False
+        if len(selected_slides) >= PPT_INLINE_BENCHMARK_MIN_SLIDES:
+            benchmark_during_generation = st.checkbox(
+                "生成时顺带压测当前 API 组",
+                value=False,
+                help=(
+                    f"仅在本次范围不少于 {PPT_INLINE_BENCHMARK_MIN_SLIDES} 页时建议开启；"
+                    "如果样本不足或结论不可靠，只记录本地样本，不绑定为最大并行路数。"
+                ),
+                key=f"ppt_generation_inline_benchmark_{deck['id']}",
+            )
+        else:
+            st.caption(f"生成范围少于 {PPT_INLINE_BENCHMARK_MIN_SLIDES} 页时不建议用生成过程压测，测速结果容易偏低。")
+        generation_cols = st.columns([1.3, 1.3, 2])
+        adaptive_parallelism = generation_cols[2].checkbox(
+            "自适应最快速度",
+            value=True,
+            help=(
+                "自动使用当前 API 组的并行上限；如果触发限流，可关闭后手动调低。\n\n"
+                "生成出错的页面会自动重新加入队列，直到本次范围内可生成页面全部成功。\n"
+                "左侧滚动到某页时，右侧讲解会自动同步滚动到对应页。"
+            ),
+            key=f"ppt_generation_adaptive_parallelism_{deck['id']}",
+        )
+        parallel_cap = _adaptive_generation_parallelism(provider_pool, max(1, len(selected_slides)))
+        if adaptive_parallelism:
+            parallelism = parallel_cap
+            generation_cols[2].caption(f"自适应并行上限：{parallel_cap} 路。")
+        else:
+            parallelism = generation_cols[2].slider(
+                "并行生成路数",
+                min_value=1,
+                max_value=max(1, parallel_cap),
+                value=min(2, max(1, parallel_cap)),
+                help="后台生成时同时发起的逐页讲解请求数；遇到限流或上游不稳定时调低。",
+                key=f"ppt_generation_parallelism_{deck['id']}",
+            )
+        group_supports_image_input = any(provider.get("supports_image_input") for provider in provider_pool)
+        if force_image_input and not group_supports_image_input:
+            st.warning("当前 API 组看起来没有支持图片输入的 Provider。直接发原图模式无法生成；请加入视觉模型后再试。")
+        elif send_image_when_no_text and not group_supports_image_input:
+            st.warning("当前 API 组看起来没有支持图片输入的 Provider。空白扫描页会被跳过；请加入视觉模型，或重新导入可提取文字的 PDF。")
+        st.caption(f"当前生成范围：{range_label}；将逐页调用 API 并保存到右侧讲解区。")
+        run_in_background = st.checkbox("后台运行（切换页面时继续生成）", value=True)
+        if st.button("生成所选范围逐页讲解", type="primary"):
+            if not provider_pool:
+                st.error("请至少选择一个已启用 Provider 作为本次生成的 API 组。")
+                return
+            _generate_whole_deck_explanations(
+                deck,
+                selected_slides,
+                only_missing=only_missing and not force_regenerate,
+                send_image_when_no_text=send_image_when_no_text,
+                force_image_input=force_image_input,
+                supports_image_input=group_supports_image_input,
+                latest_by_slide_id=latest_by_slide_id,
+                all_slides=slides,
+                sections=sections,
+                background=run_in_background,
+                parallelism=parallelism,
+                provider_pool=provider_pool,
+                adaptive_parallelism=adaptive_parallelism,
+                benchmark_during_generation=benchmark_during_generation,
+                user_id=user_id,
+            )
 
 
 def _render_deck_actions(

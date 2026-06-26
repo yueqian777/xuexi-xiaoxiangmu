@@ -13,6 +13,7 @@ from services.knowledge_card_service import (
     mastery_level,
 )
 from services.review_service import ensure_initial_review_tasks
+from services.ui_helpers import render_workbench_header
 
 RELATION_TYPES = [
     "前置知识",
@@ -30,65 +31,27 @@ RELATION_TYPES = [
 def render() -> None:
     user = require_login()
     _install_knowledge_card_styles()
-    st.title("知识点卡片")
-    st.caption("用于快速定位核心知识、闭卷回忆和间隔复习；公式请直接写标准 Markdown / LaTeX。")
+    render_workbench_header("知识沉淀工作台", "先浏览和定位已有知识，再按需要新建、编辑、复习或建立知识双链。")
 
     sessions = fetch_all(
         "SELECT id, date, subject, title FROM study_sessions WHERE user_id = ? ORDER BY date DESC, id DESC",
         (user.id,),
     )
     session_options = [None] + [s["id"] for s in sessions]
-
-    with st.form("add_knowledge_card"):
-        st.subheader("创建知识点卡片")
-        cols = st.columns(3)
-        subject = cols[0].text_input("科目")
-        topic = cols[1].text_input("知识点")
-        mastery = cols[2].slider("掌握度", 0, 100, 60)
-        core_question = st.text_area("核心问题", placeholder="这个知识点想解决什么问题？")
-        one_sentence = st.text_area("一句话解释")
-        logic_or_formula = st.text_area("公式 / 逻辑推导")
-        application = st.text_area("典型题 / 应用场景")
-        need_review = st.checkbox("创建 1-3-7-14 复习任务", value=True)
-        source_session_id = st.selectbox(
-            "关联学习记录（可选）",
-            session_options,
-            format_func=lambda item: "不关联" if item is None else _session_label(sessions, item),
-        )
-        submitted = st.form_submit_button("保存知识点卡片")
-
-    if submitted:
-        if not subject.strip() or not topic.strip() or not one_sentence.strip():
-            st.error("科目、知识点、一句话解释不能为空。")
-        else:
-            knowledge_id = insert_and_get_id(
-                """
-                INSERT INTO knowledge_cards (
-                    user_id, subject, topic, core_question, one_sentence, logic_or_formula,
-                    application, mastery, need_review, source_session_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user.id,
-                    subject.strip(),
-                    topic.strip(),
-                    core_question.strip(),
-                    one_sentence.strip(),
-                    logic_or_formula.strip(),
-                    application.strip(),
-                    mastery,
-                    int(need_review),
-                    source_session_id,
-                ),
-            )
-            if need_review:
-                ensure_initial_review_tasks(knowledge_id, date.today(), user_id=user.id)
-            st.success("知识点卡片已保存，复习任务已按 1-3-7-14 生成。")
-
-    st.divider()
     cards = fetch_all("SELECT * FROM knowledge_cards WHERE user_id = ? ORDER BY created_at DESC, id DESC", (user.id,))
-    st.subheader("知识点列表")
+    mode = st.radio(
+        "知识沉淀模式",
+        ["浏览知识点", "新建知识点"],
+        horizontal=True,
+        key="knowledge_cards_mode",
+        help="默认先浏览已有卡片，避免新建表单占据第一屏。",
+    )
+
+    if mode == "新建知识点":
+        _render_create_form(user.id, sessions, session_options)
+        st.divider()
+
+    st.subheader("浏览知识点")
     if not cards:
         st.info("暂无知识点卡片。")
         return
@@ -128,6 +91,55 @@ def render() -> None:
         _render_recall_panel(card)
 
     _render_knowledge_links(user.id, card, cards)
+
+
+def _render_create_form(user_id: int, sessions: list[dict], session_options: list[int | None]) -> None:
+    with st.form("add_knowledge_card"):
+        st.subheader("新建知识点")
+        cols = st.columns(3)
+        subject = cols[0].text_input("科目")
+        topic = cols[1].text_input("知识点")
+        mastery = cols[2].slider("掌握度", 0, 100, 60)
+        core_question = st.text_area("核心问题", placeholder="这个知识点想解决什么问题？")
+        one_sentence = st.text_area("一句话解释")
+        logic_or_formula = st.text_area("公式 / 逻辑推导")
+        application = st.text_area("典型题 / 应用场景")
+        need_review = st.checkbox("创建 1-3-7-14 复习任务", value=True)
+        source_session_id = st.selectbox(
+            "关联学习记录（可选）",
+            session_options,
+            format_func=lambda item: "不关联" if item is None else _session_label(sessions, item),
+        )
+        submitted = st.form_submit_button("保存知识点卡片")
+
+    if submitted:
+        if not subject.strip() or not topic.strip() or not one_sentence.strip():
+            st.error("科目、知识点、一句话解释不能为空。")
+        else:
+            knowledge_id = insert_and_get_id(
+                """
+                INSERT INTO knowledge_cards (
+                    user_id, subject, topic, core_question, one_sentence, logic_or_formula,
+                    application, mastery, need_review, source_session_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    subject.strip(),
+                    topic.strip(),
+                    core_question.strip(),
+                    one_sentence.strip(),
+                    logic_or_formula.strip(),
+                    application.strip(),
+                    mastery,
+                    int(need_review),
+                    source_session_id,
+                ),
+            )
+            if need_review:
+                ensure_initial_review_tasks(knowledge_id, date.today(), user_id=user_id)
+            st.success("知识点卡片已保存，复习任务已按 1-3-7-14 生成。")
 
 
 def _filter_cards(cards: list[dict]) -> list[dict]:

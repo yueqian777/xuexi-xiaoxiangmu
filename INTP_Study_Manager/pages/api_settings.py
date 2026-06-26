@@ -44,6 +44,7 @@ from services.secret_store import (
     secret_store_exists,
     upsert_provider_secret,
 )
+from services.ui_helpers import render_workbench_header
 
 API_TEST_REQUEST_TIMEOUT_SECONDS = 300
 
@@ -60,10 +61,39 @@ AUTH_TYPES = {
 def render() -> None:
     user = require_login()
     user_id = user.id
-    st.title("API 接入设置")
-    st.caption("统一管理模型接口：OpenAI、OpenAI 兼容代理、Anthropic、Gemini，以及任意自定义 HTTP JSON API。")
+    render_workbench_header("API 设置工作台", "日常调用、密钥库、Provider 高级管理和余额查询分开处理，避免设置页一次性展开过多内容。")
 
     providers = list_api_providers(user_id=user_id)
+    modes = ["日常调用", "密钥库", "Provider 管理", "余额 / Plan", "参考"]
+    if user.role != "admin":
+        modes = ["日常调用", "密钥库", "参考"]
+        st.info("Provider 模板由管理员统一维护。普通用户可以保存自己的加密 API Key 并测试调用。")
+    mode = st.radio(
+        "设置任务",
+        modes,
+        horizontal=True,
+        key="api_settings_mode",
+        help="把常用调用和低频维护分开，减少设置页的认知负担。",
+    )
+
+    if mode == "日常调用":
+        _render_provider_overview(providers)
+        if user.role == "admin":
+            _render_provider_management(providers, user_id=user_id)
+        _render_test_provider(providers, user_id=user_id)
+    elif mode == "密钥库":
+        _render_secret_vault(providers)
+    elif mode == "Provider 管理" and user.role == "admin":
+        _render_provider_overview(providers)
+        _render_edit_provider(providers, user_id=user_id)
+        _render_create_provider(user_id=user_id)
+    elif mode == "余额 / Plan" and user.role == "admin":
+        _render_balance_query(providers, user_id=user_id)
+    else:
+        _render_help()
+
+
+def _render_provider_overview(providers: list[dict]) -> None:
     if providers:
         st.subheader("当前 Provider")
         overview = pd.DataFrame(providers)[
@@ -97,35 +127,6 @@ def render() -> None:
         )
     else:
         st.info("暂无 Provider。应用启动时会自动创建默认模板。")
-
-    if user.role == "admin":
-        tab_manage, tab_balance, tab_edit, tab_custom, tab_vault, tab_test, tab_help = st.tabs(
-            ["编号 / 删除", "余额查询", "编辑 Provider", "新增自定义 API", "加密 API Key", "测试调用", "填写参考"]
-        )
-
-        with tab_manage:
-            _render_provider_management(providers, user_id=user_id)
-
-        with tab_balance:
-            _render_balance_query(providers, user_id=user_id)
-
-        with tab_edit:
-            _render_edit_provider(providers, user_id=user_id)
-
-        with tab_custom:
-            _render_create_provider(user_id=user_id)
-    else:
-        tab_vault, tab_test, tab_help = st.tabs(["加密 API Key", "测试调用", "填写参考"])
-        st.info("Provider 模板由管理员统一维护。普通用户可以在这里保存自己的加密 API Key 并测试调用。")
-
-    with tab_vault:
-        _render_secret_vault(providers)
-
-    with tab_test:
-        _render_test_provider(providers, user_id=user_id)
-
-    with tab_help:
-        _render_help()
 
 
 def _render_provider_management(providers: list[dict], *, user_id: int) -> None:

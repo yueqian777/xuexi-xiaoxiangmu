@@ -29,6 +29,13 @@ from services.daily_ai_review_service import (
 from services.review_service import get_today_review_tasks
 from services.reminder_service import get_daily_reminder_config, get_today_review_log, is_daily_review_due_now
 from services.stats_service import low_mastery_cards, open_parking_questions, recent_blockers, recent_knowledge_links
+from services.ui_helpers import render_workbench_header, set_navigation_target
+
+
+def _go_to_page(label: str, *, section_id: str, page_id: str, key: str) -> None:
+    if st.button(label, use_container_width=True, key=key):
+        set_navigation_target(section_id, page_id)
+        st.rerun()
 
 
 def _self_test_question(topic: str) -> str:
@@ -262,8 +269,7 @@ def _install_daily_review_styles() -> None:
 
 def render() -> None:
     user = require_login()
-    st.title("首页 Dashboard")
-    st.caption("每天先看复习，再登记新学习，最后生成闭卷回忆 Prompt。")
+    render_workbench_header("今日工作台", "先处理今天必须完成的复习，再进入资料学习和知识沉淀。")
 
     today_tasks = get_today_review_tasks(user_id=user.id)
     low_cards = low_mastery_cards(user_id=user.id)
@@ -279,6 +285,21 @@ def render() -> None:
     col3.metric("最近卡点", len(blockers))
     col4.metric("停车场未解决", len(parking))
 
+    st.subheader("常用行动入口")
+    action_cols = st.columns(4)
+    with action_cols[0]:
+        _go_to_page("继续资料学习", section_id="materials", page_id="ppt_tutor", key="dashboard_go_ppt")
+        st.caption("阅读 PPT / PDF、生成逐页讲解、插问。")
+    with action_cols[1]:
+        _go_to_page("登记今日学习", section_id="knowledge", page_id="study_sessions", key="dashboard_go_study")
+        st.caption("记录主题、核心问题、卡点和掌握度。")
+    with action_cols[2]:
+        _go_to_page("整理知识卡片", section_id="knowledge", page_id="knowledge_cards", key="dashboard_go_cards")
+        st.caption("沉淀知识点、闭卷回忆和知识双链。")
+    with action_cols[3]:
+        _go_to_page("处理复习任务", section_id="review", page_id="reviews", key="dashboard_go_reviews")
+        st.caption("完成到期复习并更新掌握度。")
+
     with st.container(border=True):
         st.subheader("每日复盘提醒")
         if review_log:
@@ -289,8 +310,6 @@ def render() -> None:
             st.info(f"今日 {reminder_config['time']} 会提醒你进行每日复盘。")
         else:
             st.caption("每日复盘提醒当前未启用。")
-
-    _render_default_api_and_daily_ai_review()
 
     st.subheader(f"今天需要复习什么：{date.today().isoformat()}")
     if today_tasks:
@@ -306,9 +325,6 @@ def render() -> None:
                     st.caption(f"上次错因：{task['last_cause']}")
     else:
         st.info("今天没有到期复习任务。可以新增知识点卡片，系统会自动生成 1-3-7-14 复习。")
-
-    st.subheader("今日学习记录入口")
-    st.write("从左侧进入 **学习登记**，按“核心问题 + 已掌握内容 + 卡点 + 掌握度”记录今天的学习。")
 
     left, right = st.columns(2)
     with left:
@@ -361,3 +377,6 @@ def render() -> None:
         )
     else:
         st.caption("暂无未解决的扩展问题。")
+
+    st.divider()
+    _render_default_api_and_daily_ai_review()
