@@ -120,6 +120,43 @@ class PptReaderPositionTest(unittest.TestCase):
             1,
         )
 
+    def _render_synced_reader_component_kwargs(self, *, page_just_entered: bool) -> dict:
+        captured = {}
+
+        def fake_component(**kwargs):
+            captured.update(kwargs)
+            return None
+
+        deck = {"id": 3, "user_id": 42, "title": "Deck", "subject": "Subject"}
+        slides = [{"id": 101, "slide_number": 5}]
+        session_state = {ppt_tutor.APP_PAGE_JUST_ENTERED_STATE_KEY: page_just_entered}
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor.st, "subheader"),
+            patch.object(ppt_tutor.st, "caption"),
+            patch.object(ppt_tutor, "_hydrate_reader_position_from_backend", return_value=5),
+            patch.object(ppt_tutor, "_remember_reader_image_window"),
+            patch.object(ppt_tutor, "_reader_cached_image_slide_numbers", return_value={5}),
+            patch.object(ppt_tutor, "_questions_by_slide_ids", return_value={}),
+            patch.object(ppt_tutor, "animation_states_by_slide_ids", return_value={}),
+            patch.object(ppt_tutor, "_build_reader_payload", return_value=[{"slideNumber": 5}]),
+            patch.object(ppt_tutor, "_active_model_label", return_value="model"),
+            patch.object(ppt_tutor, "_get_synced_reader_component", return_value=fake_component),
+        ):
+            ppt_tutor._render_synced_reader(deck, slides, {}, {}, [], user_id=42)
+
+        return captured
+
+    def test_synced_reader_component_centers_parent_only_on_page_entry(self):
+        kwargs = self._render_synced_reader_component_kwargs(page_just_entered=True)
+
+        self.assertIs(kwargs["center_on_page_entry"], True)
+
+    def test_synced_reader_component_does_not_center_parent_on_same_page_rerun(self):
+        kwargs = self._render_synced_reader_component_kwargs(page_just_entered=False)
+
+        self.assertIs(kwargs["center_on_page_entry"], False)
+
     def test_reader_position_update_does_not_refresh_duplicate_token(self):
         with (
             patch.object(ppt_tutor.st, "session_state", {"ppt_reader_position_last_token_3": "tok"}),

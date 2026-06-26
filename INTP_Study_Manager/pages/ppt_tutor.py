@@ -1160,6 +1160,7 @@ def _render_synced_reader(
         pages=payload,
         sections=_reader_sections_payload(sections),
         initial_slide_number=active_slide_number,
+        center_on_page_entry=bool(st.session_state.get(APP_PAGE_JUST_ENTERED_STATE_KEY)),
         height=850,
         default=None,
         key=f"synced_reader_{deck['id']}",

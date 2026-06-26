@@ -549,17 +549,39 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             """
         )
 
-    def test_initial_reader_target_uses_browser_saved_slide_only_without_backend_initial(self):
+    def test_initial_reader_target_prefers_backend_initial_over_browser_saved_slide_on_entry(self):
         self.run_js(
             r"""
             var pages = [
               { slideNumber: 1 },
+              { slideNumber: 4 },
               { slideNumber: 9 },
             ];
             var restoreScrollAfterRender = { currentSlide: 4 };
 
             const target = initialReaderTargetSlide(
               { initial_slide_number: 4 },
+              { currentSlide: 9, pageScroll: 500, noteScroll: 300 },
+              false
+            );
+            if (target !== 4) {
+              throw new Error(String(target));
+            }
+            """
+        )
+
+    def test_initial_reader_target_uses_browser_saved_slide_without_backend_initial(self):
+        self.run_js(
+            r"""
+            var pages = [
+              { slideNumber: 1 },
+              { slideNumber: 4 },
+              { slideNumber: 9 },
+            ];
+            var restoreScrollAfterRender = { currentSlide: 4 };
+
+            const target = initialReaderTargetSlide(
+              { initial_slide_number: 99 },
               { currentSlide: 9, pageScroll: 500, noteScroll: 300 },
               false
             );

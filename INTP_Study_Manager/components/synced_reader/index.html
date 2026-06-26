@@ -2726,6 +2726,7 @@
           behavior: 'auto',
           skipSave: true,
           skipChatRender: true,
+          preserveViewportAnchor: true,
         });
         restoreNoteAnchor(state.noteAnchor);
         saveScrollState();
@@ -2851,12 +2852,16 @@
       };
       const restoredSlide = slideOrZero(restoreScrollAfterRender?.currentSlide);
       if (isSameDeckRefresh && restoredSlide) return restoredSlide;
-      const storedSlide = slideOrZero(stored?.currentSlide);
-      if (storedSlide) return storedSlide;
       const initialSlide = slideOrZero(args?.initial_slide_number);
       if (initialSlide) return initialSlide;
+      const storedSlide = slideOrZero(stored?.currentSlide);
+      if (storedSlide) return storedSlide;
       if (restoredSlide) return restoredSlide;
       return Number(pages[0]?.slideNumber || 1);
+    }
+
+    function shouldCenterReaderInParentOnRender(args) {
+      return Boolean(args?.center_on_page_entry);
     }
 
     function pageForSlide(slideNumber) {
@@ -3401,10 +3406,22 @@
       pageJumpInput.value = String(targetSlide);
       if (targetSlide === currentSlideNumber) {
         updatePageJumpDisplay();
-        setActive(targetSlide, { scrollPage: true, behavior: 'auto', forceNoteScroll: true });
+        setActive(targetSlide, {
+          scrollPage: true,
+          behavior: 'auto',
+          noteBehavior: 'auto',
+          forceNoteScroll: true,
+          immediateNearbyContent: true,
+        });
         return;
       }
-      setActive(targetSlide, { scrollPage: true, behavior: 'smooth' });
+      setActive(targetSlide, {
+        scrollPage: true,
+        behavior: 'smooth',
+        noteBehavior: 'auto',
+        forceNoteScroll: true,
+        immediateNearbyContent: true,
+      });
     }
 
     function sectionForSlide(slideNumber) {
@@ -3825,10 +3842,13 @@
       const nextSlideNumber = Number(pageNumber || 1);
       if (!pageForSlide(nextSlideNumber)) return;
       if (options.scrollPage) {
-        viewportAnchorState = null;
-        viewportAnchorTimers.forEach(timer => window.clearTimeout(timer));
-        viewportAnchorTimers = [];
-        window.clearTimeout(viewportAnchorReleaseTimer);
+        suppressReaderObserver();
+        if (!options.preserveViewportAnchor) {
+          viewportAnchorState = null;
+          viewportAnchorTimers.forEach(timer => window.clearTimeout(timer));
+          viewportAnchorTimers = [];
+          window.clearTimeout(viewportAnchorReleaseTimer);
+        }
       }
       const sameSlide = nextSlideNumber === currentSlideNumber;
       if (!sameSlide) {
@@ -3856,16 +3876,38 @@
       syncActivePageDom(currentSlideNumber);
       const page = document.getElementById(`page-${currentSlideNumber}`);
       const note = document.getElementById(`note-${currentSlideNumber}`);
+      let noteHydration = Promise.resolve(false);
+      const scrollCurrentNote = (behavior) => {
+        if (!note || Number(currentSlideNumber) !== nextSlideNumber) return false;
+        noteRoot.scrollTo({
+          top: note.offsetTop - noteRoot.offsetTop,
+          behavior,
+        });
+        return true;
+      };
       if (note) {
         const body = note.querySelector?.('.note-body');
         if (body?.dataset?.hydrated !== '1') {
-          hydrateNote(currentSlideNumber);
+          noteHydration = hydrateNote(currentSlideNumber);
         }
         if (options.scrollNote !== false && (!sameSlide || options.forceNoteScroll)) {
-          noteRoot.scrollTo({
-            top: note.offsetTop - noteRoot.offsetTop,
-            behavior: options.noteBehavior || options.behavior || 'smooth',
-          });
+          scrollCurrentNote(options.noteBehavior || options.behavior || 'smooth');
+          if (options.scrollPage || options.forceNoteScroll) {
+            noteHydration
+              .catch(error => {
+                console.error(error);
+                return false;
+              })
+              .then(() => {
+                if (Number(currentSlideNumber) !== nextSlideNumber) return;
+                scrollCurrentNote('auto');
+                [80, 180, 360].forEach(delay => {
+                  window.setTimeout(() => {
+                    if (Number(currentSlideNumber) === nextSlideNumber) scrollCurrentNote('auto');
+                  }, delay);
+                });
+              });
+          }
         }
       }
       updatePageJumpDisplay();
@@ -4914,7 +4956,7 @@
       typesetTargets([...hydratedBodies, canvasMessages]).then(typesetDone => {
         if (typesetDone !== false) applyMarkdownSourceMapsForBodies(hydratedBodies);
       });
-      if (!hasCenteredOnEntry && pages.length) {
+      if (!hasCenteredOnEntry && shouldCenterReaderInParentOnRender(args) && pages.length) {
         hasCenteredOnEntry = true;
         scheduleParentReaderCenter({
           behavior: 'auto',

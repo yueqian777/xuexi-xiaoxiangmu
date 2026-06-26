@@ -82,6 +82,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "pageIndexDistance",
             "readScrollState",
             "initialReaderTargetSlide",
+            "shouldCenterReaderInParentOnRender",
             "buildReaderStructureSignature",
             "pageImageCacheKey",
             "touchPageImageCache",
@@ -230,7 +231,7 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             """
         )
 
-    def test_new_reader_entry_prefers_browser_saved_slide_over_sparse_backend_checkpoint(self):
+    def test_new_reader_entry_prefers_backend_initial_slide_over_browser_saved_slide(self):
         self.run_js(
             r"""
             let pages = [{ slideNumber: 1 }, { slideNumber: 3 }, { slideNumber: 7 }];
@@ -238,6 +239,24 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
 
             const target = initialReaderTargetSlide(
               { initial_slide_number: 3 },
+              { currentSlide: 7 },
+              false
+            );
+
+            if (target !== 3) {
+              throw new Error(`expected backend slide 3, got ${target}`);
+            }
+            """
+        )
+
+    def test_new_reader_entry_falls_back_to_browser_saved_slide_without_backend_initial(self):
+        self.run_js(
+            r"""
+            let pages = [{ slideNumber: 1 }, { slideNumber: 3 }, { slideNumber: 7 }];
+            let restoreScrollAfterRender = { currentSlide: 7 };
+
+            const target = initialReaderTargetSlide(
+              { initial_slide_number: 99 },
               { currentSlide: 7 },
               false
             );
@@ -284,6 +303,27 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             """
         )
 
+    def test_parent_reader_center_requires_page_entry_flag(self):
+        self.run_js(
+            r"""
+            if (shouldCenterReaderInParentOnRender({ center_on_page_entry: true }) !== true) {
+              throw new Error('page entry should allow parent centering');
+            }
+            if (shouldCenterReaderInParentOnRender({ center_on_page_entry: false }) !== false) {
+              throw new Error('same-page rerun should not center parent');
+            }
+            if (shouldCenterReaderInParentOnRender({}) !== false) {
+              throw new Error('missing entry flag should not center parent');
+            }
+            """
+        )
+
+    def test_render_reader_parent_center_uses_page_entry_flag(self):
+        self.assertIn(
+            "if (!hasCenteredOnEntry && shouldCenterReaderInParentOnRender(args) && pages.length) {",
+            self.source,
+        )
+
     def test_initial_target_activation_scrolls_page_before_observer_can_override_it(self):
         self.assertIn(
             "setActive(targetSlide, {\n"
@@ -291,6 +331,247 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
             "          noteBehavior: 'auto',\n"
             "          scrollPage: true,",
             self.source,
+        )
+
+    def test_programmatic_scroll_suppresses_observer_before_centering_settles(self):
+        self.run_js(
+            r"""
+            let pages = [{ slideNumber: 1 }, { slideNumber: 4 }];
+            let currentSlideNumber = 1;
+            let childChatLayers = [];
+            let viewportAnchorState = null;
+            let viewportAnchorTimers = [];
+            let viewportAnchorReleaseTimer = null;
+            let scrollStateSaveTimer = null;
+            let suppressObserverUntil = 0;
+            const VIEWPORT_ANCHOR_MS = 1400;
+            const POSITION_CHECKPOINT_INTERVAL_MS = 30000;
+            Date.now = () => 2000;
+            global.window = {
+              clearTimeout: () => {},
+              setTimeout: () => 1,
+            };
+            global.localStorage = { setItem: () => {} };
+            global.document = {
+              getElementById: () => ({
+                offsetTop: 0,
+                classList: {
+                  contains: () => false,
+                  add: () => {},
+                  remove: () => {},
+                },
+                querySelector: () => ({ dataset: { hydrated: '1' } }),
+              }),
+              querySelectorAll: () => [],
+            };
+            const pageRoot = { scrollTop: 0 };
+            const noteRoot = {
+              offsetTop: 0,
+              scrollTo: () => {},
+            };
+            function suppressReaderObserver(durationMs = VIEWPORT_ANCHOR_MS) {
+              suppressObserverUntil = Math.max(
+                suppressObserverUntil,
+                Date.now() + Math.max(0, Number(durationMs) || 0)
+              );
+            }
+            function stopAnimationPlayback() {}
+            function closeChildLayersForSlideChange() {}
+            function resetAnimationStateForSlide() {}
+            function syncActivePageDom() {}
+            function hydrateNote() {}
+            function updatePageJumpDisplay() {}
+            function updateSectionSelect() {}
+            function updateRenderedPageImageWindow() {}
+            function renderChatForPage() {}
+            function centerPageAfterImageSettles() {}
+            function ensureNearbyContent() {}
+            function scheduleNearbyContent() {}
+            function scheduleReaderPositionCheckpoint() {}
+            function saveScrollState() {}
+            function scheduleProgrammaticScrollStateSave() {}
+
+            setActive(4, { scrollPage: true, behavior: 'auto' });
+
+            if (suppressObserverUntil <= 2000) {
+              throw new Error(`observer was not suppressed: ${suppressObserverUntil}`);
+            }
+            """
+        )
+
+    def test_viewport_anchor_scroll_does_not_cancel_followup_anchors(self):
+        self.run_js(
+            r"""
+            let pages = [{ slideNumber: 1 }, { slideNumber: 4 }];
+            let currentSlideNumber = 1;
+            let childChatLayers = [];
+            let viewportAnchorState = { targetSlide: 4, until: 5000 };
+            let viewportAnchorTimers = [11, 12];
+            let viewportAnchorReleaseTimer = 13;
+            let scrollStateSaveTimer = null;
+            let suppressObserverUntil = 0;
+            const cleared = [];
+            const POSITION_CHECKPOINT_INTERVAL_MS = 30000;
+            Date.now = () => 2000;
+            global.window = {
+              clearTimeout: value => cleared.push(value),
+              setTimeout: () => 1,
+            };
+            global.localStorage = { setItem: () => {} };
+            global.document = {
+              getElementById: () => ({
+                offsetTop: 0,
+                classList: {
+                  contains: () => false,
+                  add: () => {},
+                  remove: () => {},
+                },
+                querySelector: () => ({ dataset: { hydrated: '1' } }),
+              }),
+              querySelectorAll: () => [],
+            };
+            const pageRoot = { scrollTop: 0 };
+            const noteRoot = {
+              offsetTop: 0,
+              scrollTo: () => {},
+            };
+            function suppressReaderObserver() {}
+            function stopAnimationPlayback() {}
+            function closeChildLayersForSlideChange() {}
+            function resetAnimationStateForSlide() {}
+            function syncActivePageDom() {}
+            function hydrateNote() {}
+            function updatePageJumpDisplay() {}
+            function updateSectionSelect() {}
+            function updateRenderedPageImageWindow() {}
+            function renderChatForPage() {}
+            function centerPageAfterImageSettles() {}
+            function ensureNearbyContent() {}
+            function scheduleNearbyContent() {}
+            function scheduleReaderPositionCheckpoint() {}
+            function saveScrollState() {}
+            function scheduleProgrammaticScrollStateSave() {}
+
+            setActive(4, {
+              scrollPage: true,
+              behavior: 'auto',
+              preserveViewportAnchor: true,
+            });
+
+            if (!viewportAnchorState || viewportAnchorTimers.length !== 2 || viewportAnchorReleaseTimer !== 13) {
+              throw new Error('viewport anchor followups were cleared');
+            }
+            if (cleared.includes(11) || cleared.includes(12) || cleared.includes(13)) {
+              throw new Error(`unexpected cleared timers: ${cleared.join(',')}`);
+            }
+            """
+        )
+
+    def test_set_active_recenters_note_after_lazy_hydration_changes_layout(self):
+        self.run_js(
+            r"""
+            let pages = [{ slideNumber: 1 }, { slideNumber: 4 }];
+            let currentSlideNumber = 1;
+            let childChatLayers = [];
+            let viewportAnchorState = null;
+            let viewportAnchorTimers = [];
+            let viewportAnchorReleaseTimer = null;
+            let scrollStateSaveTimer = null;
+            let suppressObserverUntil = 0;
+            const VIEWPORT_ANCHOR_MS = 1400;
+            const POSITION_CHECKPOINT_INTERVAL_MS = 30000;
+            Date.now = () => 2000;
+            global.window = {
+              clearTimeout: () => {},
+              setTimeout: () => 1,
+            };
+            global.localStorage = { setItem: () => {} };
+            const body = { dataset: { hydrated: '0' } };
+            const note = {
+              offsetTop: 120,
+              isConnected: true,
+              classList: {
+                contains: () => false,
+                add: () => {},
+                remove: () => {},
+              },
+              querySelector: selector => selector === '.note-body' ? body : null,
+            };
+            const page = {
+              classList: {
+                contains: () => false,
+                add: () => {},
+                remove: () => {},
+              },
+              querySelector: () => null,
+            };
+            global.document = {
+              getElementById: id => {
+                if (id === 'note-4') return note;
+                if (id === 'page-4') return page;
+                return {
+                  classList: {
+                    contains: () => false,
+                    add: () => {},
+                    remove: () => {},
+                  },
+                  querySelector: () => ({ dataset: { hydrated: '1' } }),
+                };
+              },
+              querySelectorAll: () => [],
+            };
+            const pageRoot = { scrollTop: 0 };
+            const noteRoot = {
+              offsetTop: 20,
+              scrollTop: 0,
+              scrollTo({ top }) {
+                this.scrollTop = top;
+              },
+            };
+            function suppressReaderObserver(durationMs = VIEWPORT_ANCHOR_MS) {
+              suppressObserverUntil = Math.max(
+                suppressObserverUntil,
+                Date.now() + Math.max(0, Number(durationMs) || 0)
+              );
+            }
+            function stopAnimationPlayback() {}
+            function closeChildLayersForSlideChange() {}
+            function resetAnimationStateForSlide() {}
+            function syncActivePageDom() {}
+            function hydrateNote() {
+              return Promise.resolve().then(() => {
+                body.dataset.hydrated = '1';
+                note.offsetTop = 520;
+                return true;
+              });
+            }
+            function updatePageJumpDisplay() {}
+            function updateSectionSelect() {}
+            function updateRenderedPageImageWindow() {}
+            function renderChatForPage() {}
+            function centerPageAfterImageSettles() {}
+            function ensureNearbyContent() {}
+            function scheduleNearbyContent() {}
+            function scheduleReaderPositionCheckpoint() {}
+            function saveScrollState() {}
+            function scheduleProgrammaticScrollStateSave() {}
+
+            (async () => {
+              setActive(4, { scrollPage: true, behavior: 'smooth' });
+              if (noteRoot.scrollTop !== 100) {
+                throw new Error(`expected initial note scroll 100, got ${noteRoot.scrollTop}`);
+              }
+              for (let index = 0; index < 5; index += 1) {
+                await Promise.resolve();
+              }
+              if (noteRoot.scrollTop !== 500) {
+                throw new Error(`expected note recenter after hydration, got ${noteRoot.scrollTop}`);
+              }
+            })().catch(error => {
+              console.error(error);
+              process.exit(1);
+            });
+            """
         )
 
     def test_set_active_keeps_position_local_when_checkpoint_interval_is_not_due(self):
@@ -1030,9 +1311,10 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
 
     def test_page_jump_recenters_even_when_observer_already_marked_current_slide(self):
         self.assertIn(
-            "if (targetSlide === currentSlideNumber) {\n        updatePageJumpDisplay();\n        setActive(targetSlide, { scrollPage: true, behavior: 'auto', forceNoteScroll: true });\n        return;\n      }",
+            "if (targetSlide === currentSlideNumber) {\n        updatePageJumpDisplay();\n        setActive(targetSlide, {",
             self.source,
         )
+        self.assertIn("noteBehavior: 'auto',\n          forceNoteScroll: true,\n          immediateNearbyContent: true,", self.source)
 
     def test_observer_requires_centered_page_before_activation(self):
         self.assertIn("const rootCenter = rootRect.top + rootRect.height / 2;", self.source)
