@@ -9,7 +9,7 @@ from typing import Any
 
 from db import DATA_DIR, fetch_one, write_transaction
 from services.export_manifest_service import read_manifest, validate_public_ppt_manifest
-from services.export_path_service import safe_extract_zip, safe_filename
+from services.export_path_service import safe_extract_zip, safe_filename, safe_join_under
 
 SLIDE_TEXT_STOP_HEADINGS = [
     "页面图片",
@@ -144,7 +144,7 @@ def import_share_package(user_id: int, zip_file: Any, *, duplicate_policy: str =
                 _insert_sections(conn, user_id_int, deck_id, document_structure)
                 for slide_item in deck["slides"]:
                     slide_number = int(slide_item["slide_number"])
-                    markdown_path = extract_dir / slide_item["markdown_path"]
+                    markdown_path = safe_join_under(extract_dir, slide_item["markdown_path"])
                     markdown = markdown_path.read_text(encoding="utf-8")
                     slide_text, explanation = _parse_slide_markdown(markdown)
                     image_path = _copy_import_image(extract_dir, asset_root, slide_item, f"deck-{deck_index}")
@@ -197,11 +197,11 @@ def _load_and_validate_manifest(extract_dir: Path) -> dict[str, Any]:
     validate_public_ppt_manifest(manifest)
     for deck in _manifest_decks(manifest):
         for slide in deck["slides"]:
-            markdown_path = extract_dir / str(slide.get("markdown_path") or "")
+            markdown_path = safe_join_under(extract_dir, slide.get("markdown_path"))
             if not markdown_path.exists() or not markdown_path.is_file():
                 raise ValueError(f"slide markdown is missing: {slide.get('markdown_path')}")
             image_path = str(slide.get("image_path") or "")
-            if image_path and not (extract_dir / image_path).exists():
+            if image_path and not safe_join_under(extract_dir, image_path).exists():
                 raise ValueError(f"slide image is missing: {image_path}")
     return manifest
 
@@ -403,7 +403,7 @@ def _copy_import_image(extract_dir: Path, asset_root: Path, slide_item: dict[str
     image_path = str(slide_item.get("image_path") or "")
     if not image_path:
         return ""
-    source = extract_dir / image_path
+    source = safe_join_under(extract_dir, image_path)
     if not source.exists():
         return ""
     filename = f"{filename_prefix}-{source.name}" if filename_prefix else source.name

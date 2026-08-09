@@ -9,6 +9,7 @@ import streamlit as st
 from db import init_db
 from pages import (
     api_settings,
+    chatgpt_web_explanation,
     dashboard,
     knowledge_cards,
     mainline_branches,
@@ -59,6 +60,13 @@ NAV_SECTIONS = (
 NAV_ENTRIES = (
     NavEntry("dashboard", "今日工作台", "today", dashboard.render, "今日复习、继续学习和卡点概览。"),
     NavEntry("ppt_tutor", "PPT 学习工作台", "materials", ppt_tutor.render, "阅读、逐页讲解、插问和学习沉淀。"),
+    NavEntry(
+        "chatgpt_web_explanation",
+        "ChatGPT 网页讲解",
+        "materials",
+        chatgpt_web_explanation.render,
+        "生成网页版 ChatGPT 逐页讲解任务，并校验导入结果。",
+    ),
     NavEntry("ppt_management", "PPT / 插问管理", "materials", ppt_management.render, "资料分类、排序、状态和删除。"),
     NavEntry("ppt_explanation_import", "导入讲解包", "materials", ppt_explanation_import.render, "导入别人分享的 PPT 讲解包。"),
     NavEntry("ppt_explanation_export", "分享讲解包", "materials", ppt_explanation_export.render, "导出可分享的 PPT 讲解资料。"),
@@ -91,6 +99,7 @@ LEGACY_PAGE_IDS = {
     "私人 Markdown / Obsidian 导出": "markdown_export",
     "PPT 讲解分享包": "ppt_explanation_export",
     "PPT 讲解包导入": "ppt_explanation_import",
+    "ChatGPT 网页讲解": "chatgpt_web_explanation",
 }
 
 DEFAULT_SECTION_ID = "today"

@@ -35,6 +35,8 @@ class PptExplanationImportServiceTest(unittest.TestCase):
         privacy_mode="public_ppt_explanation_only",
         omit_slide=False,
         slide_markdown=None,
+        manifest_markdown_path="slides/slide-001.md",
+        manifest_image_path="images/slide-001.png",
     ):
         zip_path = self.data_dir / "share.zip"
         manifest = {
@@ -52,8 +54,8 @@ class PptExplanationImportServiceTest(unittest.TestCase):
                 {
                     "slide_number": 1,
                     "title": "FIR basics",
-                    "markdown_path": "slides/slide-001.md",
-                    "image_path": "images/slide-001.png",
+                    "markdown_path": manifest_markdown_path,
+                    "image_path": manifest_image_path,
                 }
             ],
         }
@@ -218,6 +220,40 @@ class PptExplanationImportServiceTest(unittest.TestCase):
                 self.user_id,
                 self._build_package(omit_slide=True),
             )
+
+    def test_preview_rejects_manifest_markdown_path_traversal(self):
+        outside_markdown = Path(tempfile.gettempdir()) / f"ppt-share-outside-{self.tmp.name[-8:]}.md"
+        outside_markdown.write_text("outside markdown", encoding="utf-8")
+        self.addCleanup(lambda: outside_markdown.unlink(missing_ok=True))
+
+        with self.assertRaisesRegex(ValueError, "unsafe manifest path"):
+            ppt_explanation_import_service.preview_share_package(
+                self.user_id,
+                self._build_package(manifest_markdown_path=f"../../{outside_markdown.name}"),
+            )
+
+    def test_preview_rejects_absolute_manifest_image_path(self):
+        outside_image = self.data_dir / "outside.png"
+        outside_image.write_bytes(b"outside image")
+
+        with self.assertRaisesRegex(ValueError, "unsafe manifest path"):
+            ppt_explanation_import_service.preview_share_package(
+                self.user_id,
+                self._build_package(manifest_image_path=str(outside_image.resolve())),
+            )
+
+    def test_preview_rejects_zip_entry_path_traversal(self):
+        zip_path = self.data_dir / "traversal.zip"
+        outside = self.data_dir.parent / f"escaped-{self.data_dir.name}.txt"
+        outside.unlink(missing_ok=True)
+        self.addCleanup(lambda: outside.unlink(missing_ok=True))
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr(f"../{outside.name}", "escape")
+
+        with self.assertRaisesRegex(ValueError, "unsafe path traversal"):
+            ppt_explanation_import_service.preview_share_package(self.user_id, zip_path)
+
+        self.assertFalse(outside.exists())
 
     def test_import_valid_zip_creates_deck_slides_explanations_assets_and_package_record(self):
         zip_path = self._build_package()

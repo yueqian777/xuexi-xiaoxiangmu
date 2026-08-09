@@ -60,3 +60,19 @@ def safe_extract_zip(zip_path: Path, target_dir: Path) -> None:
             if os.path.commonpath([str(target_root), str(destination)]) != str(target_root):
                 raise ValueError(f"unsafe path traversal in zip: {info.filename}")
         archive.extractall(target_root)
+
+
+def safe_join_under(root_dir: Path, relative_path: object) -> Path:
+    root = Path(root_dir).resolve()
+    raw_path = str(relative_path or "")
+    normalized = raw_path.replace("\\", "/")
+    if not normalized or normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+        raise ValueError(f"unsafe manifest path: {raw_path}")
+    try:
+        destination = (root / normalized).resolve()
+        common = os.path.commonpath([str(root), str(destination)])
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(f"unsafe manifest path: {raw_path}") from exc
+    if os.path.normcase(common) != os.path.normcase(str(root)):
+        raise ValueError(f"unsafe manifest path: {raw_path}")
+    return destination

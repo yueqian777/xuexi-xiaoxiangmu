@@ -89,7 +89,7 @@ from services.question_to_knowledge_service import (
     get_question_knowledge_draft,
 )
 from services.study_asset_service import parse_study_assets, save_study_assets
-from services.ui_helpers import render_workbench_header
+from services.ui_helpers import render_workbench_header, set_navigation_target
 
 SYNCED_READER_COMPONENT_PATH = BASE_DIR / "components" / "synced_reader"
 SYNCED_READER_IMAGE_CACHE_PATH = SYNCED_READER_COMPONENT_PATH / "_reader_image_cache"
@@ -417,6 +417,7 @@ def render() -> None:
     slide_by_id = {slide["id"]: slide for slide in slides}
     latest_by_slide_id = _latest_explanations_by_slide_ids(list(slide_by_id))
     sections = fetch_deck_sections(int(deck["id"]), user_id=user.id)
+    _render_chatgpt_web_bridge_shortcut(deck, slides, sections, last_position)
 
     st.divider()
     if workbench_mode == "资料准备":
@@ -435,6 +436,38 @@ def render() -> None:
 
     _auto_refresh_structure_generation(st.session_state.get("ppt_structure_task"))
     _auto_refresh_running_generation(generation_task)
+
+
+def _render_chatgpt_web_bridge_shortcut(
+    deck: dict,
+    slides: list[dict],
+    sections: list[dict],
+    last_position: dict[str, int],
+) -> None:
+    deck_id = int(deck["id"])
+    initial_slide_number = _initial_reader_slide_number(deck_id, slides, last_position)
+    active_slide_number = _reader_active_slide_number(deck_id, slides, initial_slide_number)
+    active_section = next(
+        (
+            section
+            for section in sections
+            if int(section["start_slide"]) <= active_slide_number <= int(section["end_slide"])
+        ),
+        None,
+    )
+    if st.button(
+        "生成 ChatGPT 网页精讲任务",
+        key=f"chatgpt_web_bridge_{deck_id}",
+        help="把当前目录块生成标准 ZIP，上传网页版 ChatGPT 后将结果文件自动校验导回。",
+    ):
+        st.session_state["chatgpt_web_explanation_nav_intent"] = {
+            "deck_id": deck_id,
+            "slide_number": active_slide_number,
+            "scope": "section" if active_section else "custom",
+            "section_index": int(active_section["section_index"]) if active_section else None,
+        }
+        set_navigation_target("materials", "chatgpt_web_explanation")
+        st.rerun()
 
 
 def _render_api_settings(user_id: int) -> None:

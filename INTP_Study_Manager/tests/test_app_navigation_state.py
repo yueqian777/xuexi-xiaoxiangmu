@@ -21,7 +21,13 @@ class AppNavigationStateTest(unittest.TestCase):
         self.assertEqual(entries_by_section["today"], ["dashboard"])
         self.assertEqual(
             entries_by_section["materials"],
-            ["ppt_tutor", "ppt_management", "ppt_explanation_import", "ppt_explanation_export"],
+            [
+                "ppt_tutor",
+                "chatgpt_web_explanation",
+                "ppt_management",
+                "ppt_explanation_import",
+                "ppt_explanation_export",
+            ],
         )
         self.assertEqual(
             entries_by_section["knowledge"],

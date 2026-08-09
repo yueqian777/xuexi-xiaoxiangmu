@@ -272,6 +272,38 @@ def _run_init_db() -> None:
                 FOREIGN KEY (slide_id) REFERENCES ppt_slides(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS chatgpt_explanation_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                task_id TEXT NOT NULL,
+                deck_id INTEGER NOT NULL,
+                deck_fingerprint TEXT NOT NULL,
+                requested_slides_json TEXT NOT NULL DEFAULT '[]',
+                package_path TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'created',
+                manifest_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                completed_at TEXT DEFAULT '',
+                FOREIGN KEY (deck_id) REFERENCES ppt_decks(id) ON DELETE CASCADE,
+                UNIQUE(user_id, task_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS chatgpt_explanation_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                result_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                source_path TEXT NOT NULL DEFAULT '',
+                slide_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'detected',
+                raw_result_json TEXT NOT NULL DEFAULT '{}',
+                imported_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                UNIQUE(user_id, result_id),
+                FOREIGN KEY (user_id, task_id)
+                    REFERENCES chatgpt_explanation_tasks(user_id, task_id)
+                    ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS ppt_slide_animation_states (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL DEFAULT 0,
@@ -418,6 +450,20 @@ def _run_init_db() -> None:
         _ensure_column(conn, "ppt_study_asset_pages", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "ppt_sections", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_explanations", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "chatgpt_explanation_tasks", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "chatgpt_explanation_tasks", "manifest_json", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_column(conn, "chatgpt_explanation_tasks", "completed_at", "TEXT DEFAULT ''")
+        _ensure_column(conn, "chatgpt_explanation_results", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "chatgpt_explanation_results", "source_path", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "chatgpt_explanation_results", "slide_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "chatgpt_explanation_results", "status", "TEXT NOT NULL DEFAULT 'detected'")
+        _ensure_column(conn, "chatgpt_explanation_results", "raw_result_json", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_column(
+            conn,
+            "chatgpt_explanation_results",
+            "imported_at",
+            "TEXT NOT NULL DEFAULT ''",
+        )
         _ensure_column(conn, "slide_questions", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "slide_questions", "quote_text", "TEXT DEFAULT ''")
         _ensure_column(conn, "slide_questions", "root_question_id", "INTEGER")
@@ -515,6 +561,18 @@ def _run_init_db() -> None:
                 ON slide_explanations(user_id, slide_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_slide_explanations_slide
                 ON slide_explanations(slide_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_chatgpt_explanation_tasks_user_task
+                ON chatgpt_explanation_tasks(user_id, task_id);
+            CREATE INDEX IF NOT EXISTS idx_chatgpt_explanation_tasks_user_status_created
+                ON chatgpt_explanation_tasks(user_id, status, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_chatgpt_explanation_tasks_user_deck_created
+                ON chatgpt_explanation_tasks(user_id, deck_id, created_at DESC, id DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_chatgpt_explanation_results_user_result
+                ON chatgpt_explanation_results(user_id, result_id);
+            CREATE INDEX IF NOT EXISTS idx_chatgpt_explanation_results_user_task_imported
+                ON chatgpt_explanation_results(user_id, task_id, imported_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_chatgpt_explanation_results_user_status_imported
+                ON chatgpt_explanation_results(user_id, status, imported_at DESC, id DESC);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_ppt_slide_animation_states_user_slide_index
                 ON ppt_slide_animation_states(user_id, slide_id, state_index);
             CREATE INDEX IF NOT EXISTS idx_ppt_slide_animation_states_user_deck_slide
