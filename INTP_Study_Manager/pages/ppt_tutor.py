@@ -42,6 +42,7 @@ from services.ai_service import (
     provider_label,
 )
 from services import api_parallel_benchmark_service as parallel_benchmark
+from services.active_learning_context_service import set_active_deck, set_active_slide
 from services.api_key_ui import render_local_secret_unlock
 from services.api_runtime import ensure_active_provider, ensure_provider_model, provider_model_state_key, set_active_provider
 from services.auth_service import require_login
@@ -205,6 +206,20 @@ def _remember_reader_deck_selection(user_id: int, deck_id: int, last_position: d
     if last_position.get("deck_id") == deck_id:
         slide_number = last_position.get("slide_number")
     _save_last_reader_position(user_id, deck_id, slide_number, existing=last_position)
+
+
+def _sync_active_deck_context(user_id: int, deck_id: int) -> None:
+    try:
+        set_active_deck(int(user_id), int(deck_id))
+    except (sqlite3.Error, ValueError):
+        st.warning("当前学习上下文同步失败；PPT 阅读仍可继续。")
+
+
+def _sync_active_slide_context(user_id: int, deck_id: int, slide_number: int) -> None:
+    try:
+        set_active_slide(int(user_id), int(deck_id), slide_number=int(slide_number))
+    except (sqlite3.Error, ValueError):
+        st.warning("当前学习上下文同步失败；阅读位置仍已保留。")
 
 
 def _activate_newly_uploaded_deck(deck_id: int, slides: list[dict]) -> None:
@@ -414,6 +429,7 @@ def render() -> None:
     if not deck or not slides:
         st.warning("这个 PPT 暂无可用页面，请重新上传。")
         return
+    _sync_active_deck_context(user.id, deck_id)
     slide_by_id = {slide["id"]: slide for slide in slides}
     latest_by_slide_id = _latest_explanations_by_slide_ids(list(slide_by_id))
     sections = fetch_deck_sections(int(deck["id"]), user_id=user.id)
@@ -1323,6 +1339,7 @@ def _render_synced_reader(
     st.caption("提示：右侧固定插问栏会绑定当前页。你可以直接提问，或选中讲解文字后引用到插问。")
     user_id = int(user_id) if user_id is not None else int(deck.get("user_id") or require_login().id)
     active_slide_number = _hydrate_reader_position_from_backend(int(deck["id"]), slides, last_position)
+    _sync_active_slide_context(user_id, int(deck["id"]), active_slide_number)
     _remember_reader_image_window(int(deck["id"]), slides, active_slide_number)
     image_slide_numbers = _reader_cached_image_slide_numbers(int(deck["id"]), slides)
     active_slide_ids = [
@@ -1598,6 +1615,7 @@ def _handle_reader_position_update(
             image_window_radius=image_window_radius,
         )
     _save_last_reader_position(user_id, deck_id, int(slide_number))
+    _sync_active_slide_context(user_id, deck_id, int(slide_number))
     return changed or image_window_changed
 
 

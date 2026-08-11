@@ -155,7 +155,7 @@ def latest_explanation(user_id: int, slide_id: int) -> dict | None:
         SELECT *
         FROM slide_explanations
         WHERE user_id = ? AND slide_id = ?
-        ORDER BY created_at DESC, id DESC
+        ORDER BY id DESC
         LIMIT 1
         """,
         (int(user_id), int(slide_id)),
@@ -178,7 +178,7 @@ def latest_explanations_by_slide_ids(user_id: int, slide_ids: list[int]) -> dict
                     se.*,
                     ROW_NUMBER() OVER (
                         PARTITION BY se.slide_id
-                        ORDER BY se.created_at DESC, se.id DESC
+                        ORDER BY se.id DESC
                     ) AS rn
                 FROM slide_explanations se
                 WHERE se.user_id = ? AND se.slide_id IN ({placeholders})

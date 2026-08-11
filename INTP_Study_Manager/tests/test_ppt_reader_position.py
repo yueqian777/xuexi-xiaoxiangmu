@@ -10,6 +10,11 @@ from services import ppt_reader_state
 
 
 class PptReaderPositionTest(unittest.TestCase):
+    def setUp(self):
+        active_context_patcher = patch.object(ppt_tutor, "set_active_slide")
+        active_context_patcher.start()
+        self.addCleanup(active_context_patcher.stop)
+
     def test_read_last_reader_position_accepts_positive_ids(self):
         payload = json.dumps({"deck_id": "7", "slide_number": "12"})
         with patch.object(ppt_tutor, "fetch_one", return_value={"value": payload}):
@@ -186,11 +191,53 @@ class PptReaderPositionTest(unittest.TestCase):
             patch.object(ppt_tutor.st, "session_state", session_state),
             patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 42})()),
             patch.object(ppt_tutor, "_save_last_reader_position"),
+            patch.object(ppt_tutor, "set_active_slide") as set_active_slide,
         ):
             changed = ppt_tutor._handle_reader_position_update({"id": 3}, 5, "tok")
 
         self.assertTrue(changed)
         self.assertEqual(session_state["ppt_reader_active_slide_3"], 5)
+        set_active_slide.assert_called_once_with(42, 3, slide_number=5)
+
+    def test_active_context_failure_does_not_block_reader_position_persistence(self):
+        session_state = {"ppt_reader_active_slide_3": 4}
+        with (
+            patch.object(ppt_tutor.st, "session_state", session_state),
+            patch.object(ppt_tutor, "require_login", return_value=type("User", (), {"id": 42})()),
+            patch.object(ppt_tutor, "_save_last_reader_position") as save_last_reader_position,
+            patch.object(
+                ppt_tutor,
+                "set_active_slide",
+                side_effect=sqlite3.OperationalError("context unavailable"),
+            ),
+            patch.object(ppt_tutor.st, "warning") as warning,
+        ):
+            changed = ppt_tutor._handle_reader_position_update({"id": 3}, 5, "tok")
+
+        self.assertTrue(changed)
+        self.assertEqual(session_state["ppt_reader_active_slide_3"], 5)
+        save_last_reader_position.assert_called_once_with(42, 3, 5)
+        warning.assert_called_once_with("当前学习上下文同步失败；阅读位置仍已保留。")
+
+    def test_synced_reader_bootstraps_context_from_hydrated_slide(self):
+        deck = {"id": 3, "user_id": 42, "title": "Deck", "subject": "Subject"}
+        slides = [{"id": 101, "slide_number": 5}]
+
+        with (
+            patch.object(ppt_tutor.st, "session_state", {}),
+            patch.object(ppt_tutor.st, "subheader"),
+            patch.object(ppt_tutor.st, "caption"),
+            patch.object(ppt_tutor, "_hydrate_reader_position_from_backend", return_value=5),
+            patch.object(ppt_tutor, "_remember_reader_image_window"),
+            patch.object(ppt_tutor, "_reader_cached_image_slide_numbers", return_value={5}),
+            patch.object(ppt_tutor, "_questions_by_slide_ids", return_value={}),
+            patch.object(ppt_tutor, "animation_states_by_slide_ids", return_value={}),
+            patch.object(ppt_tutor, "_build_reader_payload", return_value=[]),
+            patch.object(ppt_tutor, "set_active_slide") as set_active_slide,
+        ):
+            ppt_tutor._render_synced_reader(deck, slides, {}, {}, [], user_id=42)
+
+        set_active_slide.assert_called_once_with(42, 3, slide_number=5)
 
     def test_reader_position_update_refreshes_same_slide_when_image_window_expands(self):
         slides = [{"slide_number": number} for number in range(1, 8)]

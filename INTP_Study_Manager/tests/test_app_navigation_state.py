@@ -34,7 +34,10 @@ class AppNavigationStateTest(unittest.TestCase):
             ["study_sessions", "knowledge_cards", "mainline_branches", "parking_lot"],
         )
         self.assertEqual(entries_by_section["review"], ["reviews", "quiz_prompts", "mistakes"])
-        self.assertEqual(entries_by_section["maintenance"], ["api_settings", "markdown_export", "reminders"])
+        self.assertEqual(
+            entries_by_section["maintenance"],
+            ["chatgpt_mcp", "api_settings", "markdown_export", "reminders"],
+        )
 
     def test_navigation_entry_ids_are_stable_and_unique(self):
         entry_ids = [entry.id for entry in app.NAV_ENTRIES]

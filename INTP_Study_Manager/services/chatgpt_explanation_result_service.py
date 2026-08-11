@@ -10,6 +10,7 @@ from typing import Any, Mapping
 import db
 from services import chatgpt_explanation_schema as schema
 from services import chatgpt_explanation_task_service as task_service
+from services import slide_explanation_write_service as explanation_writer
 
 
 MODEL_NAME = "ChatGPT Web"
@@ -119,23 +120,14 @@ def import_result(
                 return _skipped_outcome(report)
             raise exc
 
-        conn.executemany(
-            """
-            INSERT INTO slide_explanations (
-                user_id, slide_id, model, explanation, created_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                (
-                    user_id_int,
-                    int(slide["slide_id"]),
-                    MODEL_NAME,
-                    slide["explanation"],
-                    now,
-                )
-                for slide in report["valid_slides"]
-            ),
+        explanation_writer.append_slide_explanations(
+            user_id_int,
+            report["valid_slides"],
+            model=MODEL_NAME,
+            deck_id=report["deck_id"],
+            expected_deck_fingerprint=str(payload["deck_fingerprint"]),
+            max_items=schema.MAX_RESULT_SLIDES,
+            conn=conn,
         )
 
         if result_status == "imported":

@@ -2,7 +2,93 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from db import fetch_all, fetch_one
 from services.mastery_service import clamp_mastery
+
+
+DEFAULT_SEARCH_LIMIT = 10
+MAX_SEARCH_LIMIT = 50
+
+KNOWLEDGE_CARD_FIELDS = (
+    "id",
+    "subject",
+    "topic",
+    "core_question",
+    "one_sentence",
+    "logic_or_formula",
+    "application",
+    "mastery",
+    "need_review",
+    "source_session_id",
+    "source_deck_id",
+    "source_slide_id",
+    "source_question_id",
+    "created_at",
+)
+
+
+def get_knowledge_card(user_id: int, knowledge_id: int) -> dict[str, Any] | None:
+    """Return one explicitly user-scoped card without leaking the owner column."""
+
+    owner_id = _non_negative_int(user_id, "user_id")
+    card_id = _positive_int(knowledge_id, "knowledge_id")
+    fields = ", ".join(KNOWLEDGE_CARD_FIELDS)
+    return fetch_one(
+        f"SELECT {fields} FROM knowledge_cards WHERE user_id = ? AND id = ?",
+        (owner_id, card_id),
+    )
+
+
+def search_knowledge_cards(
+    user_id: int,
+    query: str,
+    *,
+    subject: str | None = None,
+    limit: int = DEFAULT_SEARCH_LIMIT,
+) -> list[dict[str, Any]]:
+    """Search a bounded, user-owned knowledge-card corpus using literal LIKE text."""
+
+    owner_id = _non_negative_int(user_id, "user_id")
+    search_text = str(query or "").strip()
+    if not search_text:
+        raise ValueError("query must not be empty")
+    result_limit = _positive_int(limit, "limit")
+    if result_limit > MAX_SEARCH_LIMIT:
+        raise ValueError(f"limit must not exceed {MAX_SEARCH_LIMIT}")
+
+    escaped = _escape_like(search_text)
+    pattern = f"%{escaped}%"
+    clauses = [
+        """
+        (
+            subject LIKE ? ESCAPE '\\'
+            OR topic LIKE ? ESCAPE '\\'
+            OR COALESCE(core_question, '') LIKE ? ESCAPE '\\'
+            OR COALESCE(one_sentence, '') LIKE ? ESCAPE '\\'
+            OR COALESCE(logic_or_formula, '') LIKE ? ESCAPE '\\'
+            OR COALESCE(application, '') LIKE ? ESCAPE '\\'
+        )
+        """
+    ]
+    params: list[Any] = [owner_id, *([pattern] * 6)]
+    clean_subject = str(subject or "").strip()
+    if clean_subject:
+        clauses.append("subject = ?")
+        params.append(clean_subject)
+    params.append(result_limit)
+
+    fields = ", ".join(KNOWLEDGE_CARD_FIELDS)
+    return fetch_all(
+        f"""
+        SELECT {fields}
+        FROM knowledge_cards
+        WHERE user_id = ?
+          AND {' AND '.join(clauses)}
+        ORDER BY mastery ASC, created_at DESC, id DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    )
 
 
 def mastery_level(value: Any) -> dict[str, str | int]:
@@ -89,3 +175,28 @@ def _safe_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _non_negative_int(value: Any, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a non-negative integer")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{label} must be a non-negative integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a non-negative integer") from exc
+    if parsed < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+    return parsed
+
+
+def _positive_int(value: Any, label: str) -> int:
+    parsed = _non_negative_int(value, label)
+    if parsed <= 0:
+        raise ValueError(f"{label} must be a positive integer")
+    return parsed
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

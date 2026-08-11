@@ -9,6 +9,7 @@ import streamlit as st
 from db import init_db
 from pages import (
     api_settings,
+    chatgpt_mcp,
     chatgpt_web_explanation,
     dashboard,
     knowledge_cards,
@@ -77,6 +78,13 @@ NAV_ENTRIES = (
     NavEntry("reviews", "复习计划", "review", reviews.render, "处理 1-3-7-14 间隔复习任务。"),
     NavEntry("quiz_prompts", "闭卷测试 Prompt", "review", quiz_prompts.render, "生成闭卷回忆和每日复盘 Prompt。"),
     NavEntry("mistakes", "错因本", "review", mistakes.render, "记录错题、错因和高频问题。"),
+    NavEntry(
+        "chatgpt_mcp",
+        "ChatGPT / MCP",
+        "maintenance",
+        chatgpt_mcp.render,
+        "本地 MCP 状态、Active Context、权限与审计。",
+    ),
     NavEntry("api_settings", "API 接入设置", "maintenance", api_settings.render, "模型接口、密钥库、测试和高级参数。"),
     NavEntry("markdown_export", "Markdown / Obsidian 导出", "maintenance", markdown_export.render, "导出私人学习资料。"),
     NavEntry("reminders", "每日复盘提醒", "maintenance", reminders.render, "配置本地 Windows 复盘提醒。"),
@@ -100,6 +108,7 @@ LEGACY_PAGE_IDS = {
     "PPT 讲解分享包": "ppt_explanation_export",
     "PPT 讲解包导入": "ppt_explanation_import",
     "ChatGPT 网页讲解": "chatgpt_web_explanation",
+    "ChatGPT / MCP": "chatgpt_mcp",
 }
 
 DEFAULT_SECTION_ID = "today"

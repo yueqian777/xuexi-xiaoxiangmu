@@ -373,6 +373,20 @@ def _run_init_db() -> None:
                 updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
 
+            CREATE TABLE IF NOT EXISTS mcp_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                request_id TEXT NOT NULL CHECK(length(request_id) BETWEEN 1 AND 128),
+                tool_name TEXT NOT NULL CHECK(length(tool_name) BETWEEN 1 AND 128),
+                operation_type TEXT NOT NULL CHECK(operation_type IN ('READ', 'WRITE')),
+                target_type TEXT NOT NULL DEFAULT '' CHECK(length(target_type) <= 64),
+                target_id TEXT NOT NULL DEFAULT '' CHECK(length(target_id) <= 128),
+                success INTEGER NOT NULL DEFAULT 0 CHECK(success IN (0, 1)),
+                permission_result TEXT NOT NULL CHECK(permission_result IN ('allowed', 'permission_denied')),
+                summary TEXT NOT NULL DEFAULT '' CHECK(length(summary) <= 300),
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );
+
             CREATE TABLE IF NOT EXISTS api_parallel_benchmarks (
                 benchmark_key TEXT PRIMARY KEY,
                 provider_key TEXT NOT NULL,
@@ -573,6 +587,10 @@ def _run_init_db() -> None:
                 ON chatgpt_explanation_results(user_id, task_id, imported_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_chatgpt_explanation_results_user_status_imported
                 ON chatgpt_explanation_results(user_id, status, imported_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_mcp_audit_logs_user_created
+                ON mcp_audit_logs(user_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_mcp_audit_logs_user_request
+                ON mcp_audit_logs(user_id, request_id);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_ppt_slide_animation_states_user_slide_index
                 ON ppt_slide_animation_states(user_id, slide_id, state_index);
             CREATE INDEX IF NOT EXISTS idx_ppt_slide_animation_states_user_deck_slide

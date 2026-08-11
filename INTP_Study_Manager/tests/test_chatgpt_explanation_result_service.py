@@ -199,6 +199,24 @@ class ChatGptExplanationResultServiceTest(unittest.TestCase):
         self.assertEqual(len(rows), 4)
         self.assertEqual([row["model"] for row in rows[-3:]], ["ChatGPT Web"] * 3)
 
+    def test_import_delegates_to_shared_writer_inside_result_transaction(self):
+        shared_writer = result_service.explanation_writer.append_slide_explanations
+        with patch.object(
+            result_service.explanation_writer,
+            "append_slide_explanations",
+            wraps=shared_writer,
+        ) as append:
+            result_service.import_result(self.user_id, self._bytes(self._payload()))
+
+        append.assert_called_once()
+        self.assertEqual(append.call_args.kwargs["model"], "ChatGPT Web")
+        self.assertEqual(append.call_args.kwargs["deck_id"], self.deck_id)
+        self.assertEqual(
+            append.call_args.kwargs["expected_deck_fingerprint"],
+            self.manifest["deck_fingerprint"],
+        )
+        self.assertIsNotNone(append.call_args.kwargs["conn"])
+
     def test_import_never_overwrites_old_explanation(self):
         result_service.import_result(self.user_id, self._bytes(self._payload()))
 

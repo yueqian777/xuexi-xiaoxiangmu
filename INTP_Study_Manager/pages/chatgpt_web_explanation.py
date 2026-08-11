@@ -45,6 +45,20 @@ def render() -> None:
     st.info(
         "这是文件交换桥接协议：不控制浏览器、不读取 Cookie、不抓取 ChatGPT 页面，也不要求 OpenAI API。"
     )
+    with st.expander("直接模式与 fallback", expanded=False):
+        st.markdown(
+            """
+**方式 A：ChatGPT MCP 直接模式**
+
+- 在完成独立的 ChatGPT / MCP 连接层配置后，可按本地权限读取当前页并直接追加保存。
+- 本地 stdio Server 正在运行，不等于网页版 ChatGPT 已完成连接。
+
+**方式 B：文件桥接模式**
+
+- 不依赖 MCP，继续使用 task ZIP / explanation_result.json / Inbox。
+- 本页继续提供方式 B，作为没有 MCP write 能力时的 fallback。
+            """
+        )
 
     decks = _load_decks(user.id)
     intent = _consume_navigation_intent(user.id, decks)

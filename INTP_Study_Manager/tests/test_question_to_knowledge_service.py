@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -114,6 +115,60 @@ class QuestionToKnowledgeServiceTest(unittest.TestCase):
         self.assertEqual(
             db.fetch_one("SELECT need_review FROM slide_questions WHERE id = ?", (question_id,))["need_review"],
             1,
+        )
+
+    def test_review_insert_failure_rolls_back_question_and_card_atomically(self):
+        question_id = self._create_question("Must conversion be atomic?")
+        db.execute(
+            """
+            CREATE TRIGGER reject_initial_review_insert
+            BEFORE INSERT ON review_tasks
+            BEGIN
+                SELECT RAISE(ABORT, 'reject initial review');
+            END;
+            """
+        )
+
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "reject initial review"):
+            question_to_knowledge_service.convert_question_to_knowledge(
+                self.user_id,
+                question_id,
+                create_review_tasks=True,
+            )
+
+        self.assertEqual(
+            db.fetch_one(
+                "SELECT COUNT(*) AS count FROM knowledge_cards WHERE user_id = ?",
+                (self.user_id,),
+            )["count"],
+            0,
+        )
+        question = db.fetch_one(
+            """
+            SELECT knowledge_id, converted_to_knowledge, need_review
+            FROM slide_questions
+            WHERE user_id = ? AND id = ?
+            """,
+            (self.user_id, question_id),
+        )
+        self.assertEqual(
+            question,
+            {"knowledge_id": None, "converted_to_knowledge": 0, "need_review": 0},
+        )
+
+        db.execute("DROP TRIGGER reject_initial_review_insert")
+        retry = question_to_knowledge_service.convert_question_to_knowledge(
+            self.user_id,
+            question_id,
+            create_review_tasks=True,
+        )
+        self.assertTrue(retry["created"])
+        self.assertEqual(
+            db.fetch_one(
+                "SELECT COUNT(*) AS count FROM review_tasks WHERE user_id = ? AND knowledge_id = ?",
+                (self.user_id, retry["knowledge_id"]),
+            )["count"],
+            4,
         )
 
     def test_deleted_linked_card_allows_reconversion_without_crashing(self):

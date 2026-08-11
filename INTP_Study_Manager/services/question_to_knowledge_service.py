@@ -100,9 +100,13 @@ def convert_question_to_knowledge(
             """,
             (knowledge_id, int(need_review), user_id_int, question_id_int),
         )
-
-    if create_review_tasks or need_review:
-        ensure_initial_review_tasks(knowledge_id, date.today(), user_id=user_id_int)
+        if create_review_tasks or need_review:
+            ensure_initial_review_tasks(
+                knowledge_id,
+                date.today(),
+                user_id=user_id_int,
+                conn=conn,
+            )
     return {"knowledge_id": knowledge_id, "created": created}
 
 
