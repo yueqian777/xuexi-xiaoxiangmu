@@ -4,6 +4,7 @@ from datetime import date
 from typing import Any, Mapping
 
 from db import fetch_one, write_transaction
+from services.course_service import ensure_course_for_subject
 from services.review_service import ensure_initial_review_tasks
 
 
@@ -39,10 +40,13 @@ def convert_question_to_knowledge(
                 ps.title AS slide_title,
                 ps.slide_text,
                 d.subject AS deck_subject,
-                d.title AS deck_title
+                d.title AS deck_title,
+                owned_course.id AS deck_course_id
             FROM slide_questions sq
             LEFT JOIN ppt_slides ps ON ps.id = sq.slide_id AND ps.user_id = sq.user_id
             LEFT JOIN ppt_decks d ON d.id = ps.deck_id AND d.user_id = sq.user_id
+            LEFT JOIN courses owned_course
+                ON owned_course.id = d.course_id AND owned_course.user_id = sq.user_id
             WHERE sq.user_id = ? AND sq.id = ?
             """,
             (user_id_int, question_id_int),
@@ -65,13 +69,21 @@ def convert_question_to_knowledge(
             )
             draft = _draft_from_context(question_row)
             draft.update(_clean_overrides(override_values))
+            course_id = question_row.get("deck_course_id")
+            if not course_id:
+                course_id = ensure_course_for_subject(
+                    user_id_int,
+                    draft["subject"],
+                    conn=conn,
+                )
             cursor = conn.execute(
                 """
                 INSERT INTO knowledge_cards (
                     user_id, subject, topic, core_question, one_sentence, logic_or_formula,
-                    application, mastery, need_review, source_deck_id, source_slide_id, source_question_id
+                    application, mastery, need_review, source_deck_id, source_slide_id,
+                    source_question_id, course_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id_int,
@@ -86,6 +98,7 @@ def convert_question_to_knowledge(
                     draft.get("source_deck_id"),
                     draft.get("source_slide_id"),
                     question_id_int,
+                    course_id,
                 ),
             )
             knowledge_id = int(cursor.lastrowid)
@@ -143,10 +156,13 @@ def _fetch_question_context(user_id: int, question_id: int) -> dict[str, Any] | 
             ps.title AS slide_title,
             ps.slide_text,
             d.subject AS deck_subject,
-            d.title AS deck_title
+            d.title AS deck_title,
+            owned_course.id AS deck_course_id
         FROM slide_questions sq
         LEFT JOIN ppt_slides ps ON ps.id = sq.slide_id AND ps.user_id = sq.user_id
         LEFT JOIN ppt_decks d ON d.id = ps.deck_id AND d.user_id = sq.user_id
+        LEFT JOIN courses owned_course
+            ON owned_course.id = d.course_id AND owned_course.user_id = sq.user_id
         WHERE sq.user_id = ? AND sq.id = ?
         """,
         (int(user_id), int(question_id)),

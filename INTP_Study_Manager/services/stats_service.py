@@ -4,14 +4,24 @@ from db import fetch_all
 from services.auth_service import require_login
 
 
-def low_mastery_cards(limit: int = 10, *, user_id: int | None = None) -> list[dict]:
+def low_mastery_cards(
+    limit: int = 10,
+    *,
+    user_id: int | None = None,
+    include_archived: bool = True,
+) -> list[dict]:
     user_id = user_id if user_id is not None else require_login().id
+    archive_clause = "" if include_archived else "AND COALESCE(course.status, 'active') <> 'archived'"
     return fetch_all(
-        """
-        SELECT id, subject, topic, mastery, core_question
-        FROM knowledge_cards
-        WHERE user_id = ? AND mastery < 70
-        ORDER BY mastery ASC, created_at DESC
+        f"""
+        SELECT card.id, card.subject, card.topic, card.mastery, card.core_question
+        FROM knowledge_cards AS card
+        LEFT JOIN courses AS course
+          ON course.id = card.course_id
+         AND course.user_id = card.user_id
+        WHERE card.user_id = ? AND card.mastery < 70
+          {archive_clause}
+        ORDER BY card.mastery ASC, card.created_at DESC
         LIMIT ?
         """,
         (user_id, limit),

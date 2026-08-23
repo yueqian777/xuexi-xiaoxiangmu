@@ -10,6 +10,7 @@ from typing import BinaryIO
 
 from db import DATA_DIR, execute_many, write_transaction
 from services.auth_service import require_login
+from services.course_service import ensure_course_for_subject
 from services.pdf_extraction_service import extract_pdf_pages as extract_pdf_pages_from_pdf
 
 UPLOAD_DIR = DATA_DIR / "uploads"
@@ -56,6 +57,7 @@ def _save_deck_records(
 ) -> int:
     user = require_login()
     deck_title = title.strip() or saved_path.stem
+    normalized_subject = subject.strip()
     with write_transaction() as conn:
         if not _has_upload_capacity(conn, user.id, saved_path.stat().st_size):
             try:
@@ -68,12 +70,27 @@ def _save_deck_records(
                 except OSError:
                     pass
             raise RuntimeError("上传失败：已超过当前账户的上传容量配额。请联系管理员扩容或先删除旧资料。")
+        course_id = ensure_course_for_subject(
+            user.id,
+            normalized_subject,
+            conn=conn,
+        )
         cursor = conn.execute(
             """
-            INSERT INTO ppt_decks (user_id, filename, title, subject, file_path, slide_count)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO ppt_decks (
+                user_id, filename, title, subject, file_path, slide_count, course_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (user.id, saved_path.name, deck_title, subject.strip(), str(saved_path), len(slides)),
+            (
+                user.id,
+                saved_path.name,
+                deck_title,
+                normalized_subject,
+                str(saved_path),
+                len(slides),
+                course_id,
+            ),
         )
         deck_id = int(cursor.lastrowid)
         conn.executemany(

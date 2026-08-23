@@ -10,12 +10,11 @@ def _source(path: str) -> str:
 
 
 class FrontendInformationArchitectureTest(unittest.TestCase):
-    def test_dashboard_is_today_workbench(self):
+    def test_dashboard_is_learning_cockpit(self):
         source = _source("pages/dashboard.py")
 
-        self.assertIn("今日工作台", source)
-        self.assertIn("继续资料学习", source)
-        self.assertIn("常用行动入口", source)
+        for label in ["学习驾驶舱", "今日学习", "今日任务", "课程状态", "继续学习"]:
+            self.assertIn(label, source)
 
     def test_ppt_tutor_exposes_workbench_modes(self):
         source = _source("pages/ppt_tutor.py")

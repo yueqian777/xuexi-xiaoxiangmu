@@ -45,11 +45,17 @@ def get_today_ai_review_plan(*, user_id: int | None = None) -> dict[str, Any] | 
     )
 
 
-def collect_review_candidates(limit: int = MAX_DAILY_REVIEW_QUESTIONS, *, user_id: int | None = None) -> list[dict[str, Any]]:
+def collect_review_candidates(
+    limit: int = MAX_DAILY_REVIEW_QUESTIONS,
+    *,
+    user_id: int | None = None,
+    include_archived: bool = False,
+) -> list[dict[str, Any]]:
     user_id = user_id if user_id is not None else require_login().id
     today = date.today().isoformat()
+    archive_clause = "" if include_archived else "AND COALESCE(course.status, 'active') <> 'archived'"
     rows = fetch_all(
-        """
+        f"""
         SELECT *
         FROM (
             SELECT
@@ -91,7 +97,11 @@ def collect_review_candidates(limit: int = MAX_DAILY_REVIEW_QUESTIONS, *, user_i
                     LIMIT 1
                 ) AS last_cause
             FROM knowledge_cards kc
+            LEFT JOIN courses course
+              ON course.id = kc.course_id
+             AND course.user_id = kc.user_id
             WHERE kc.user_id = ?
+              {archive_clause}
         )
         WHERE task_id IS NOT NULL OR mastery < 70 OR need_review = 1
         ORDER BY

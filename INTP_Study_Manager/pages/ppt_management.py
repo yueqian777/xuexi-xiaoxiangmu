@@ -3,9 +3,10 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from db import execute, execute_many, fetch_all
+from db import execute, execute_many, fetch_all, write_transaction
 from repositories.ppt_repository import delete_slide_question_thread
 from services.auth_service import require_login
+from services.course_service import ensure_course_for_subject
 
 DECK_STATUSES = ["使用中", "归档", "暂停", "待整理"]
 QUESTION_STATUSES = ["未整理", "待追问", "已解决", "待复习", "归档"]
@@ -91,30 +92,71 @@ def _render_deck_management(user_id: int) -> None:
         key="ppt_deck_management_editor",
     )
     if st.button("保存 PPT 资料管理修改", type="primary", key="save_deck_management"):
-        execute_many(
-            """
-            UPDATE ppt_decks
-            SET sort_order = ?, status = ?, category = ?, subject = ?, title = ?
-            WHERE id = ? AND user_id = ?
-            """,
-            [
-                (
-                    _int_or_zero(row["sort_order"]),
-                    str(row["status"] or "使用中"),
-                    str(row["category"] or "").strip(),
-                    str(row["subject"] or "").strip(),
-                    str(row["title"] or "").strip(),
-                    int(row["id"]),
-                    user_id,
-                )
-                for _, row in edited.iterrows()
-            ],
-        )
+        try:
+            _save_deck_management_rows(user_id, edited.to_dict(orient="records"))
+        except ValueError as exc:
+            st.error(str(exc))
+            return
         st.success("PPT 资料管理修改已保存。")
         st.rerun()
 
     st.divider()
     _render_delete_deck(user_id, visible)
+
+
+def _save_deck_management_rows(user_id: int, rows: list[dict[str, object]]) -> int:
+    """Save deck metadata and its course link in one user-scoped transaction."""
+
+    owner_id = int(user_id)
+    updated = 0
+    with write_transaction() as conn:
+        for row in rows:
+            deck_id = int(row["id"])
+            owned_deck = conn.execute(
+                """
+                SELECT deck.id, deck.subject, deck.course_id,
+                       owned_course.id AS owned_course_id
+                FROM ppt_decks deck
+                LEFT JOIN courses owned_course
+                  ON owned_course.id = deck.course_id
+                 AND owned_course.user_id = deck.user_id
+                WHERE deck.id = ? AND deck.user_id = ?
+                """,
+                (deck_id, owner_id),
+            ).fetchone()
+            if owned_deck is None:
+                continue
+            subject = _cell_text(row.get("subject"))
+            if not subject:
+                raise ValueError("科目不能为空。")
+            original_subject = _cell_text(owned_deck["subject"])
+            course_id = owned_deck["owned_course_id"]
+            if subject != original_subject or not course_id:
+                course_id = ensure_course_for_subject(
+                    owner_id,
+                    subject,
+                    conn=conn,
+                )
+            cursor = conn.execute(
+                """
+                UPDATE ppt_decks
+                SET sort_order = ?, status = ?, category = ?, subject = ?,
+                    title = ?, course_id = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (
+                    _int_or_zero(row.get("sort_order")),
+                    _cell_text(row.get("status")) or "使用中",
+                    _cell_text(row.get("category")),
+                    subject,
+                    _cell_text(row.get("title")),
+                    course_id,
+                    deck_id,
+                    owner_id,
+                ),
+            )
+            updated += int(cursor.rowcount or 0)
+    return updated
 
 
 def _render_question_management(user_id: int) -> None:
@@ -397,6 +439,12 @@ def _preview(text: str, limit: int) -> str:
 
 def _quote_block(text: str) -> str:
     return "\n".join(f"> {line}" if line else ">" for line in str(text or "").splitlines())
+
+
+def _cell_text(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
 
 
 def _int_or_zero(value: object) -> int:

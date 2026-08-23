@@ -99,10 +99,18 @@ def _existing_initial_review_base_date(conn, user_id: int, knowledge_id: int) ->
     return None
 
 
-def get_review_tasks(where_clause: str = "", params: tuple = (), *, user_id: int | None = None) -> list[dict]:
+def get_review_tasks(
+    where_clause: str = "",
+    params: tuple = (),
+    *,
+    user_id: int | None = None,
+    include_archived: bool = True,
+) -> list[dict]:
     user_id = user_id if user_id is not None else require_login().id
     base_where = "WHERE rt.user_id = ?"
     base_params = [user_id]
+    if not include_archived:
+        base_where += " AND COALESCE(course.status, 'active') <> 'archived'"
     if where_clause:
         if where_clause.strip().upper().startswith("WHERE"):
             base_where += " AND " + where_clause.strip()[5:].strip()
@@ -131,6 +139,7 @@ def get_review_tasks(where_clause: str = "", params: tuple = (), *, user_id: int
             ) AS last_cause
         FROM review_tasks rt
         JOIN knowledge_cards kc ON kc.id = rt.knowledge_id AND kc.user_id = rt.user_id
+        LEFT JOIN courses course ON course.id = kc.course_id AND course.user_id = kc.user_id
         {base_where}
         ORDER BY rt.review_date ASC, rt.id ASC
         """,
@@ -138,17 +147,30 @@ def get_review_tasks(where_clause: str = "", params: tuple = (), *, user_id: int
     )
 
 
-def get_today_review_tasks(*, user_id: int | None = None) -> list[dict]:
+def get_today_review_tasks(
+    *,
+    user_id: int | None = None,
+    include_archived: bool = True,
+) -> list[dict]:
     today = date.today().isoformat()
     return get_review_tasks(
         "WHERE rt.review_date <= ? AND rt.status = '待复习'",
         (today,),
         user_id=user_id,
+        include_archived=include_archived,
     )
 
 
-def get_all_pending_review_tasks(*, user_id: int | None = None) -> list[dict]:
-    return get_review_tasks("WHERE rt.status = '待复习'", user_id=user_id)
+def get_all_pending_review_tasks(
+    *,
+    user_id: int | None = None,
+    include_archived: bool = True,
+) -> list[dict]:
+    return get_review_tasks(
+        "WHERE rt.status = '待复习'",
+        user_id=user_id,
+        include_archived=include_archived,
+    )
 
 
 def submit_review_result(user_id: int, task_id: int, result: str) -> dict | None:

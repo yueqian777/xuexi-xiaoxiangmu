@@ -5,9 +5,12 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
-from db import execute, fetch_all, fetch_one, insert_and_get_id
+from db import fetch_all, fetch_one
 from services.auth_service import require_login
-from services.review_service import create_initial_review_tasks
+from services.course_content_write_service import (
+    create_study_session_record,
+    update_study_session_record,
+)
 
 
 def _date_value(value: str | None) -> date:
@@ -44,54 +47,22 @@ def render() -> None:
         if not subject.strip() or not title.strip() or not main_question.strip():
             st.error("科目、今日学习主题、核心问题不能为空。")
         else:
-            session_id = insert_and_get_id(
-                """
-                INSERT INTO study_sessions (
-                    user_id, date, subject, chapter, title, main_question, mastered_content,
-                    blockers, wrong_questions, summary, mastery, need_review, is_key
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user.id,
-                    session_date.isoformat(),
-                    subject.strip(),
-                    chapter.strip(),
-                    title.strip(),
-                    main_question.strip(),
-                    mastered_content.strip(),
-                    blockers.strip(),
-                    wrong_questions.strip(),
-                    summary.strip(),
-                    mastery,
-                    int(need_review),
-                    int(is_key),
-                ),
+            create_study_session_record(
+                user.id,
+                session_date=session_date.isoformat(),
+                subject=subject,
+                chapter=chapter,
+                title=title,
+                main_question=main_question,
+                mastered_content=mastered_content,
+                blockers=blockers,
+                wrong_questions=wrong_questions,
+                summary=summary,
+                mastery=mastery,
+                need_review=need_review,
+                is_key=is_key,
+                create_card=create_card,
             )
-            if create_card:
-                knowledge_id = insert_and_get_id(
-                    """
-                    INSERT INTO knowledge_cards (
-                        user_id, subject, topic, core_question, one_sentence, logic_or_formula,
-                        application, mastery, need_review, source_session_id
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        user.id,
-                        subject.strip(),
-                        title.strip(),
-                        main_question.strip(),
-                        mastered_content.strip() or "待补充一句话解释",
-                        summary.strip(),
-                        wrong_questions.strip(),
-                        mastery,
-                        int(need_review),
-                        session_id,
-                    ),
-                )
-                if need_review:
-                    create_initial_review_tasks(knowledge_id, session_date, user_id=user.id)
             st.success("学习记录已保存。")
 
     st.divider()
@@ -138,30 +109,24 @@ def render() -> None:
         update_submitted = st.form_submit_button("更新记录")
 
     if update_submitted:
-        execute(
-            """
-            UPDATE study_sessions
-            SET date = ?, subject = ?, chapter = ?, title = ?, main_question = ?,
-                mastered_content = ?, blockers = ?, wrong_questions = ?, summary = ?,
-                mastery = ?, need_review = ?, is_key = ?
-            WHERE id = ? AND user_id = ?
-            """,
-            (
-                edit_date.isoformat(),
-                edit_subject.strip(),
-                edit_chapter.strip(),
-                edit_title.strip(),
-                edit_question.strip(),
-                edit_mastered.strip(),
-                edit_blockers.strip(),
-                edit_wrong.strip(),
-                edit_summary.strip(),
-                edit_mastery,
-                int(edit_need_review),
-                int(edit_is_key),
-                selected_id,
+        if not edit_subject.strip():
+            st.error("科目不能为空。")
+        else:
+            update_study_session_record(
                 user.id,
-            ),
-        )
-        st.success("学习记录已更新。")
-        st.rerun()
+                selected_id,
+                session_date=edit_date.isoformat(),
+                subject=edit_subject,
+                chapter=edit_chapter,
+                title=edit_title,
+                main_question=edit_question,
+                mastered_content=edit_mastered,
+                blockers=edit_blockers,
+                wrong_questions=edit_wrong,
+                summary=edit_summary,
+                mastery=edit_mastery,
+                need_review=edit_need_review,
+                is_key=edit_is_key,
+            )
+            st.success("学习记录已更新。")
+            st.rerun()

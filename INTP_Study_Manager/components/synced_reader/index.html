@@ -1057,6 +1057,56 @@
       padding: 14px 14px 18px;
       overscroll-behavior: contain;
     }
+    .learning-record-section {
+      margin-bottom: 16px;
+    }
+    .learning-record-section:last-child {
+      margin-bottom: 0;
+    }
+    .learning-record-heading {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin: 0 2px 9px;
+      color: #176c76;
+      font-size: 13px;
+      font-weight: 900;
+      letter-spacing: .04em;
+    }
+    .learning-record-heading::before {
+      width: 5px;
+      height: 15px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, #18a58f, #43a9e8);
+      content: "";
+    }
+    .knowledge-card-record,
+    .review-record {
+      margin: 0 2px 8px;
+      padding: 10px 11px;
+      border: 1px solid #cbe5ea;
+      border-radius: 12px;
+      background: rgba(255,255,255,.88);
+      color: #315e69;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .knowledge-card-record strong {
+      display: block;
+      margin-bottom: 3px;
+      color: #0f7f78;
+      font-size: 13px;
+    }
+    .learning-status {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 5px;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #e7f7f4;
+      color: #087b70;
+      font-weight: 800;
+    }
     .canvas-empty {
       margin: 16px 4px;
       padding: 14px;
@@ -1072,10 +1122,28 @@
       margin-bottom: 14px;
     }
     .chat-turn.child-question {
+      position: relative;
+      margin-left: 14px;
       padding: 8px 8px 9px;
       border-left: 3px solid #9ed4e1;
       border-radius: 12px;
       background: #f3f8fb;
+    }
+    .chat-turn[data-depth="2"] { margin-left: 28px; }
+    .chat-turn[data-depth="3"] { margin-left: 42px; }
+    .chat-turn[data-depth="4"] { margin-left: 56px; }
+    .chat-turn[data-depth="5"] { margin-left: 70px; }
+    .chat-turn.child-question::before {
+      position: absolute;
+      top: -8px;
+      left: -13px;
+      width: 11px;
+      height: 27px;
+      border-bottom: 2px solid #9ed4e1;
+      border-left: 2px solid #9ed4e1;
+      border-bottom-left-radius: 8px;
+      content: "";
+      pointer-events: none;
     }
     .chat-question,
     .chat-answer {
@@ -1417,17 +1485,21 @@
       <div class="resize-handle" data-resize-handle="notes-chat" title="拖拽调整讲解区和插问区宽度"></div>
       <aside class="canvas-chat" id="canvasChat">
         <div class="canvas-collapsed-rail">
-          <button type="button" id="openCanvasButton">展开插问</button>
+          <button type="button" id="openCanvasButton">展开学习记录</button>
         </div>
         <header class="canvas-chat-header">
           <div class="canvas-chat-header-row">
-            <h3 class="canvas-chat-title">侧边插问</h3>
+            <h3 class="canvas-chat-title">学习记录</h3>
             <button type="button" class="canvas-toggle" id="toggleCanvasButton">收起</button>
           </div>
-          <div class="canvas-chat-meta" id="canvasChatMeta">跟随当前页，不改变阅读位置</div>
+          <div class="canvas-chat-meta" id="canvasChatMeta">跟随当前页，沉淀问题、知识与复习</div>
         </header>
         <div class="canvas-context" id="canvasContext">当前上下文：第 1 页</div>
-        <div class="canvas-messages" id="canvasMessages"></div>
+        <div class="canvas-messages" id="canvasMessages">
+          <section class="learning-record-section"><div class="learning-record-heading">问题树</div></section>
+          <section class="learning-record-section"><div class="learning-record-heading">知识卡</div></section>
+          <section class="learning-record-section"><div class="learning-record-heading">复习</div></section>
+        </div>
         <button type="button" class="chat-scroll-bottom canvas-scroll-bottom hidden" id="canvasScrollBottomButton" title="滚到最下" hidden>↓</button>
         <div class="canvas-compose">
           <div class="quote-preview" id="quotePreview">
@@ -4792,7 +4864,7 @@
       if (!pendingExplanationSaves.size) {
         selectionHint.textContent = '可引用到插问、复制或高亮选中文本';
       }
-      canvasChatMeta.textContent = `当前模型：${activeModel || '当前模型'} · 回答保存为对应页插问`;
+      canvasChatMeta.textContent = `当前模型：${activeModel || '当前模型'} · 学习记录跟随当前页`;
       if (canvasSendButton.disabled) {
         canvasInput.value = '';
         currentChatQuote = null;
@@ -5164,23 +5236,90 @@
       options = options || {};
       const questionId = questionIdForItem(item);
       const isChild = Number(item.parentQuestionId || 0) > 0;
+      const learningStatus = item.learningStatus || item.status || '未整理';
+      const actionButtons = [];
+      if (!options.inChildPanel && questionId) {
+        actionButtons.push(`<button type="button" data-open-child-chat="${questionId}">子插问</button>`);
+        if (!item.convertedToKnowledge) {
+          actionButtons.push(`<button type="button" data-question-learning-action="convert_question_to_knowledge" data-question-id="${questionId}">转为知识卡</button>`);
+        }
+        if (!item.understood) {
+          actionButtons.push(`<button type="button" data-question-learning-action="mark_question_understood" data-question-id="${questionId}">标记掌握</button>`);
+        }
+      }
       return `
-        <div class="chat-turn ${isChild ? 'child-question' : ''}" data-question-id="${questionId || ''}" data-depth="${Number(item.depth || 0)}">
+        <div class="chat-turn ${isChild ? 'child-question' : ''}" data-question-id="${questionId || ''}" data-parent-question-id="${Number(item.parentQuestionId || 0) || ''}" data-depth="${Number(item.depth || 0)}">
           ${renderChatQuestion(item)}
           <div class="chat-answer">
             <div class="chat-answer-body" data-question-id="${questionId || ''}" data-slide-number="${currentSlideNumber}">${renderMarkdown(item.answer || '')}</div>
           </div>
-          <div class="chat-turn-meta">${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '· ' + escapeHtml(item.createdAt) : ''}</div>
-          ${options.inChildPanel ? '' : `<div class="chat-turn-actions"><button type="button" data-open-child-chat="${questionId || ''}">子插问</button></div>`}
+          <div class="chat-turn-meta">
+            ${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '· ' + escapeHtml(item.createdAt) : ''}
+            <span class="learning-status">${escapeHtml(learningStatus)}</span>
+            ${item.needReview ? '<span class="learning-status">需复习</span>' : ''}
+          </div>
+          ${actionButtons.length ? `<div class="chat-turn-actions">${actionButtons.join('')}</div>` : ''}
         </div>
+      `;
+    }
+
+    function renderKnowledgeCards(page) {
+      const cards = Array.isArray(page?.knowledgeCards) ? page.knowledgeCards : [];
+      if (!cards.length) {
+        return '<div class="canvas-empty">本页还没有知识卡。可从问题树中选择“转为知识卡”。</div>';
+      }
+      return cards.map(card => {
+        const mastery = Math.max(0, Math.min(100, Number(card.mastery || 0)));
+        const nextReview = String(card.next_review_date || card.nextReviewDate || '').trim();
+        return `
+          <article class="knowledge-card-record">
+            <strong>${escapeHtml(card.topic || '未命名知识点')}</strong>
+            <div>掌握度 ${mastery}%${nextReview ? ` · 下次复习 ${escapeHtml(nextReview)}` : ''}</div>
+          </article>
+        `;
+      }).join('');
+    }
+
+    function renderReviewRecord(page) {
+      const review = page?.reviewStatus || {};
+      const pendingCount = Number(review.pending_count ?? review.pendingCount ?? 0);
+      const nextReview = String(review.next_review_date || review.nextReviewDate || '').trim();
+      if (!pendingCount && !nextReview) {
+        return '<div class="review-record">暂无待复习任务。</div>';
+      }
+      return `
+        <div class="review-record">
+          待复习 ${pendingCount} 项${nextReview ? ` · 最近一次 ${escapeHtml(nextReview)}` : ''}
+        </div>
+      `;
+    }
+
+    function renderLearningRecord(page, questionHtml) {
+      return `
+        <section class="learning-record-section">
+          <div class="learning-record-heading">问题树</div>
+          ${questionHtml}
+        </section>
+        <section class="learning-record-section">
+          <div class="learning-record-heading">知识卡</div>
+          ${renderKnowledgeCards(page)}
+        </section>
+        <section class="learning-record-section">
+          <div class="learning-record-heading">复习</div>
+          ${renderReviewRecord(page)}
+        </section>
       `;
     }
 
     function renderChatForPage(slideNumber, options = {}) {
       const page = pageForSlide(slideNumber);
+      const previousScrollTop = canvasMessages.scrollTop;
       if (!page) {
         canvasContext.textContent = '当前上下文：未识别页面';
-        canvasMessages.innerHTML = '<div class="canvas-empty">还没有可用上下文。</div>';
+        canvasMessages.innerHTML = renderLearningRecord(
+          null,
+          '<div class="canvas-empty">还没有可用上下文。</div>',
+        );
         updateChatBottomButton(canvasMessages, canvasScrollBottomButton);
         return;
       }
@@ -5194,25 +5333,24 @@
       canvasContext.textContent = `当前上下文：${contextParts.join(' · ')}`;
       const messages = Array.isArray(page.questions) ? page.questions : [];
       const rootMessages = messages.filter(item => !Number(item.parentQuestionId || 0));
-      if (!rootMessages.length) {
-        canvasMessages.innerHTML = `
+      const questionHtml = rootMessages.length
+        ? rootMessages.map(item => [
+          renderChatTurn(item),
+          ...messages
+            .filter(child => Number(child.rootQuestionId || child.id || 0) === Number(item.rootQuestionId || item.id || 0)
+              && Number(child.parentQuestionId || 0) > 0)
+            .map(child => renderChatTurn(child)),
+        ].join('')).join('')
+        : `
           <div class="canvas-empty">
             本页还没有插问。你可以直接围绕当前 PPT 页面和右侧讲解提问；回答会保存到这一页，不会覆盖主线讲解。
           </div>
         `;
-        updateChatBottomButton(canvasMessages, canvasScrollBottomButton);
-        return;
-      }
-      const previousScrollTop = canvasMessages.scrollTop;
       const focusQuestionId = Number(options.focusQuestionId || 0)
-        || (options.focusLatestQuestion ? Number(questionIdForItem(rootMessages[rootMessages.length - 1]) || 0) : 0);
-      canvasMessages.innerHTML = rootMessages.map(item => [
-        renderChatTurn(item),
-        ...messages
-          .filter(child => Number(child.rootQuestionId || child.id || 0) === Number(item.rootQuestionId || item.id || 0)
-            && Number(child.parentQuestionId || 0) > 0)
-          .map(child => renderChatTurn(child)),
-      ].join('')).join('');
+        || (options.focusLatestQuestion && rootMessages.length
+          ? Number(questionIdForItem(rootMessages[rootMessages.length - 1]) || 0)
+          : 0);
+      canvasMessages.innerHTML = renderLearningRecord(page, questionHtml);
       if (options.preserveScroll) {
         canvasMessages.scrollTop = previousScrollTop;
       } else if (focusQuestionId) {
@@ -5229,6 +5367,24 @@
       });
       updateChatBottomButton(canvasMessages, canvasScrollBottomButton);
       renderChildQuestionStack();
+    }
+
+    function sendQuestionLearningAction(action, questionId) {
+      const item = questionById(questionId);
+      if (!item) return;
+      const isConvert = action === 'convert_question_to_knowledge';
+      const confirmation = isConvert
+        ? '确认将该插问转为知识卡，并生成初始复习任务吗？'
+        : '确认已理解该插问，并标记为掌握吗？';
+      if (!window.confirm(confirmation)) return;
+      saveScrollState();
+      Streamlit.setComponentValue({
+        action,
+        token: `${action}_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        deckId,
+        slideNumber: currentSlideNumber,
+        questionId,
+      });
     }
 
     function sendCanvasQuestion() {
@@ -5514,7 +5670,7 @@
       centerQuoteAfterLayoutChange(payload);
       canvasInput.focus();
       canvasHint.textContent = '已引用选中文本，将随下一次提问发送';
-      selectionHint.textContent = '已引用到侧边插问栏';
+      selectionHint.textContent = '已引用到问题树输入框';
       selectionToolbar.classList.remove('show');
     }
 
@@ -5713,6 +5869,14 @@
       submitInputOnEnter(event, () => sendChildQuestion(input.dataset.childInput));
     });
     canvasMessages.addEventListener('click', (event) => {
+      const learningButton = event.target?.closest?.('[data-question-learning-action]');
+      if (learningButton) {
+        sendQuestionLearningAction(
+          learningButton.dataset.questionLearningAction,
+          Number(learningButton.dataset.questionId || 0),
+        );
+        return;
+      }
       const button = event.target?.closest?.('[data-open-child-chat]');
       if (!button) return;
       const questionId = Number(button.dataset.openChildChat || 0);

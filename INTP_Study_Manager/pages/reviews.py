@@ -14,8 +14,19 @@ def render() -> None:
     st.title("复习计划")
     st.caption("复习结果会自动调整掌握度；仍然模糊和完全不会会追加复习任务。")
 
-    today_tasks = get_today_review_tasks(user_id=user_id)
-    all_pending = get_all_pending_review_tasks(user_id=user_id)
+    include_archived = st.checkbox(
+        "包含已归档课程",
+        value=False,
+        help="默认只显示正在学习和已完成课程；勾选后可继续复习长期归档内容。",
+    )
+    today_tasks = get_today_review_tasks(
+        user_id=user_id,
+        include_archived=include_archived,
+    )
+    all_pending = get_all_pending_review_tasks(
+        user_id=user_id,
+        include_archived=include_archived,
+    )
 
     st.subheader("今日复习")
     if today_tasks:

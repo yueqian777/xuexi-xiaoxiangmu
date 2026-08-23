@@ -8,6 +8,7 @@ from typing import Any
 from db import managed_connection
 from models import REVIEW_INTERVALS
 from services.auth_service import require_login
+from services.course_service import ensure_course_for_subject
 
 
 def parse_study_assets(raw_text: str) -> dict[str, Any]:
@@ -48,13 +49,14 @@ def save_study_assets(
     knowledge_ids: list[int] = []
     review_rows: list[tuple[int, int, str, str]] = []
     with managed_connection() as conn:
+        course_id = ensure_course_for_subject(user.id, subject, conn=conn)
         cursor = conn.execute(
             """
             INSERT INTO study_sessions (
                 user_id, date, subject, chapter, title, main_question, mastered_content,
-                blockers, wrong_questions, summary, mastery, need_review, is_key
+                blockers, wrong_questions, summary, mastery, need_review, is_key, course_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user.id,
@@ -70,6 +72,7 @@ def save_study_assets(
                 mastery,
                 int(_bool(session.get("need_review"), True)),
                 int(_bool(session.get("is_key"), mastery < 70)),
+                course_id,
             ),
         )
         session_id = int(cursor.lastrowid)
@@ -81,9 +84,9 @@ def save_study_assets(
                 """
                 INSERT INTO knowledge_cards (
                     user_id, subject, topic, core_question, one_sentence, logic_or_formula,
-                    application, mastery, need_review, source_session_id
+                    application, mastery, need_review, source_session_id, course_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user.id,
@@ -96,6 +99,7 @@ def save_study_assets(
                     card_mastery,
                     int(need_review),
                     session_id,
+                    course_id,
                 ),
             )
             knowledge_id = int(cursor.lastrowid)

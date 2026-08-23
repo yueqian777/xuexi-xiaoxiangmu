@@ -5,6 +5,8 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+from db import fetch_one
+from services.active_learning_context_service import get_active_context
 from services.ai_service import AIServiceError, DEFAULT_MODEL, list_api_providers, provider_label
 from services.api_key_ui import render_local_secret_unlock
 from services.api_runtime import (
@@ -15,6 +17,7 @@ from services.api_runtime import (
     set_active_provider,
 )
 from services.auth_service import require_login
+from services.course_service import get_dashboard_snapshot
 from services.daily_ai_review_service import (
     answers_payload,
     collect_review_candidates,
@@ -269,36 +272,114 @@ def _install_daily_review_styles() -> None:
 
 def render() -> None:
     user = require_login()
-    render_workbench_header("今日工作台", "先处理今天必须完成的复习，再进入资料学习和知识沉淀。")
+    render_workbench_header(
+        "学习驾驶舱",
+        "打开软件先确认正在学什么、今天做什么，再进入具体学习现场。",
+    )
 
-    today_tasks = get_today_review_tasks(user_id=user.id)
-    low_cards = low_mastery_cards(user_id=user.id)
+    snapshot = get_dashboard_snapshot(user.id)
+    current_course = snapshot.get("current_course")
+    active_courses = snapshot.get("active_courses") or []
+    status_counts = snapshot.get("status_counts") or {}
+    current_location = _current_learning_location(user.id, current_course)
+    today_tasks = get_today_review_tasks(user_id=user.id, include_archived=False)
+    low_cards = low_mastery_cards(user_id=user.id, include_archived=False)
     blockers = recent_blockers(user_id=user.id)
     parking = open_parking_questions(user_id=user.id)
     links = recent_knowledge_links(user_id=user.id)
     reminder_config = get_daily_reminder_config()
     review_log = get_today_review_log(user_id=user.id)
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("今日待复习", len(today_tasks))
-    col2.metric("低于 70% 知识点", len(low_cards))
-    col3.metric("最近卡点", len(blockers))
-    col4.metric("停车场未解决", len(parking))
+    st.subheader("今日学习")
+    with st.container(border=True):
+        if current_course:
+            st.markdown(f"### 当前课程：{current_course['name']}")
+            if current_location:
+                location_parts = [
+                    current_location.get("section_title"),
+                    current_location.get("deck_title"),
+                ]
+                st.markdown(
+                    "**当前位置：** "
+                    + " · ".join(str(item) for item in location_parts if item)
+                )
+                st.caption(
+                    f"第 {current_location['slide_number']} 页 / "
+                    f"{current_location['slide_count']} 页"
+                )
+                if st.button(
+                    "继续学习",
+                    type="primary",
+                    key="dashboard_continue_learning",
+                ):
+                    st.session_state["ppt_pending_learning_target"] = {
+                        "deck_id": current_location["deck_id"],
+                        "slide_number": current_location["slide_number"],
+                        "include_history": False,
+                    }
+                    set_navigation_target("materials", "ppt_tutor")
+                    st.rerun()
+            else:
+                st.caption("这门课程还没有 PPT / PDF。进入 PPT 学习工作台添加第一份资料。")
+                _go_to_page(
+                    "添加学习资料",
+                    section_id="materials",
+                    page_id="ppt_tutor",
+                    key="dashboard_add_material",
+                )
+        else:
+            st.info("当前没有正在学习的课程。重新激活历史课程或创建一门新课程后，这里会恢复继续学习位置。")
+            _go_to_page(
+                "打开课程中心",
+                section_id="today",
+                page_id="course_center",
+                key="dashboard_open_course_center",
+            )
 
-    st.subheader("常用行动入口")
-    action_cols = st.columns(4)
-    with action_cols[0]:
-        _go_to_page("继续资料学习", section_id="materials", page_id="ppt_tutor", key="dashboard_go_ppt")
-        st.caption("阅读 PPT / PDF、生成逐页讲解、插问。")
-    with action_cols[1]:
-        _go_to_page("登记今日学习", section_id="knowledge", page_id="study_sessions", key="dashboard_go_study")
-        st.caption("记录主题、核心问题、卡点和掌握度。")
-    with action_cols[2]:
-        _go_to_page("整理知识卡片", section_id="knowledge", page_id="knowledge_cards", key="dashboard_go_cards")
-        st.caption("沉淀知识点、闭卷回忆和知识双链。")
-    with action_cols[3]:
-        _go_to_page("处理复习任务", section_id="review", page_id="reviews", key="dashboard_go_reviews")
-        st.caption("完成到期复习并更新掌握度。")
+    st.subheader("今日任务")
+    unresolved_questions = _unresolved_question_count(user.id, current_course)
+    task_cols = st.columns(3)
+    with task_cols[0]:
+        with st.container(border=True):
+            st.metric("复习", len(today_tasks), help="今天到期且尚未完成的 1-3-7-14 复习任务。")
+            _go_to_page(
+                "处理复习任务",
+                section_id="review",
+                page_id="reviews",
+                key="dashboard_go_reviews",
+            )
+    with task_cols[1]:
+        with st.container(border=True):
+            st.metric("待解决插问", unresolved_questions)
+            _go_to_page(
+                "回到问题树",
+                section_id="materials",
+                page_id="ppt_tutor",
+                key="dashboard_go_questions",
+            )
+    with task_cols[2]:
+        with st.container(border=True):
+            recommendation = _today_recommendation(low_cards, unresolved_questions)
+            st.markdown("**推荐行动**")
+            st.write(recommendation)
+            _go_to_page(
+                "整理知识卡片",
+                section_id="knowledge",
+                page_id="knowledge_cards",
+                key="dashboard_go_cards",
+            )
+
+    st.subheader("课程状态")
+    status_cols = st.columns(3)
+    status_cols[0].metric("正在学习", int(status_counts.get("active", len(active_courses))))
+    status_cols[1].metric("已完成", int(status_counts.get("completed", 0)))
+    status_cols[2].metric("归档", int(status_counts.get("archived", 0)))
+    _go_to_page(
+        "管理全部课程",
+        section_id="today",
+        page_id="course_center",
+        key="dashboard_manage_courses",
+    )
 
     with st.container(border=True):
         st.subheader("每日复盘提醒")
@@ -311,72 +392,122 @@ def render() -> None:
         else:
             st.caption("每日复盘提醒当前未启用。")
 
-    st.subheader(f"今天需要复习什么：{date.today().isoformat()}")
-    if today_tasks:
-        for task in today_tasks:
-            with st.container(border=True):
-                cols = st.columns([1.2, 1.5, 1.2, 1.2, 2.2])
-                cols[0].markdown(f"**{task['subject']}**")
-                cols[1].markdown(task["topic"])
-                cols[2].markdown(task["review_stage"])
-                cols[3].markdown(f"掌握度：{task['mastery']}%")
-                cols[4].markdown(_self_test_question(task["topic"]))
-                if task.get("last_cause"):
-                    st.caption(f"上次错因：{task['last_cause']}")
-    else:
-        st.info("今天没有到期复习任务。可以新增知识点卡片，系统会自动生成 1-3-7-14 复习。")
-
-    left, right = st.columns(2)
-    with left:
-        st.subheader("最近卡点")
-        if blockers:
-            st.dataframe(
-                pd.DataFrame(blockers)[["date", "subject", "title", "blockers", "mastery"]],
-                use_container_width=True,
-                hide_index=True,
-            )
+    with st.expander("查看学习数据与每日 AI 复习", expanded=False):
+        st.subheader(f"今天需要复习什么：{date.today().isoformat()}")
+        if today_tasks:
+            for task in today_tasks:
+                with st.container(border=True):
+                    st.markdown(
+                        f"**{task['subject']} · {task['topic']}**  "
+                        f"{task['review_stage']} · 掌握度 {task['mastery']}%"
+                    )
+                    st.markdown(_self_test_question(task["topic"]))
         else:
-            st.caption("暂无卡点记录。")
+            st.caption("今天没有到期复习任务。")
 
-    with right:
-        st.subheader("掌握度低于 70% 的知识点")
-        if low_cards:
-            st.dataframe(
-                pd.DataFrame(low_cards)[["subject", "topic", "mastery", "core_question"]],
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.caption("暂无低掌握度知识点。")
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**最近卡点**")
+            if blockers:
+                st.dataframe(
+                    pd.DataFrame(blockers)[["date", "subject", "title", "blockers", "mastery"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.caption("暂无卡点记录。")
+        with right:
+            st.markdown("**掌握度低于 70% 的知识点**")
+            if low_cards:
+                st.dataframe(
+                    pd.DataFrame(low_cards)[["subject", "topic", "mastery", "core_question"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.caption("暂无低掌握度知识点。")
 
-    st.subheader("最近知识双链")
-    if links:
-        st.dataframe(
-            pd.DataFrame(links)[
-                [
-                    "source_subject",
-                    "source_topic",
-                    "relation_type",
-                    "target_topic",
-                    "relation_note",
-                    "created_at",
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True,
+        st.caption(f"知识双链 {len(links)} 条 · 探索停车场未解决 {len(parking)} 个")
+        st.divider()
+        _render_default_api_and_daily_ai_review()
+
+
+def _current_learning_location(user_id: int, current_course: dict | None) -> dict | None:
+    if not current_course:
+        return None
+    course_id = int(current_course["id"])
+    active_context = get_active_context(user_id)
+    deck_id = int(active_context.get("deck_id") or 0) if active_context.get("active") else 0
+    deck = None
+    if deck_id:
+        deck = fetch_one(
+            """
+            SELECT id, title, slide_count
+            FROM ppt_decks
+            WHERE user_id = ? AND course_id = ? AND id = ?
+            """,
+            (user_id, course_id, deck_id),
         )
-    else:
-        st.caption("暂无知识链接。可以在“知识点卡片”里把当前知识点连接到前置知识、相似概念或易混淆概念。")
-
-    st.subheader("探索停车场问题")
-    if parking:
-        st.dataframe(
-            pd.DataFrame(parking)[["subject", "question", "source", "status", "created_at"]],
-            use_container_width=True,
-            hide_index=True,
+    if not deck:
+        deck = fetch_one(
+            """
+            SELECT id, title, slide_count
+            FROM ppt_decks
+            WHERE user_id = ? AND course_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (user_id, course_id),
         )
-    else:
-        st.caption("暂无未解决的扩展问题。")
+    if not deck:
+        return None
 
-    st.divider()
-    _render_default_api_and_daily_ai_review()
+    slide_number = 1
+    if int(active_context.get("deck_id") or 0) == int(deck["id"]):
+        slide_number = max(1, int(active_context.get("slide_number") or 1))
+    slide_count = max(1, int(deck.get("slide_count") or 1))
+    slide_number = min(slide_number, slide_count)
+    section = fetch_one(
+        """
+        SELECT title
+        FROM ppt_sections
+        WHERE user_id = ? AND deck_id = ? AND start_slide <= ? AND end_slide >= ?
+        ORDER BY section_index ASC
+        LIMIT 1
+        """,
+        (user_id, int(deck["id"]), slide_number, slide_number),
+    )
+    return {
+        "deck_id": int(deck["id"]),
+        "deck_title": deck.get("title") or "未命名资料",
+        "section_title": section.get("title") if section else "",
+        "slide_number": slide_number,
+        "slide_count": slide_count,
+    }
+
+
+def _unresolved_question_count(user_id: int, current_course: dict | None) -> int:
+    if not current_course:
+        return 0
+    row = fetch_one(
+        """
+        SELECT COUNT(DISTINCT sq.id) AS count
+        FROM slide_questions sq
+        JOIN ppt_slides ps ON ps.id = sq.slide_id AND ps.user_id = sq.user_id
+        JOIN ppt_decks d ON d.id = ps.deck_id AND d.user_id = sq.user_id
+        WHERE sq.user_id = ? AND d.course_id = ?
+          AND COALESCE(sq.understood, 0) = 0
+          AND COALESCE(sq.converted_to_knowledge, 0) = 0
+          AND COALESCE(sq.status, '') NOT IN ('已解决', '归档', 'closed', 'understood')
+        """,
+        (user_id, int(current_course["id"])),
+    )
+    return int(row.get("count") or 0) if row else 0
+
+
+def _today_recommendation(low_cards: list[dict], unresolved_questions: int) -> str:
+    if low_cards:
+        return f"先闭卷解释「{low_cards[0]['topic']}」，再完成对应复习。"
+    if unresolved_questions:
+        return "回到当前页问题树，整理一个插问并转成知识卡。"
+    return "完成当前章节总结，记录核心问题与下一步。"

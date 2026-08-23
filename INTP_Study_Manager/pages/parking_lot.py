@@ -5,7 +5,7 @@ import streamlit as st
 
 from db import execute, fetch_all, fetch_one, insert_and_get_id
 from services.auth_service import require_login
-from services.review_service import ensure_initial_review_tasks
+from services.course_content_write_service import convert_parking_question_to_card
 
 
 def render() -> None:
@@ -70,29 +70,16 @@ def render() -> None:
             need_review = st.checkbox("生成 1-3-7-14 复习任务", value=True)
             submitted = st.form_submit_button("转化为知识点")
         if submitted:
-            knowledge_id = insert_and_get_id(
-                """
-                INSERT INTO knowledge_cards (
-                    user_id, subject, topic, core_question, one_sentence, logic_or_formula,
-                    application, mastery, need_review
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user.id,
-                    selected["subject"] or "未分类",
-                    topic.strip(),
-                    selected["question"],
-                    one_sentence.strip(),
-                    logic.strip(),
-                    application.strip(),
-                    mastery,
-                    int(need_review),
-                ),
+            convert_parking_question_to_card(
+                user.id,
+                selected_id,
+                topic=topic,
+                one_sentence=one_sentence,
+                logic_or_formula=logic,
+                application=application,
+                mastery=mastery,
+                need_review=need_review,
             )
-            if need_review:
-                ensure_initial_review_tasks(knowledge_id, user_id=user.id)
-            execute("UPDATE parking_lot SET status = '已转知识点' WHERE id = ? AND user_id = ?", (selected_id, user.id))
             st.success("已转化为知识点卡片。")
             st.rerun()
 

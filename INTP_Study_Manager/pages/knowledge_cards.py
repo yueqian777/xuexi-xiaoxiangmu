@@ -7,12 +7,16 @@ import streamlit as st
 
 from db import execute, fetch_all, fetch_one, insert_and_get_id
 from services.auth_service import require_login
+from services.course_content_write_service import (
+    create_knowledge_card_record,
+    update_knowledge_card_record,
+)
 from services.knowledge_card_service import (
     compact_card_index_rows,
     knowledge_card_preview_markdown,
+    list_knowledge_cards_with_context,
     mastery_level,
 )
-from services.review_service import ensure_initial_review_tasks
 from services.ui_helpers import render_workbench_header
 
 RELATION_TYPES = [
@@ -33,12 +37,14 @@ def render() -> None:
     _install_knowledge_card_styles()
     render_workbench_header("知识沉淀工作台", "先浏览和定位已有知识，再按需要新建、编辑、复习或建立知识双链。")
 
-    sessions = fetch_all(
-        "SELECT id, date, subject, title FROM study_sessions WHERE user_id = ? ORDER BY date DESC, id DESC",
-        (user.id,),
+    include_archived = st.checkbox(
+        "包含已归档课程的知识卡",
+        value=False,
+        help="归档不会删除知识卡；需要回顾历史课程时再显式打开。",
     )
+    sessions = _list_source_sessions(user.id, include_archived=include_archived)
     session_options = [None] + [s["id"] for s in sessions]
-    cards = fetch_all("SELECT * FROM knowledge_cards WHERE user_id = ? ORDER BY created_at DESC, id DESC", (user.id,))
+    cards = list_knowledge_cards_with_context(user.id, include_archived=include_archived)
     mode = st.radio(
         "知识沉淀模式",
         ["浏览知识点", "新建知识点"],
@@ -71,10 +77,8 @@ def render() -> None:
         format_func=lambda item_id: f"#{item_id} - {next(c['topic'] for c in filtered if int(c['id']) == item_id)}",
     )
 
-    card = fetch_one(
-        "SELECT * FROM knowledge_cards WHERE id = ? AND user_id = ?",
-        (selected_id or default_selected_id, user.id),
-    )
+    selected_card_id = int(selected_id or default_selected_id)
+    card = next((item for item in filtered if int(item["id"]) == selected_card_id), None)
     if not card:
         return
 
@@ -91,6 +95,22 @@ def render() -> None:
         _render_recall_panel(card)
 
     _render_knowledge_links(user.id, card, cards)
+
+
+def _list_source_sessions(user_id: int, *, include_archived: bool) -> list[dict]:
+    archive_filter = "" if include_archived else "AND COALESCE(c.status, 'active') <> 'archived'"
+    return fetch_all(
+        f"""
+        SELECT s.id, s.date, s.subject, s.title, c.id AS owned_course_id
+        FROM study_sessions s
+        LEFT JOIN courses c
+          ON c.id = s.course_id
+         AND c.user_id = s.user_id
+        WHERE s.user_id = ? {archive_filter}
+        ORDER BY s.date DESC, s.id DESC
+        """,
+        (int(user_id),),
+    )
 
 
 def _render_create_form(user_id: int, sessions: list[dict], session_options: list[int | None]) -> None:
@@ -116,29 +136,19 @@ def _render_create_form(user_id: int, sessions: list[dict], session_options: lis
         if not subject.strip() or not topic.strip() or not one_sentence.strip():
             st.error("科目、知识点、一句话解释不能为空。")
         else:
-            knowledge_id = insert_and_get_id(
-                """
-                INSERT INTO knowledge_cards (
-                    user_id, subject, topic, core_question, one_sentence, logic_or_formula,
-                    application, mastery, need_review, source_session_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user_id,
-                    subject.strip(),
-                    topic.strip(),
-                    core_question.strip(),
-                    one_sentence.strip(),
-                    logic_or_formula.strip(),
-                    application.strip(),
-                    mastery,
-                    int(need_review),
-                    source_session_id,
-                ),
+            knowledge_id = create_knowledge_card_record(
+                user_id,
+                subject=subject,
+                topic=topic,
+                core_question=core_question,
+                one_sentence=one_sentence,
+                logic_or_formula=logic_or_formula,
+                application=application,
+                mastery=mastery,
+                need_review=need_review,
+                source_session_id=source_session_id,
+                review_start_date=date.today(),
             )
-            if need_review:
-                ensure_initial_review_tasks(knowledge_id, date.today(), user_id=user_id)
             st.success("知识点卡片已保存，复习任务已按 1-3-7-14 生成。")
 
 
@@ -212,30 +222,23 @@ def _render_edit_form(user_id: int, card: dict) -> None:
         edit_need_review = st.checkbox("需要复习", value=bool(card["need_review"]))
         update_submitted = st.form_submit_button("更新知识点")
     if update_submitted:
-        execute(
-            """
-            UPDATE knowledge_cards
-            SET subject = ?, topic = ?, core_question = ?, one_sentence = ?,
-                logic_or_formula = ?, application = ?, mastery = ?, need_review = ?
-            WHERE id = ? AND user_id = ?
-            """,
-            (
-                edit_subject.strip(),
-                edit_topic.strip(),
-                edit_question.strip(),
-                edit_one.strip(),
-                edit_logic.strip(),
-                edit_app.strip(),
-                edit_mastery,
-                int(edit_need_review),
-                selected_id,
+        if not edit_subject.strip():
+            st.error("科目不能为空。")
+        else:
+            update_knowledge_card_record(
                 user_id,
-            ),
-        )
-        if edit_need_review:
-            ensure_initial_review_tasks(selected_id, card["created_at"], user_id=user_id)
-        st.success("知识点已更新。")
-        st.rerun()
+                selected_id,
+                subject=edit_subject,
+                topic=edit_topic,
+                core_question=edit_question,
+                one_sentence=edit_one,
+                logic_or_formula=edit_logic,
+                application=edit_app,
+                mastery=edit_mastery,
+                need_review=edit_need_review,
+            )
+            st.success("知识点已更新。")
+            st.rerun()
 
 
 def _render_recall_panel(card: dict) -> None:

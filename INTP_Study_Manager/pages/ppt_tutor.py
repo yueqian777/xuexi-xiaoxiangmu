@@ -88,6 +88,7 @@ from services.ppt_reader_state import (
 from services.question_to_knowledge_service import (
     convert_question_to_knowledge,
     get_question_knowledge_draft,
+    mark_question_understood,
 )
 from services.study_asset_service import parse_study_assets, save_study_assets
 from services.ui_helpers import render_workbench_header, set_navigation_target
@@ -116,6 +117,9 @@ PPT_INTERACTIVE_REQUEST_TIMEOUT_SECONDS = 300
 PPT_STUDY_ASSET_REQUEST_TIMEOUT_SECONDS = 300
 PPT_STUDY_ASSET_MAX_ATTEMPTS = 3
 PPT_STUDY_ASSET_RETRY_DELAY_SECONDS = 2.0
+PPT_PENDING_LEARNING_TARGET_KEY = "ppt_pending_learning_target"
+PPT_HISTORY_DECK_STATE_KEY = "ppt_history_deck_id"
+PPT_HISTORY_COURSE_STATE_KEY = "ppt_history_course_id"
 
 
 def _get_synced_reader_component():
@@ -129,6 +133,136 @@ def _get_synced_reader_component():
         path=str(SYNCED_READER_COMPONENT_PATH),
     )
     return SYNCED_READER_COMPONENT
+
+
+def consume_pending_learning_target() -> dict[str, int | bool | None] | None:
+    """Consume a course/dashboard jump before the deck selectbox is created."""
+
+    raw_target = st.session_state.pop(PPT_PENDING_LEARNING_TARGET_KEY, None)
+    if not isinstance(raw_target, dict):
+        return None
+    try:
+        deck_id = int(raw_target.get("deck_id") or 0)
+    except (TypeError, ValueError):
+        return None
+    if deck_id <= 0:
+        return None
+
+    slide_number = _optional_positive_int(raw_target.get("slide_number"))
+    course_id = _optional_positive_int(
+        raw_target.get("history_course_id") or raw_target.get("course_id")
+    )
+    include_history = bool(raw_target.get("include_history"))
+    st.session_state[LAST_READER_DECK_STATE_KEY] = deck_id
+    if slide_number is not None:
+        st.session_state[reader_active_slide_state_key(deck_id)] = slide_number
+    if include_history:
+        st.session_state[PPT_HISTORY_DECK_STATE_KEY] = deck_id
+        if course_id is not None:
+            st.session_state[PPT_HISTORY_COURSE_STATE_KEY] = course_id
+        else:
+            st.session_state.pop(PPT_HISTORY_COURSE_STATE_KEY, None)
+    else:
+        st.session_state.pop(PPT_HISTORY_DECK_STATE_KEY, None)
+        st.session_state.pop(PPT_HISTORY_COURSE_STATE_KEY, None)
+    return {
+        "deck_id": deck_id,
+        "course_id": course_id,
+        "slide_number": slide_number,
+        "include_history": include_history,
+    }
+
+
+def _reader_history_deck_id() -> int | None:
+    return _optional_positive_int(st.session_state.get(PPT_HISTORY_DECK_STATE_KEY))
+
+
+def _reader_history_course_id() -> int | None:
+    return _optional_positive_int(st.session_state.get(PPT_HISTORY_COURSE_STATE_KEY))
+
+
+def _fetch_reader_decks(
+    user_id: int,
+    *,
+    history_deck_id: int | None = None,
+    history_course_id: int | None = None,
+) -> list[dict]:
+    history_deck_id = _optional_positive_int(history_deck_id)
+    history_course_id = _optional_positive_int(history_course_id)
+    history_clauses: list[str] = []
+    params: list[object] = [int(user_id)]
+    if history_deck_id is not None:
+        history_clauses.append("OR d.id = ?")
+        params.append(history_deck_id)
+    if history_course_id is not None:
+        history_clauses.append("OR d.course_id = ?")
+        params.append(history_course_id)
+    history_clause = "\n                    ".join(history_clauses)
+    try:
+        return fetch_all(
+            f"""
+            SELECT d.*
+            FROM ppt_decks d
+            LEFT JOIN courses c
+              ON c.id = d.course_id
+             AND c.user_id = d.user_id
+            WHERE d.user_id = ?
+              AND (
+                    d.course_id IS NULL
+                    OR c.status = 'active'
+                    {history_clause}
+              )
+            ORDER BY
+                CASE d.status
+                    WHEN '使用中' THEN 0
+                    WHEN '待整理' THEN 1
+                    WHEN '暂停' THEN 2
+                    WHEN '归档' THEN 3
+                    ELSE 9
+                END,
+                d.category ASC,
+                d.sort_order ASC,
+                d.created_at DESC,
+                d.id DESC
+            """,
+            tuple(params),
+        )
+    except sqlite3.OperationalError as exc:
+        if not _is_missing_course_lifecycle_schema_error(exc):
+            raise
+        # Allow startup against a database that has not run the course migration yet.
+        return fetch_all(
+            """
+            SELECT *
+            FROM ppt_decks
+            WHERE user_id = ?
+            ORDER BY
+                CASE status
+                    WHEN '使用中' THEN 0
+                    WHEN '待整理' THEN 1
+                    WHEN '暂停' THEN 2
+                    WHEN '归档' THEN 3
+                    ELSE 9
+                END,
+                category ASC,
+                sort_order ASC,
+                created_at DESC,
+                id DESC
+            """,
+            (int(user_id),),
+        )
+
+
+def _is_missing_course_lifecycle_schema_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).strip().lower()
+    return any(
+        marker in message
+        for marker in (
+            "no such table: courses",
+            "no such column: d.course_id",
+            "no such column: course_id",
+        )
+    )
 
 
 def _read_last_reader_position(user_id: int) -> dict[str, int]:
@@ -180,9 +314,17 @@ def _reader_deck_id_for_render(
     state_deck_id: object,
     *,
     page_just_entered: bool,
+    pending_deck_id: object | None = None,
 ) -> int:
     if not deck_ids:
         return 0
+
+    try:
+        explicit_deck_id = int(pending_deck_id or 0)
+    except (TypeError, ValueError):
+        explicit_deck_id = 0
+    if explicit_deck_id in deck_ids:
+        return explicit_deck_id
 
     remembered_deck_id = int(last_position.get("deck_id") or 0)
     if page_just_entered and remembered_deck_id in deck_ids:
@@ -368,25 +510,13 @@ def render() -> None:
 
     _resume_interrupted_structure_generation()
     generation_task = _resume_interrupted_generation()
-    decks = fetch_all(
-        """
-        SELECT *
-        FROM ppt_decks
-        WHERE user_id = ?
-        ORDER BY
-            CASE status
-                WHEN '使用中' THEN 0
-                WHEN '待整理' THEN 1
-                WHEN '暂停' THEN 2
-                WHEN '归档' THEN 3
-                ELSE 9
-            END,
-            category ASC,
-            sort_order ASC,
-            created_at DESC,
-            id DESC
-        """,
-        (user.id,),
+    pending_target = consume_pending_learning_target()
+    history_deck_id = _reader_history_deck_id()
+    history_course_id = _reader_history_course_id()
+    decks = _fetch_reader_decks(
+        user.id,
+        history_deck_id=history_deck_id,
+        history_course_id=history_course_id,
     )
     workbench_mode = st.radio(
         "工作模式",
@@ -404,12 +534,20 @@ def render() -> None:
 
     deck_by_id = {int(deck["id"]): deck for deck in decks}
     deck_ids = list(deck_by_id)
+    if pending_target and int(pending_target["deck_id"]) not in deck_by_id:
+        stale_deck_id = int(pending_target["deck_id"])
+        if _reader_history_deck_id() == stale_deck_id:
+            st.session_state.pop(PPT_HISTORY_DECK_STATE_KEY, None)
+            st.session_state.pop(PPT_HISTORY_COURSE_STATE_KEY, None)
+        if st.session_state.get(LAST_READER_DECK_STATE_KEY) == stale_deck_id:
+            st.session_state.pop(LAST_READER_DECK_STATE_KEY, None)
     last_position = _read_last_reader_position(user.id)
     selected_deck_id = _reader_deck_id_for_render(
         deck_ids,
         last_position,
         st.session_state.get(LAST_READER_DECK_STATE_KEY),
         page_just_entered=bool(st.session_state.get(APP_PAGE_JUST_ENTERED_STATE_KEY)),
+        pending_deck_id=pending_target.get("deck_id") if pending_target else None,
     )
     if st.session_state.get(LAST_READER_DECK_STATE_KEY) != selected_deck_id:
         st.session_state[LAST_READER_DECK_STATE_KEY] = selected_deck_id
@@ -420,6 +558,15 @@ def render() -> None:
         key=LAST_READER_DECK_STATE_KEY,
     )
     deck_id = int(deck_id)
+    if history_course_id is not None:
+        selected_course_id = _optional_positive_int(
+            (deck_by_id.get(deck_id) or {}).get("course_id")
+        )
+        if selected_course_id != history_course_id:
+            st.session_state.pop(PPT_HISTORY_DECK_STATE_KEY, None)
+            st.session_state.pop(PPT_HISTORY_COURSE_STATE_KEY, None)
+    elif history_deck_id is not None and deck_id != history_deck_id:
+        st.session_state.pop(PPT_HISTORY_DECK_STATE_KEY, None)
     _remember_reader_deck_selection(user.id, deck_id, last_position)
     deck = deck_by_id.get(deck_id)
     slides = fetch_all(
@@ -446,7 +593,6 @@ def render() -> None:
         _render_question_to_knowledge_panel(deck, user_id=user.id)
         _render_study_asset_generator(deck, sections, slides, latest_by_slide_id)
     else:
-        _render_api_settings(user.id)
         _render_question_to_knowledge_panel(deck, user_id=user.id)
         _render_synced_reader(deck, slides, latest_by_slide_id, last_position, sections, user_id=user.id)
 
@@ -572,6 +718,13 @@ def _render_api_settings(user_id: int) -> None:
         st.caption("如果使用本地 CLIProxyAPI，默认客户端 Key 是 local-client-key；真实上游 Key 由代理服务保存。")
 
 
+def _required_upload_subject(value: object) -> str:
+    subject = str(value or "").strip()
+    if not subject:
+        raise ValueError("请填写科目后再导入资料。")
+    return subject
+
+
 def _render_upload_form(*, expanded: bool = False) -> None:
     with st.expander("上传 PPT / PDF", expanded=expanded):
         st.caption("已有资料时默认折叠，减少逐页阅读和插问时的页面干扰。")
@@ -583,6 +736,11 @@ def _render_upload_form(*, expanded: bool = False) -> None:
             submitted = st.form_submit_button("导入资料")
 
     if submitted:
+        try:
+            subject = _required_upload_subject(subject)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
         if uploaded is None:
             st.error("请先选择 PPTX 或 PDF 文件。")
             return
@@ -914,30 +1072,30 @@ def _render_question_to_knowledge_panel(deck: dict, *, user_id: int) -> None:
         return
     draft = get_question_knowledge_draft(user_id, question_id)
     if not draft:
-        with st.expander("Question to knowledge card", expanded=True):
-            st.warning("This question is no longer available.")
-            if st.button("Dismiss", key=f"dismiss_missing_question_{question_id}"):
+        with st.expander("插问转知识卡", expanded=True):
+            st.warning("该插问已不可用。")
+            if st.button("关闭", key=f"dismiss_missing_question_{question_id}"):
                 st.session_state.pop(key, None)
                 st.rerun()
         return
 
     existing_card = _question_existing_knowledge_card(user_id, question_id)
-    with st.expander("Question to knowledge card", expanded=True):
-        st.caption(f"Source question #{question_id}")
+    with st.expander("插问转知识卡", expanded=True):
+        st.caption(f"来源插问 #{question_id}")
         if existing_card:
-            st.info(f"Already linked to knowledge card #{existing_card['id']}. Submitting will reuse it.")
+            st.info(f"已关联知识卡 #{existing_card['id']}；再次保存会复用该卡片。")
         with st.form(f"question_to_knowledge_form_{int(deck['id'])}_{question_id}"):
-            subject = st.text_input("Subject", value=str(draft.get("subject") or "Uncategorized"))
-            topic = st.text_input("Topic", value=str(draft.get("topic") or "Question"))
-            core_question = st.text_area("Core question", value=str(draft.get("core_question") or ""), height=90)
-            one_sentence = st.text_area("One sentence", value=str(draft.get("one_sentence") or ""), height=80)
-            logic_or_formula = st.text_area("Logic or formula", value=str(draft.get("logic_or_formula") or ""), height=140)
-            application = st.text_area("Application", value=str(draft.get("application") or ""), height=110)
+            subject = st.text_input("科目", value=str(draft.get("subject") or "未分类"))
+            topic = st.text_input("知识点", value=str(draft.get("topic") or "插问知识点"))
+            core_question = st.text_area("核心问题", value=str(draft.get("core_question") or ""), height=90)
+            one_sentence = st.text_area("一句话解释", value=str(draft.get("one_sentence") or ""), height=80)
+            logic_or_formula = st.text_area("公式或逻辑", value=str(draft.get("logic_or_formula") or ""), height=140)
+            application = st.text_area("应用场景", value=str(draft.get("application") or ""), height=110)
             cols = st.columns([1, 1, 2])
-            mastery = cols[0].number_input("Mastery", min_value=0, max_value=100, value=int(draft.get("mastery") or 60), step=5)
-            need_review = cols[1].checkbox("Add review", value=bool(draft.get("need_review", True)))
-            submitted = cols[2].form_submit_button("Save knowledge card", type="primary")
-            cancelled = cols[2].form_submit_button("Cancel")
+            mastery = cols[0].number_input("掌握度", min_value=0, max_value=100, value=int(draft.get("mastery") or 60), step=5)
+            need_review = cols[1].checkbox("加入复习", value=bool(draft.get("need_review", True)))
+            submitted = cols[2].form_submit_button("保存知识卡", type="primary")
+            cancelled = cols[2].form_submit_button("取消")
         if cancelled:
             st.session_state.pop(key, None)
             st.rerun()
@@ -959,11 +1117,11 @@ def _render_question_to_knowledge_panel(deck: dict, *, user_id: int) -> None:
                     create_review_tasks=need_review,
                 )
             except Exception as exc:
-                st.error(f"Failed to create knowledge card: {exc}")
+                st.error(f"知识卡保存失败：{exc}")
                 return
             st.session_state.pop(key, None)
-            verb = "Created" if result.get("created") else "Reused"
-            st.success(f"{verb} knowledge card #{result['knowledge_id']}.")
+            verb = "已创建" if result.get("created") else "已复用"
+            st.success(f"{verb}知识卡 #{result['knowledge_id']}。")
             st.rerun()
 
 
@@ -1336,7 +1494,7 @@ def _render_synced_reader(
     user_id: int | None = None,
 ) -> None:
     st.subheader("同步阅读器")
-    st.caption("提示：右侧固定插问栏会绑定当前页。你可以直接提问，或选中讲解文字后引用到插问。")
+    st.caption("提示：右侧学习记录跟随当前页，集中呈现问题树、知识卡与复习状态。")
     user_id = int(user_id) if user_id is not None else int(deck.get("user_id") or require_login().id)
     active_slide_number = _hydrate_reader_position_from_backend(int(deck["id"]), slides, last_position)
     _sync_active_slide_context(user_id, int(deck["id"]), active_slide_number)
@@ -1348,6 +1506,7 @@ def _render_synced_reader(
         if int(slide["slide_number"]) in image_slide_numbers
     ]
     question_by_slide_id = _questions_by_slide_ids(active_slide_ids)
+    learning_record_by_slide_id = _learning_records_by_slide_ids(user_id, active_slide_ids)
     animation_by_slide_id = animation_states_by_slide_ids(user_id, active_slide_ids)
     payload = _build_reader_payload(
         slides,
@@ -1355,6 +1514,7 @@ def _render_synced_reader(
         question_by_slide_id,
         image_slide_numbers=image_slide_numbers,
         animation_by_slide_id=animation_by_slide_id,
+        learning_record_by_slide_id=learning_record_by_slide_id,
     )
     if not payload:
         st.warning("当前资料没有任何幻灯片数据。")
@@ -1402,6 +1562,8 @@ def _handle_synced_reader_action(
         "toggle_slide_bookmark",
         "rename_slide_bookmark",
         "reader_position",
+        "convert_question_to_knowledge",
+        "mark_question_understood",
     }:
         return
     try:
@@ -1417,6 +1579,48 @@ def _handle_synced_reader_action(
         return
 
     token = str(payload.get("token") or "").strip()
+    if action in {"convert_question_to_knowledge", "mark_question_understood"}:
+        try:
+            question_id = int(payload.get("questionId", 0))
+        except (TypeError, ValueError):
+            return
+        question = fetch_one(
+            """
+            SELECT id
+            FROM slide_questions
+            WHERE user_id = ? AND slide_id = ? AND id = ?
+            """,
+            (user_id, int(slide["id"]), question_id),
+        )
+        if not question:
+            st.warning("该插问已失效，未更新学习记录。")
+            return
+
+        last_learning_token_key = f"ppt_question_learning_last_token_{deck['id']}_{action}"
+        if token and st.session_state.get(last_learning_token_key) == token:
+            return
+        try:
+            if action == "convert_question_to_knowledge":
+                result = convert_question_to_knowledge(
+                    user_id,
+                    question_id,
+                    create_review_tasks=True,
+                )
+                message = f"插问已关联知识卡 #{result['knowledge_id']}，复习计划已同步。"
+            else:
+                if not mark_question_understood(user_id, question_id):
+                    st.warning("该插问已失效，未标记掌握。")
+                    return
+                message = "插问已标记为掌握。"
+        except (sqlite3.Error, ValueError) as exc:
+            st.error(f"学习记录更新失败：{exc}")
+            return
+        if token:
+            st.session_state[last_learning_token_key] = token
+        st.toast(message)
+        st.rerun()
+        return
+
     if action == "reader_position":
         try:
             should_rerun = _handle_reader_position_update(
@@ -2951,7 +3155,7 @@ def _render_question_history_node(item: dict) -> None:
     with st.container(border=True):
         st.markdown(f"**{label}:** {display_parts['question']}")
         if display_parts["quoteText"]:
-            st.markdown(f"**寮曠敤锛?*\n{_markdown_quote_block(display_parts['quoteText'])}")
+            st.markdown(f"**引用：**\n{_markdown_quote_block(display_parts['quoteText'])}")
         st.markdown(item["answer"])
         st.caption(
             f"分类：{item.get('category') or '-'} | 状态：{item.get('status') or '-'} | "
@@ -4041,9 +4245,11 @@ def _build_reader_payload(
     *,
     image_slide_numbers: set[int] | None = None,
     animation_by_slide_id: dict[int, list[dict]] | None = None,
+    learning_record_by_slide_id: dict[int, dict] | None = None,
 ) -> list[dict]:
     payload = []
     animation_by_slide_id = animation_by_slide_id or {}
+    learning_record_by_slide_id = learning_record_by_slide_id or {}
     for slide in slides:
         slide_number = int(slide["slide_number"])
         image_path = Path(slide.get("image_path") or "")
@@ -4051,6 +4257,12 @@ def _build_reader_payload(
         slide_text = _display_slide_text(slide)
         slide_title = slide.get("title") or f"第 {slide['slide_number']} 页"
         bookmark_title = str(slide.get("bookmark_title") or "").strip() or slide_title
+        learning_record = learning_record_by_slide_id.get(int(slide["id"]), {})
+        knowledge_cards = learning_record.get("knowledge_cards") or []
+        review_status = learning_record.get("review_status") or {
+            "pending_count": 0,
+            "next_review_date": "",
+        }
 
         image_available = image_path.exists() and image_path.is_file()
         if image_available:
@@ -4078,6 +4290,8 @@ def _build_reader_payload(
                 "bookmarkEnabled": bool(slide.get("bookmark_enabled")),
                 "bookmarkTitle": bookmark_title,
                 "questions": question_by_slide_id.get(int(slide["id"]), []),
+                "knowledgeCards": knowledge_cards,
+                "reviewStatus": review_status,
                 "animationStates": animation_states,
                 "animationSummary": _animation_summary_from_states(animation_states),
             }
@@ -4780,6 +4994,16 @@ def _latest_explanations_by_slide_ids(slide_ids: list[int]) -> dict[int, dict]:
     return latest_explanations_by_slide_ids(require_login().id, slide_ids)
 
 
+def _question_learning_status(row: dict) -> str:
+    if bool(row.get("understood")):
+        return "已掌握"
+    if bool(row.get("converted_to_knowledge")) or row.get("knowledge_id"):
+        return "已转知识卡"
+    if bool(row.get("need_review")):
+        return "待复习"
+    return str(row.get("status") or "未整理")
+
+
 def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
     grouped = questions_by_slide_ids(require_login().id, slide_ids)
     return {
@@ -4796,6 +5020,11 @@ def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
                 "model": row["model"],
                 "category": row["category"],
                 "status": row["status"],
+                "learningStatus": _question_learning_status(row),
+                "knowledgeId": row.get("knowledge_id"),
+                "convertedToKnowledge": bool(row.get("converted_to_knowledge")),
+                "understood": bool(row.get("understood")),
+                "needReview": bool(row.get("need_review")),
                 "sortOrder": row["sort_order"],
                 "createdAt": row["created_at"],
             }
@@ -4803,6 +5032,91 @@ def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:
         ]
         for slide_id, rows in grouped.items()
     }
+
+
+def _learning_records_by_slide_ids(user_id: int, slide_ids: list[int]) -> dict[int, dict]:
+    normalized_slide_ids = list(dict.fromkeys(int(slide_id) for slide_id in slide_ids))
+    records = {
+        slide_id: {
+            "knowledge_cards": [],
+            "review_status": {"pending_count": 0, "next_review_date": ""},
+        }
+        for slide_id in normalized_slide_ids
+    }
+    seen_card_ids = {slide_id: set() for slide_id in normalized_slide_ids}
+    for start in range(0, len(normalized_slide_ids), 900):
+        chunk = normalized_slide_ids[start : start + 900]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = fetch_all(
+            f"""
+            SELECT
+                kc.id,
+                target_slide.id AS slide_id,
+                kc.source_question_id,
+                kc.topic,
+                kc.mastery,
+                kc.need_review,
+                MIN(CASE WHEN rt.status = '待复习' THEN rt.review_date END) AS next_review_date,
+                SUM(CASE WHEN rt.status = '待复习' THEN 1 ELSE 0 END) AS pending_count
+            FROM ppt_slides target_slide
+            JOIN knowledge_cards kc
+              ON kc.user_id = target_slide.user_id
+             AND (
+                    kc.source_slide_id = target_slide.id
+                    OR (
+                        kc.source_session_id IS NOT NULL
+                        AND EXISTS (
+                            SELECT 1
+                            FROM ppt_study_asset_pages asset_page
+                            WHERE asset_page.user_id = kc.user_id
+                              AND asset_page.user_id = target_slide.user_id
+                              AND asset_page.session_id = kc.source_session_id
+                              AND asset_page.deck_id = target_slide.deck_id
+                              AND asset_page.slide_number = target_slide.slide_number
+                        )
+                    )
+             )
+            LEFT JOIN review_tasks rt
+              ON rt.user_id = kc.user_id
+             AND rt.knowledge_id = kc.id
+            WHERE target_slide.user_id = ?
+              AND target_slide.id IN ({placeholders})
+            GROUP BY
+                target_slide.id,
+                kc.id,
+                kc.source_question_id,
+                kc.topic,
+                kc.mastery,
+                kc.need_review
+            ORDER BY target_slide.id ASC, kc.created_at DESC, kc.id DESC
+            """,
+            (int(user_id), *tuple(chunk)),
+        )
+        for row in rows:
+            slide_id = int(row["slide_id"])
+            card_id = int(row["id"])
+            if card_id in seen_card_ids[slide_id]:
+                continue
+            seen_card_ids[slide_id].add(card_id)
+            record = records[slide_id]
+            next_review_date = str(row.get("next_review_date") or "")
+            pending_count = int(row.get("pending_count") or 0)
+            record["knowledge_cards"].append(
+                {
+                    "id": card_id,
+                    "topic": str(row.get("topic") or "未命名知识点"),
+                    "mastery": int(row.get("mastery") or 0),
+                    "need_review": bool(row.get("need_review")),
+                    "source_question_id": row.get("source_question_id"),
+                    "next_review_date": next_review_date,
+                }
+            )
+            review_status = record["review_status"]
+            review_status["pending_count"] += pending_count
+            current_next = str(review_status.get("next_review_date") or "")
+            if next_review_date and (not current_next or next_review_date < current_next):
+                review_status["next_review_date"] = next_review_date
+    return records
 
 
 def _build_slide_prompt(

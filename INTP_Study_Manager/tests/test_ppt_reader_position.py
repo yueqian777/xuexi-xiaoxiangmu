@@ -72,6 +72,18 @@ class PptReaderPositionTest(unittest.TestCase):
             24,
         )
 
+    def test_pending_course_jump_overrides_backend_memory_on_page_entry(self):
+        self.assertEqual(
+            ppt_tutor._reader_deck_id_for_render(
+                [7, 24],
+                {"deck_id": 7, "slide_number": 301},
+                24,
+                page_just_entered=True,
+                pending_deck_id=24,
+            ),
+            24,
+        )
+
     def test_reader_image_window_slide_numbers_clips_edges(self):
         slides = [{"slide_number": 1}, {"slide_number": 2}, {"slide_number": 3}, {"slide_number": 4}]
 

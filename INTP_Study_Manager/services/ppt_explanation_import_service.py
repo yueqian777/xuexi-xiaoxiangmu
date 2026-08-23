@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from db import DATA_DIR, fetch_one, write_transaction
+from services.course_service import ensure_course_for_subject
 from services.export_manifest_service import read_manifest, validate_public_ppt_manifest
 from services.export_path_service import safe_extract_zip, safe_filename, safe_join_under
 
@@ -118,25 +119,33 @@ def import_share_package(user_id: int, zip_file: Any, *, duplicate_policy: str =
             deck_ids = []
             for deck_index, deck in enumerate(decks, start=1):
                 document_structure = _document_structure(deck)
+                deck_subject = _text(deck.get("subject")) or "未分类"
+                course_id = ensure_course_for_subject(
+                    user_id_int,
+                    deck_subject,
+                    conn=conn,
+                )
                 deck_cursor = conn.execute(
                     """
                     INSERT INTO ppt_decks (
                         user_id, filename, title, subject, file_path, slide_count,
-                        outline, import_package_id, source_type, source_package_id, imported_at
+                        outline, import_package_id, source_type, source_package_id, imported_at,
+                        course_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ppt_explanation_share', ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ppt_explanation_share', ?, ?, ?)
                     """,
                     (
                         user_id_int,
                         deck.get("filename") or f"{manifest['package_id']}.zip",
                         deck.get("deck_title") or "Imported deck",
-                        deck.get("subject") or "",
+                        deck_subject,
                         str(asset_root / "manifest.json"),
                         int(deck.get("slide_count") or len(deck["slides"])),
                         _text(document_structure.get("outline")),
                         import_package_id,
                         manifest["package_id"],
                         datetime.now().isoformat(timespec="seconds"),
+                        course_id,
                     ),
                 )
                 deck_id = int(deck_cursor.lastrowid)
@@ -213,9 +222,10 @@ def _manifest_decks(manifest: dict[str, Any]) -> list[dict[str, Any]]:
         for deck in decks:
             if not isinstance(deck, dict):
                 continue
+            deck_subject = _text(deck.get("subject")) or _text(manifest.get("subject")) or "未分类"
             normalized.append(
                 {
-                    "subject": deck.get("subject") or manifest.get("subject", ""),
+                    "subject": deck_subject,
                     "deck_title": deck.get("deck_title") or deck.get("title") or manifest.get("deck_title", ""),
                     "filename": deck.get("filename") or f"{manifest['package_id']}.zip",
                     "slide_count": int(deck.get("slide_count") or len(deck.get("slides") or [])),
@@ -227,7 +237,7 @@ def _manifest_decks(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     slides = manifest.get("slides") or []
     return [
         {
-            "subject": manifest.get("subject", ""),
+            "subject": _text(manifest.get("subject")) or "未分类",
             "deck_title": manifest.get("deck_title", ""),
             "filename": f"{manifest['package_id']}.zip",
             "slide_count": int(manifest.get("slide_count") or len(slides)),

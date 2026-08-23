@@ -1,6 +1,15 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import app
+import db
+from services import ui_helpers
+from streamlit.testing.v1 import AppTest
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class AppNavigationStateTest(unittest.TestCase):
@@ -18,7 +27,7 @@ class AppNavigationStateTest(unittest.TestCase):
             section.id: [entry.id for entry in app.NAV_ENTRIES if entry.section_id == section.id]
             for section in app.NAV_SECTIONS
         }
-        self.assertEqual(entries_by_section["today"], ["dashboard"])
+        self.assertEqual(entries_by_section["today"], ["dashboard", "course_center"])
         self.assertEqual(
             entries_by_section["materials"],
             [
@@ -62,6 +71,101 @@ class AppNavigationStateTest(unittest.TestCase):
         self.assertTrue(app._mark_active_page("PPT 逐页讲解", state))
         self.assertEqual(state[app.ACTIVE_PAGE_STATE_KEY], "ppt_tutor")
         self.assertTrue(state[app.PAGE_JUST_ENTERED_STATE_KEY])
+
+    def test_pending_navigation_target_is_consumed_and_keeps_exact_page(self):
+        state = {
+            ui_helpers.PENDING_NAVIGATION_STATE_KEY: {
+                "section_id": "knowledge",
+                "page_id": "knowledge_cards",
+            }
+        }
+
+        self.assertTrue(app._apply_pending_navigation_target(state))
+        self.assertEqual(state[app.SELECTED_SECTION_STATE_KEY], "knowledge")
+        self.assertEqual(state[app.SELECTED_PAGE_STATE_KEY], "knowledge_cards")
+        self.assertEqual(state[app.PAGE_SECTION_SYNC_STATE_KEY], "knowledge")
+        self.assertNotIn(ui_helpers.PENDING_NAVIGATION_STATE_KEY, state)
+        self.assertFalse(app._apply_pending_navigation_target(state))
+
+    def test_pending_navigation_target_rejects_mismatched_section(self):
+        state = {
+            app.SELECTED_SECTION_STATE_KEY: "today",
+            app.SELECTED_PAGE_STATE_KEY: "dashboard",
+            ui_helpers.PENDING_NAVIGATION_STATE_KEY: {
+                "section_id": "knowledge",
+                "page_id": "ppt_tutor",
+            },
+        }
+
+        self.assertFalse(app._apply_pending_navigation_target(state))
+        self.assertEqual(state[app.SELECTED_SECTION_STATE_KEY], "today")
+        self.assertEqual(state[app.SELECTED_PAGE_STATE_KEY], "dashboard")
+        self.assertNotIn(ui_helpers.PENDING_NAVIGATION_STATE_KEY, state)
+
+    def test_dashboard_knowledge_card_shortcut_has_no_widget_state_exception(self):
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                data_dir = Path(tmp)
+                with (
+                    patch.object(db, "DATA_DIR", data_dir),
+                    patch.object(db, "DATABASE_PATH", data_dir / "study_manager.db"),
+                ):
+                    db._INITIALIZED_DATABASE_PATH = None
+                    page = AppTest.from_file(
+                        PROJECT_ROOT / "app.py",
+                        default_timeout=20,
+                    ).run()
+
+                    self.assertEqual(len(page.exception), 0)
+
+                    next(
+                        button
+                        for button in page.button
+                        if button.label == "整理知识卡片"
+                    ).click()
+                    page.run()
+
+                    self.assertEqual(
+                        len(page.exception),
+                        0,
+                        [str(item.value) for item in page.exception],
+                    )
+                    self.assertEqual(
+                        page.session_state[app.SELECTED_SECTION_STATE_KEY],
+                        "knowledge",
+                    )
+                    self.assertEqual(
+                        page.session_state[app.SELECTED_PAGE_STATE_KEY],
+                        "knowledge_cards",
+                    )
+        finally:
+            db._INITIALIZED_DATABASE_PATH = None
+
+    def test_course_center_page_renders_without_streamlit_exception(self):
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                data_dir = Path(tmp)
+                with (
+                    patch.object(db, "DATA_DIR", data_dir),
+                    patch.object(db, "DATABASE_PATH", data_dir / "study_manager.db"),
+                ):
+                    db._INITIALIZED_DATABASE_PATH = None
+                    page = AppTest.from_file(
+                        PROJECT_ROOT / "app.py",
+                        default_timeout=20,
+                    ).run()
+
+                    page.sidebar.radio[1].set_value("course_center")
+                    page.run()
+
+                    self.assertEqual(
+                        len(page.exception),
+                        0,
+                        [str(item.value) for item in page.exception],
+                    )
+                    self.assertIn("课程中心", [item.value for item in page.title])
+        finally:
+            db._INITIALIZED_DATABASE_PATH = None
 
 
 if __name__ == "__main__":

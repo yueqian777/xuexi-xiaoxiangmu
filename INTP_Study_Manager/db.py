@@ -494,8 +494,23 @@ def _run_init_db() -> None:
         _ensure_column(conn, "app_settings", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "daily_review_logs", "user_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "daily_ai_review_plans", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        _migrate_course_schema(conn)
         conn.executescript(
             """
+            CREATE INDEX IF NOT EXISTS idx_courses_user_status_updated
+                ON courses(user_id, status, updated_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_courses_user_name
+                ON courses(user_id, name, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_course_learning_phases_user_course
+                ON course_learning_phases(user_id, course_id, phase_number ASC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_course_summaries_user_course_updated
+                ON course_summaries(user_id, course_id, updated_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_study_sessions_user_course_date
+                ON study_sessions(user_id, course_id, date DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_cards_user_course_mastery
+                ON knowledge_cards(user_id, course_id, mastery ASC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_ppt_decks_user_course_created
+                ON ppt_decks(user_id, course_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_study_sessions_user_date_id
                 ON study_sessions(user_id, date DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_study_sessions_user_subject_date_id
@@ -653,6 +668,295 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
     columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_course_schema(conn: sqlite3.Connection) -> None:
+    """Create and gently extend the course lifecycle schema.
+
+    Existing subject-based rows are associated with a course only when their
+    ``course_id`` is empty.  In particular, this migration never reuses or
+    changes ``ppt_decks.status`` because that column describes deck management,
+    not the course lifecycle.
+    """
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS courses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 0,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK(status IN ('active', 'completed', 'archived')),
+            completed_at TEXT,
+            archived_at TEXT,
+            course_summary TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS course_learning_phases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 0,
+            course_id INTEGER NOT NULL,
+            phase_number INTEGER NOT NULL DEFAULT 1,
+            started_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            ended_at TEXT,
+            outcome TEXT NOT NULL DEFAULT '',
+            course_summary TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS course_summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 0,
+            course_id INTEGER NOT NULL,
+            deck_count INTEGER NOT NULL DEFAULT 0,
+            slide_count INTEGER NOT NULL DEFAULT 0,
+            question_count INTEGER NOT NULL DEFAULT 0,
+            knowledge_count INTEGER NOT NULL DEFAULT 0,
+            review_count INTEGER NOT NULL DEFAULT 0,
+            completed_review_count INTEGER NOT NULL DEFAULT 0,
+            pending_review_count INTEGER NOT NULL DEFAULT 0,
+            weak_points_json TEXT NOT NULL DEFAULT '[]',
+            core_knowledge_json TEXT NOT NULL DEFAULT '[]',
+            future_review_advice TEXT NOT NULL DEFAULT '',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+    course_columns = _table_columns(conn, "courses")
+    _ensure_column(conn, "courses", "user_id", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "courses", "name", "TEXT DEFAULT ''")
+    _ensure_column(conn, "courses", "status", "TEXT DEFAULT 'active'")
+    _ensure_column(conn, "courses", "completed_at", "TEXT")
+    _ensure_column(conn, "courses", "archived_at", "TEXT")
+    _ensure_column(conn, "courses", "course_summary", "TEXT DEFAULT ''")
+    _ensure_column(conn, "courses", "created_at", "TEXT DEFAULT ''")
+    _ensure_column(conn, "courses", "updated_at", "TEXT DEFAULT ''")
+    conn.execute("UPDATE courses SET user_id = 0 WHERE user_id IS NULL")
+
+    for legacy_name_column in ("subject", "course_name", "title"):
+        if legacy_name_column in course_columns:
+            conn.execute(
+                f"""
+                UPDATE courses
+                SET name = TRIM(COALESCE({legacy_name_column}, ''))
+                WHERE TRIM(COALESCE(name, '')) = ''
+                  AND TRIM(COALESCE({legacy_name_column}, '')) != ''
+                """
+            )
+            break
+    conn.execute(
+        """
+        UPDATE courses
+        SET name = '未命名课程 ' || id
+        WHERE TRIM(COALESCE(name, '')) = ''
+        """
+    )
+    conn.execute(
+        """
+        UPDATE courses
+        SET status = CASE TRIM(COALESCE(status, ''))
+            WHEN 'completed' THEN 'completed'
+            WHEN 'archived' THEN 'archived'
+            WHEN '已完成' THEN 'completed'
+            WHEN '已归档' THEN 'archived'
+            ELSE 'active'
+        END
+        """
+    )
+    conn.execute(
+        """
+        UPDATE courses
+        SET created_at = datetime('now', 'localtime')
+        WHERE TRIM(COALESCE(created_at, '')) = ''
+        """
+    )
+    conn.execute(
+        """
+        UPDATE courses
+        SET updated_at = COALESCE(NULLIF(created_at, ''), datetime('now', 'localtime'))
+        WHERE TRIM(COALESCE(updated_at, '')) = ''
+        """
+    )
+
+    _ensure_column(conn, "course_learning_phases", "user_id", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "course_learning_phases", "course_id", "INTEGER")
+    _ensure_column(conn, "course_learning_phases", "phase_number", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "course_learning_phases", "started_at", "TEXT DEFAULT ''")
+    _ensure_column(conn, "course_learning_phases", "ended_at", "TEXT")
+    _ensure_column(conn, "course_learning_phases", "outcome", "TEXT DEFAULT ''")
+    _ensure_column(conn, "course_learning_phases", "course_summary", "TEXT DEFAULT ''")
+    _ensure_column(conn, "course_learning_phases", "created_at", "TEXT DEFAULT ''")
+
+    summary_columns = _table_columns(conn, "course_summaries")
+    _ensure_column(conn, "course_summaries", "user_id", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "course_summaries", "course_id", "INTEGER")
+    _ensure_column(conn, "course_summaries", "deck_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "course_summaries", "slide_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "course_summaries", "question_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "course_summaries", "knowledge_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "course_summaries", "review_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(
+        conn,
+        "course_summaries",
+        "completed_review_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "course_summaries",
+        "pending_review_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(conn, "course_summaries", "weak_points_json", "TEXT DEFAULT '[]'")
+    _ensure_column(conn, "course_summaries", "core_knowledge_json", "TEXT DEFAULT '[]'")
+    _ensure_column(conn, "course_summaries", "future_review_advice", "TEXT DEFAULT ''")
+    _ensure_column(conn, "course_summaries", "summary_json", "TEXT DEFAULT '{}'")
+    _ensure_column(conn, "course_summaries", "created_at", "TEXT DEFAULT ''")
+    _ensure_column(conn, "course_summaries", "updated_at", "TEXT DEFAULT ''")
+
+    legacy_summary_columns = {
+        "review_total": "review_count",
+        "review_completed": "completed_review_count",
+        "review_pending": "pending_review_count",
+        "future_review_suggestion": "future_review_advice",
+        "weak_knowledge_json": "weak_points_json",
+    }
+    for old_column, new_column in legacy_summary_columns.items():
+        if old_column not in summary_columns:
+            continue
+        conn.execute(
+            f"""
+            UPDATE course_summaries
+            SET {new_column} = {old_column}
+            WHERE ({new_column} IS NULL OR {new_column} IN ('', 0, '[]', '{{}}'))
+              AND {old_column} IS NOT NULL
+            """
+        )
+
+    _ensure_column(conn, "ppt_decks", "course_id", "INTEGER")
+    _ensure_column(conn, "study_sessions", "course_id", "INTEGER")
+    _ensure_column(conn, "knowledge_cards", "course_id", "INTEGER")
+
+    _backfill_subject_courses(conn)
+    _backfill_course_child_user_scope(conn)
+    _ensure_initial_course_phases(conn)
+
+
+def _backfill_subject_courses(conn: sqlite3.Connection) -> None:
+    subjects = conn.execute(
+        """
+        SELECT DISTINCT user_id, name
+        FROM (
+            SELECT user_id, TRIM(COALESCE(subject, '')) AS name FROM ppt_decks
+            UNION ALL
+            SELECT user_id, TRIM(COALESCE(subject, '')) AS name FROM study_sessions
+            UNION ALL
+            SELECT user_id, TRIM(COALESCE(subject, '')) AS name FROM knowledge_cards
+        )
+        WHERE name != ''
+        ORDER BY user_id ASC, name ASC
+        """
+    ).fetchall()
+    for row in subjects:
+        user_id = int(row["user_id"] or 0)
+        name = str(row["name"] or "").strip()
+        course = conn.execute(
+            """
+            SELECT id
+            FROM courses
+            WHERE user_id = ? AND TRIM(name) = ?
+            ORDER BY CASE status
+                         WHEN 'active' THEN 0
+                         WHEN 'completed' THEN 1
+                         ELSE 2
+                     END,
+                     id ASC
+            LIMIT 1
+            """,
+            (user_id, name),
+        ).fetchone()
+        if course:
+            course_id = int(course["id"])
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO courses (user_id, name, status)
+                VALUES (?, ?, 'active')
+                """,
+                (user_id, name),
+            )
+            course_id = int(cursor.lastrowid)
+        for table in ("ppt_decks", "study_sessions", "knowledge_cards"):
+            conn.execute(
+                f"""
+                UPDATE {table}
+                SET course_id = ?
+                WHERE user_id = ?
+                  AND TRIM(COALESCE(subject, '')) = ?
+                  AND (course_id IS NULL OR course_id <= 0)
+                """,
+                (course_id, user_id, name),
+            )
+
+
+def _backfill_course_child_user_scope(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE course_learning_phases
+        SET user_id = COALESCE(
+            (SELECT c.user_id FROM courses c WHERE c.id = course_learning_phases.course_id),
+            user_id,
+            0
+        )
+        WHERE COALESCE(user_id, 0) = 0
+        """
+    )
+    conn.execute(
+        """
+        UPDATE course_summaries
+        SET user_id = COALESCE(
+            (SELECT c.user_id FROM courses c WHERE c.id = course_summaries.course_id),
+            user_id,
+            0
+        )
+        WHERE COALESCE(user_id, 0) = 0
+        """
+    )
+
+
+def _ensure_initial_course_phases(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        INSERT INTO course_learning_phases (
+            user_id, course_id, phase_number, started_at, ended_at, outcome, created_at
+        )
+        SELECT
+            c.user_id,
+            c.id,
+            1,
+            COALESCE(NULLIF(c.created_at, ''), datetime('now', 'localtime')),
+            CASE
+                WHEN c.status = 'active' THEN NULL
+                WHEN c.status = 'archived' THEN COALESCE(c.archived_at, c.completed_at, datetime('now', 'localtime'))
+                ELSE COALESCE(c.completed_at, c.archived_at, datetime('now', 'localtime'))
+            END,
+            CASE WHEN c.status = 'active' THEN '' ELSE c.status END,
+            COALESCE(NULLIF(c.created_at, ''), datetime('now', 'localtime'))
+        FROM courses c
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM course_learning_phases p
+            WHERE p.user_id = c.user_id AND p.course_id = c.id
+        )
+        """
+    )
 
 
 def _migrate_ppt_sections_user_scope(conn: sqlite3.Connection) -> None:

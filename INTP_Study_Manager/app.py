@@ -11,6 +11,7 @@ from pages import (
     api_settings,
     chatgpt_mcp,
     chatgpt_web_explanation,
+    course_center,
     dashboard,
     knowledge_cards,
     mainline_branches,
@@ -28,6 +29,7 @@ from pages import (
 )
 from services.ai_service import ensure_default_api_providers
 from services.auth_service import require_login
+from services.ui_helpers import pop_navigation_target
 
 APP_ROOT = Path(__file__).resolve().parent
 ENTER_SUBMIT_SHORTCUT_SCRIPT = (
@@ -59,7 +61,8 @@ NAV_SECTIONS = (
 )
 
 NAV_ENTRIES = (
-    NavEntry("dashboard", "今日工作台", "today", dashboard.render, "今日复习、继续学习和卡点概览。"),
+    NavEntry("dashboard", "学习驾驶舱", "today", dashboard.render, "当前课程、今日任务和继续学习入口。"),
+    NavEntry("course_center", "课程中心", "today", course_center.render, "管理正在学习、已完成和已归档课程。"),
     NavEntry("ppt_tutor", "PPT 学习工作台", "materials", ppt_tutor.render, "阅读、逐页讲解、插问和学习沉淀。"),
     NavEntry(
         "chatgpt_web_explanation",
@@ -93,6 +96,7 @@ NAV_ENTRIES = (
 PAGES = {entry.id: entry.render for entry in NAV_ENTRIES}
 LEGACY_PAGE_IDS = {
     "首页 Dashboard": "dashboard",
+    "课程中心": "course_center",
     "PPT 逐页讲解": "ppt_tutor",
     "PPT 与插问管理": "ppt_management",
     "每日复盘提醒": "reminders",
@@ -160,8 +164,25 @@ def _mark_active_page(page_id_or_label: str, state: dict | None = None) -> bool:
     return just_entered
 
 
+def _apply_pending_navigation_target(state: dict | None = None) -> bool:
+    state = st.session_state if state is None else state
+    target = pop_navigation_target(state)
+    if target is None:
+        return False
+
+    section_id, page_id = target
+    if page_id not in PAGES or _entry_by_id(page_id).section_id != section_id:
+        return False
+
+    state[SELECTED_SECTION_STATE_KEY] = section_id
+    state[SELECTED_PAGE_STATE_KEY] = page_id
+    state[PAGE_SECTION_SYNC_STATE_KEY] = section_id
+    return True
+
+
 def _render_sidebar_navigation() -> NavEntry:
     state = st.session_state
+    _apply_pending_navigation_target(state)
     current_entry = _entry_by_id(
         state.get(SELECTED_PAGE_STATE_KEY) or state.get(ACTIVE_PAGE_STATE_KEY)
     )
