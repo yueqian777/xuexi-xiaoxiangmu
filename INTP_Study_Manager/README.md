@@ -22,6 +22,39 @@ streamlit run app.py
 data/study_manager.db
 ```
 
+## ChatGPT Web 插件（Study MCP）配置入口
+
+本项目内置一个本地、按用户隔离的 Study MCP Server，可把当前学习上下文、PPT/PDF 页面、插问树、知识卡片和复习任务以 14 个受控 Tool 提供给 ChatGPT。网页版 ChatGPT 通过 OpenAI Secure MCP Tunnel 调用它；本地服务仍使用 `stdio`，不会把 SQLite 或 Streamlit 直接暴露到公网。
+
+这里的“插件”指 ChatGPT Developer Mode 中创建的私有 MCP App。Secure MCP Tunnel 适合本地开发和私有连接，不等于公开插件商店发布。Tunnel、ChatGPT App、组织/工作区关联及 runtime key 都属于每个操作者自己的 OpenAI 环境，**不会也不应写入本仓库**。
+
+完整、可由 Agent 执行的配置手册见：
+
+- [ChatGPT Web + Secure MCP Tunnel 插件建立 Runbook](docs/chatgpt_mcp_connection.md)
+- [Study MCP 架构、14 个 Tool、权限与审计](docs/study_manager_mcp.md)
+
+最短流程如下：
+
+1. 安装 `requirements.txt`，启动 Streamlit，在“系统维护 → ChatGPT / MCP”中确认当前用户 ID，并复制本机 stdio 配置；不要猜 `user_id`。
+2. 在项目目录运行 `python -m study_mcp.server --help` 和 MCP 定向测试，确认本地 server 可启动。
+3. 在 OpenAI Platform 的目标组织中创建或复用 Tunnel，并关联需要使用它的 ChatGPT workspace。运行者需要 `Tunnels Read + Use`；创建或修改 Tunnel 还需要 `Tunnels Read + Manage`。
+4. 从 OpenAI Platform Tunnel 页面或官方最新 release 下载 `tunnel-client`。使用独立 profile，把命令绑定为 `python -m study_mcp.server --transport stdio --user-id <CURRENT_USER_ID>`。
+5. runtime API key 只由操作者在本机安全输入，Agent 只能检查“是否已设置”，不得打印、记录或提交它。不要把 admin key 交给长期运行的 tunnel client。
+6. 依次运行 `tunnel-client doctor --profile intp-study-manager --explain --json` 与 `tunnel-client run --profile intp-study-manager`，确认 `/healthz` 为 `live`、`/readyz` 为 `ready`。
+7. 在 ChatGPT 中启用 Developer Mode，创建 App，Connection 选择 `Tunnel`，再选择或填写对应 Tunnel。客户端必须在 App 创建和每次 Tool 调用期间保持运行。
+8. 先实际调用只读 Tool `study_get_current_context`，再同时检查 Tunnel 日志中的 `tools/call` 和 Study Manager 的 MCP audit。仅看到 `tools/list` 或 Tool 菜单不算端到端成功。
+
+给 Agent 的建议任务文本：
+
+```text
+先完整阅读 AGENTS.md、README.md、docs/study_manager_mcp.md 和
+docs/chatgpt_mcp_connection.md。检查现有 profile 和进程，禁止覆盖或停止其他 Tunnel。
+按 Runbook 完成本地依赖、user_id、stdio、doctor、run、health、ChatGPT App 和实际
+tools/call 验证。不得输出或提交任何 API key、token、真实 tunnel_id/app_id、个人配置
+或数据库。涉及组织/工作区关联、权限授予、runtime key 输入、创建外部 App 或写入 Tool
+时，如果没有本次任务的明确授权，必须停下并请求操作者确认。
+```
+
 ## 使用流程
 
 1. 打开首页 Dashboard，先查看今天需要复习什么。

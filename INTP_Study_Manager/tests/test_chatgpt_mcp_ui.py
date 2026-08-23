@@ -83,17 +83,46 @@ class ChatGptMcpUiTest(unittest.TestCase):
         self.assertNotIn("已连接到网页版 ChatGPT", source)
 
     def test_mcp_docs_keep_local_server_and_web_connection_separate(self):
+        readme = _source("README.md")
         architecture = _source("docs/study_manager_mcp.md")
         connection = _source("docs/chatgpt_mcp_connection.md")
 
+        self.assertIn("ChatGPT Web 插件（Study MCP）配置入口", readme)
+        self.assertIn("docs/chatgpt_mcp_connection.md", readme)
+        self.assertIn("tools/call", readme)
         self.assertIn("python -m study_mcp.server --transport stdio --user-id", architecture)
         self.assertIn("JSON Bridge", architecture)
         self.assertIn("14", architecture)
         self.assertIn("本地 MCP Server", connection)
         self.assertIn("不等于", connection)
         self.assertIn("Secure MCP Tunnel", connection)
-        self.assertIn("独立连接层", connection)
-        self.assertIn("不实现公网 HTTP", connection)
+        self.assertIn("Tunnels Read + Use", connection)
+        self.assertIn("tunnel-client init", connection)
+        self.assertIn("tunnel-client doctor", connection)
+        self.assertIn("tunnel-client run", connection)
+        self.assertIn("scripts/run_study_mcp.py", connection)
+        self.assertIn("--require-control-plane-poll", connection)
+        self.assertIn("runtimes status intp-study-manager --json", connection)
+        self.assertIn("macOS / Linux", connection)
+        self.assertIn("CONTROL_PLANE_API_KEY", connection)
+        self.assertIn("rpc_method=tools/call", connection)
+        self.assertIn("JSON Bridge fallback", connection)
+        self.assertIn("不得在报告中包含 API key", connection)
+        self.assertNotRegex(connection, r"tunnel_[0-9a-f]{32}")
+        self.assertNotRegex(connection, r"asdk_app_[0-9a-f]{32}")
+
+    def test_release_ignores_local_tunnel_and_secret_artifacts(self):
+        ignore = _source(".gitignore")
+
+        for pattern in [
+            ".streamlit/secrets.toml",
+            "control-plane.env",
+            "tunnel-client*.yaml",
+            "secure-mcp-tunnel*.yaml",
+            "*.db",
+            "*.zip",
+        ]:
+            self.assertIn(pattern, ignore)
 
     def test_streamlit_page_smoke_and_permission_save_flow(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

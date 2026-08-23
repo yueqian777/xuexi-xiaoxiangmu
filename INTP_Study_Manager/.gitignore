@@ -4,10 +4,34 @@ data/
 # Local secrets and API key stores
 data/api_keys.enc.json
 *.enc.json
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+api_keys.json
+control-plane.env
+*.pem
+*.key
+
+# Secure MCP Tunnel local profiles and runtime state
+.tunnel/
+tunnel-client*.yaml
+tunnel-client*.yml
+tunnel-client*.json
+secure-mcp-tunnel*.yaml
+secure-mcp-tunnel*.yml
 
 # Runtime logs
 streamlit_stdout.log
 streamlit_stderr.log
+*.log
+
+# Local databases and generated archives
+*.db
+*.sqlite
+*.sqlite3
+*.zip
 
 # Python generated files
 __pycache__/
