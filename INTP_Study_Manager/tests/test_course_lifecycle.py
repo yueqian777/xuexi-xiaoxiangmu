@@ -451,8 +451,26 @@ class CourseLifecycleTest(unittest.TestCase):
             "Z 变换",
             slide_count=1,
         )
-        self._seed_question(first_slides[0], "卷积为什么表示系统响应？")
-        self._seed_question(second_slides[0], "ROC 为什么决定稳定性？")
+        understood_question_id = self._seed_question(
+            first_slides[0],
+            "卷积为什么表示系统响应？",
+        )
+        converted_question_id = self._seed_question(
+            second_slides[0],
+            "ROC 为什么决定稳定性？",
+        )
+        db.execute(
+            "UPDATE slide_questions SET understood = 1 WHERE id = ? AND user_id = ?",
+            (understood_question_id, self.user_id),
+        )
+        db.execute(
+            """
+            UPDATE slide_questions
+            SET converted_to_knowledge = 1
+            WHERE id = ? AND user_id = ?
+            """,
+            (converted_question_id, self.user_id),
+        )
         weak_knowledge_id = self._seed_knowledge(
             course["id"],
             "极零图与频响关系",
@@ -497,6 +515,7 @@ class CourseLifecycleTest(unittest.TestCase):
         self.assertEqual(summary["deck_count"], 2)
         self.assertEqual(summary["slide_count"], 3)
         self.assertEqual(summary["question_count"], 2)
+        self.assertEqual(summary["resolved_question_count"], 1)
         self.assertEqual(summary["knowledge_count"], 2)
         self.assertEqual(summary["review_count"], 3)
         self.assertEqual(summary["completed_review_count"], 1)
@@ -529,6 +548,58 @@ class CourseLifecycleTest(unittest.TestCase):
             archived["id"],
             {item["id"] for item in snapshot["active_courses"]},
         )
+
+    def test_course_detail_metrics_stay_live_after_a_new_learning_cycle(self):
+        course = self._create_course("数字信号处理")
+        _, slides = self._seed_deck(course["id"], "第一轮资料", slide_count=1)
+        self._seed_question(slides[0], "第一轮问题")
+        self._seed_knowledge(course["id"], "第一轮知识", mastery=60)
+        course_service.complete_course(self.user_id, course["id"])
+
+        frozen = course_service.get_course_summary(self.user_id, course["id"])
+        self.assertEqual(frozen["question_count"], 1)
+        self.assertEqual(frozen["knowledge_count"], 1)
+
+        course_service.reactivate_course(self.user_id, course["id"])
+        self._seed_question(slides[0], "第二轮问题")
+        self._seed_knowledge(course["id"], "第二轮知识", mastery=80)
+        detail = course_service.get_course_detail(self.user_id, course["id"])
+
+        self.assertEqual(detail["summary"]["question_count"], 1)
+        self.assertEqual(detail["summary"]["knowledge_count"], 1)
+        self.assertEqual(detail["metrics"]["question_count"], 2)
+        self.assertEqual(detail["metrics"]["knowledge_count"], 2)
+
+    def test_archiving_completed_course_does_not_overwrite_frozen_report(self):
+        course = self._create_course("冻结报告课程")
+        knowledge_id = self._seed_knowledge(
+            course["id"],
+            "完成时薄弱点",
+            mastery=45,
+        )
+        course_service.complete_course(self.user_id, course["id"])
+        frozen_summary = course_service.get_course_summary(self.user_id, course["id"])
+        frozen_phase = course_service.get_course_detail(
+            self.user_id,
+            course["id"],
+        )["learning_phases"][0]["course_summary"]
+
+        db.execute(
+            "UPDATE knowledge_cards SET mastery = 95 WHERE id = ? AND user_id = ?",
+            (knowledge_id, self.user_id),
+        )
+        course_service.archive_course(self.user_id, course["id"])
+
+        self.assertEqual(
+            course_service.get_course_summary(self.user_id, course["id"]),
+            frozen_summary,
+        )
+        archived_phase = course_service.get_course_detail(
+            self.user_id,
+            course["id"],
+        )["learning_phases"][0]
+        self.assertEqual(archived_phase["course_summary"], frozen_phase)
+        self.assertEqual(archived_phase["outcome"], "completed")
 
     def test_dashboard_snapshot_uses_none_when_there_is_no_active_course(self):
         completed = self._create_course("只有历史课程")

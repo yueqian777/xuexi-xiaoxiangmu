@@ -131,6 +131,14 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "wrapMarkdownSelection",
             "renderChatQuestion",
             "renderChatTurn",
+            "currentQuestionsForPage",
+            "renderCurrentQuestions",
+            "renderKnowledgeCards",
+            "renderReviewRecord",
+            "renderReviewPanel",
+            "normalizeLearningTab",
+            "learningTabForKey",
+            "setLearningTab",
             "scrollChatQuestionToTop",
             "isNearChatBottom",
             "setChatBottomButtonVisible",
@@ -140,6 +148,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "clipText",
             "nodeElement",
             "rectFromRange",
+            "storageKey",
             "globalStorageKey",
             "loadLayoutState",
             "applyReaderWidthClass",
@@ -730,7 +739,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
         self.run_js(
             r"""
             var childChatLayers = [];
-            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var layoutState = { pages: 1.45, sidebar: 0.95 };
             var chatCollapsed = false;
             const classes = new Set();
             var document = {
@@ -957,7 +966,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
         self.run_js(
             r"""
             var childChatLayers = [];
-            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var layoutState = { pages: 1.45, sidebar: 0.95 };
             var chatCollapsed = false;
             var readerGrid = {
               style: { gridTemplateColumns: '' },
@@ -988,12 +997,49 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             """
         )
 
-    def test_canvas_chat_defaults_to_collapsed_without_saved_layout_choice(self):
+    def test_learning_sidebar_defaults_to_expanded_without_saved_v3_choice(self):
         self.run_js(
             r"""
             var childChatLayers = [];
-            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var layoutState = { pages: 1.45, sidebar: 0.95 };
+            var chatCollapsed = true;
+            var activeLearningTab = 'review';
+            var learningTabButtons = [];
+            var learningTabPanels = [];
+            var deckId = 4;
+            var readerGrid = {
+              style: { gridTemplateColumns: '' },
+              getBoundingClientRect: () => ({ width: 1200 }),
+            };
+            var canvasCollapsed = null;
+            var canvasChat = { classList: { toggle(name, value) { canvasCollapsed = value; } } };
+            var toggleCanvasButton = { textContent: '' };
+            var childChatStack = { style: { setProperty() {} } };
+            var localStorage = {
+              getItem() { return null; },
+            };
+
+            loadLayoutState();
+            if (chatCollapsed !== false || canvasCollapsed !== false) {
+              throw new Error(JSON.stringify({ chatCollapsed, canvasCollapsed }));
+            }
+            if (toggleCanvasButton.textContent !== '收起') {
+              throw new Error(toggleCanvasButton.textContent);
+            }
+            if (activeLearningTab !== 'understanding') throw new Error(activeLearningTab);
+            """
+        )
+
+    def test_learning_sidebar_restores_saved_collapse_and_tab_choice(self):
+        self.run_js(
+            r"""
+            var childChatLayers = [];
+            var layoutState = { pages: 1.45, sidebar: 0.95 };
             var chatCollapsed = false;
+            var activeLearningTab = 'understanding';
+            var learningTabButtons = [];
+            var learningTabPanels = [];
+            var deckId = 4;
             var readerGrid = {
               style: { gridTemplateColumns: '' },
               getBoundingClientRect: () => ({ width: 1200 }),
@@ -1004,7 +1050,10 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             var childChatStack = { style: { setProperty() {} } };
             var localStorage = {
               getItem(key) {
-                return String(key).includes('chatCollapsed') ? null : '{}';
+                if (String(key).includes('layoutV3')) return '{"pages":1.6,"sidebar":0.8}';
+                if (String(key).includes('sidebarCollapsedV3')) return 'true';
+                if (String(key).includes('learningTabV3')) return 'review';
+                return null;
               },
             };
 
@@ -1015,36 +1064,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             if (toggleCanvasButton.textContent !== '展开') {
               throw new Error(toggleCanvasButton.textContent);
             }
-            """
-        )
-
-    def test_canvas_chat_saved_expanded_choice_overrides_collapsed_default(self):
-        self.run_js(
-            r"""
-            var childChatLayers = [];
-            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
-            var chatCollapsed = true;
-            var readerGrid = {
-              style: { gridTemplateColumns: '' },
-              getBoundingClientRect: () => ({ width: 1200 }),
-            };
-            var canvasCollapsed = null;
-            var canvasChat = { classList: { toggle(name, value) { canvasCollapsed = value; } } };
-            var toggleCanvasButton = { textContent: '' };
-            var childChatStack = { style: { setProperty() {} } };
-            var localStorage = {
-              getItem(key) {
-                return String(key).includes('chatCollapsed') ? 'false' : '{}';
-              },
-            };
-
-            loadLayoutState();
-            if (chatCollapsed !== false || canvasCollapsed !== false) {
-              throw new Error(JSON.stringify({ chatCollapsed, canvasCollapsed }));
-            }
-            if (toggleCanvasButton.textContent !== '收起') {
-              throw new Error(toggleCanvasButton.textContent);
-            }
+            if (activeLearningTab !== 'review') throw new Error(activeLearningTab);
             """
         )
 
@@ -1052,7 +1072,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
         self.run_js(
             r"""
             var childChatLayers = [{}, {}, {}, {}, {}];
-            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var layoutState = { pages: 1.45, sidebar: 0.95 };
             var chatCollapsed = false;
             var readerGrid = {
               style: { gridTemplateColumns: '' },
@@ -1302,7 +1322,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
         self.run_js(
             r"""
             const restored = [];
-            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var layoutState = { pages: 1.45, sidebar: 0.95 };
             var chatCollapsed = false;
             var childChatLayers = [];
             var readerGrid = {
@@ -1314,7 +1334,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             var childChatStack = { style: { setProperty() {} } };
             var activeResize = {
               handle: { classList: { remove() {} } },
-              kind: 'pages-notes',
+              kind: 'pages-sidebar',
               startX: 200,
               start: { ...layoutState },
               anchors: { marker: 'before-resize' },
@@ -1343,7 +1363,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             const restored = [];
             let captureCount = 0;
             var childChatLayers = [];
-            var layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
+            var layoutState = { pages: 1.45, sidebar: 0.95 };
             var chatCollapsed = true;
             var suppressObserverUntil = 0;
             var VIEWPORT_ANCHOR_MS = 1400;
@@ -1762,6 +1782,201 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             }
             """
         )
+
+    def test_reader_uses_one_accessible_learning_sidebar_with_three_tabs(self):
+        source = READER_HTML.read_text(encoding="utf-8")
+
+        self.assertIn('class="canvas-chat-title">学习侧栏', source)
+        self.assertIn('role="tablist"', source)
+        tab_positions = [
+            source.index(f'data-learning-tab="{tab}"')
+            for tab in ("understanding", "deposition", "review")
+        ]
+        self.assertEqual(tab_positions, sorted(tab_positions))
+        for label in ["理解", "沉淀", "复习"]:
+            self.assertRegex(source, rf'role="tab"[^>]*>\s*{label}\s*</button>')
+        for panel in ("understanding", "deposition", "review"):
+            self.assertIn(f'data-learning-panel="{panel}"', source)
+        self.assertIn('data-resize-handle="pages-sidebar"', source)
+        self.assertNotIn('data-resize-handle="notes-chat"', source)
+
+    def test_learning_sidebar_panels_match_v3_information_architecture(self):
+        source = READER_HTML.read_text(encoding="utf-8")
+
+        for label in ["AI讲解", "当前问题", "插问", "知识卡", "掌握度", "复习计划"]:
+            self.assertIn(label, source)
+        self.assertRegex(
+            source,
+            r'data-learning-panel="understanding"[\s\S]*?AI讲解[\s\S]*?当前问题',
+        )
+        self.assertRegex(
+            source,
+            r'data-learning-panel="deposition"[\s\S]*?插问[\s\S]*?知识卡',
+        )
+        self.assertRegex(
+            source,
+            r'data-learning-panel="review"[\s\S]*?掌握度[\s\S]*?复习计划',
+        )
+
+    def test_learning_sidebar_defaults_expanded_and_remains_available_on_narrow_layouts(self):
+        source = READER_HTML.read_text(encoding="utf-8")
+
+        self.assertIn("let chatCollapsed = false;", source)
+        self.assertIn("savedSidebarCollapsed === null ? false", source)
+        narrow_block = re.search(r"@media \(max-width: 900px\) \{([\s\S]*?)\n    \}", source)
+        self.assertIsNotNone(narrow_block)
+        self.assertNotRegex(narrow_block.group(1), r"\.canvas-chat\s*\{\s*display:\s*none")
+        self.assertNotRegex(narrow_block.group(1), r"\.notes\s*,[\s\S]*?display:\s*none")
+
+    def test_learning_tab_state_and_keyboard_navigation_are_accessible(self):
+        self.run_js(
+            r"""
+            const madeClasses = () => {
+              const values = new Set();
+              return {
+                toggle(name, enabled) { if (enabled) values.add(name); else values.delete(name); },
+                contains(name) { return values.has(name); },
+              };
+            };
+            const makeTab = name => ({
+              dataset: { learningTab: name },
+              classList: madeClasses(),
+              attrs: {},
+              tabIndex: -1,
+              focusCount: 0,
+              setAttribute(name, value) { this.attrs[name] = String(value); },
+              focus() { this.focusCount += 1; },
+            });
+            const makePanel = name => ({
+              dataset: { learningPanel: name },
+              classList: madeClasses(),
+              hidden: true,
+            });
+            var learningTabButtons = ['understanding', 'deposition', 'review'].map(makeTab);
+            var learningTabPanels = ['understanding', 'deposition', 'review'].map(makePanel);
+            var activeLearningTab = 'understanding';
+            var currentSlideNumber = 4;
+            var deckId = 9;
+            var localStorage = {
+              stored: {},
+              setItem(key, value) { this.stored[key] = value; },
+            };
+            var noteRoot = {};
+            function hydrateNote() { return Promise.resolve(false); }
+            function setActive() {}
+
+            setLearningTab('review', { focus: true, recenter: false });
+            if (activeLearningTab !== 'review') throw new Error(activeLearningTab);
+            if (learningTabButtons[2].attrs['aria-selected'] !== 'true') throw new Error('review tab not selected');
+            if (learningTabButtons[2].tabIndex !== 0 || learningTabButtons[2].focusCount !== 1) throw new Error('focus not moved');
+            if (learningTabPanels[2].hidden || !learningTabPanels[0].hidden) throw new Error('panel visibility mismatch');
+            if (!Object.values(localStorage.stored).includes('review')) throw new Error(JSON.stringify(localStorage.stored));
+
+            if (learningTabForKey('understanding', 'ArrowRight') !== 'deposition') throw new Error('ArrowRight');
+            if (learningTabForKey('understanding', 'ArrowLeft') !== 'review') throw new Error('ArrowLeft wrap');
+            if (learningTabForKey('review', 'Home') !== 'understanding') throw new Error('Home');
+            if (learningTabForKey('understanding', 'End') !== 'review') throw new Error('End');
+            """
+        )
+
+    def test_current_questions_and_review_are_projected_from_existing_page_payload(self):
+        self.run_js(
+            r"""
+            global.window = {};
+            const page = {
+              questions: [
+                { id: 1, question: 'open', learningStatus: '未解决', understood: false, convertedToKnowledge: false },
+                { id: 2, question: 'thinking', learningStatus: '理解中', understood: false, convertedToKnowledge: false },
+                { id: 3, question: 'card', learningStatus: '已转知识卡', understood: false, convertedToKnowledge: true },
+                { id: 4, question: 'done', learningStatus: '已掌握', understood: true, convertedToKnowledge: false },
+              ],
+              knowledgeCards: [
+                { topic: 'ROC', mastery: 40, next_review_date: '2026-09-01' },
+                { topic: '极点', mastery: 80, next_review_date: '2026-09-03' },
+              ],
+              reviewStatus: { pending_count: 2, next_review_date: '2026-09-01' },
+            };
+
+            const current = currentQuestionsForPage(page);
+            if (current.map(item => item.id).join(',') !== '1,2') throw new Error(JSON.stringify(current));
+            const questionsHtml = renderCurrentQuestions(page);
+            if (!questionsHtml.includes('open') || !questionsHtml.includes('thinking') || questionsHtml.includes('done')) {
+              throw new Error(questionsHtml);
+            }
+            const reviewHtml = renderReviewPanel(page);
+            for (const text of ['掌握度', '60%', 'ROC', '40%', '复习计划', '待复习 2 项', '2026-09-01']) {
+              if (!reviewHtml.includes(text)) throw new Error(`${text}: ${reviewHtml}`);
+            }
+            """
+        )
+
+    def test_selection_to_question_moves_into_deposit_tab_without_new_backend_action(self):
+        source = READER_HTML.read_text(encoding="utf-8")
+        send_selection = _extract_function(source, "sendSelectionToBranch")
+
+        self.assertIn("setLearningTab('deposition'", send_selection)
+        self.assertNotIn("learning_tab", send_selection)
+
+    def test_historical_read_only_keeps_sidebar_navigation_and_review_actions(self):
+        self.run_js(
+            r"""
+            global.window = {
+              marked: { parse: value => String(value) },
+              DOMPurify: { sanitize: value => String(value) },
+            };
+            var learningWritable = false;
+            var currentSlideNumber = 2;
+            const turn = renderChatTurn({
+              id: 12,
+              question: '历史插问',
+              answer: '历史回答',
+              understood: false,
+              convertedToKnowledge: false,
+            });
+            if (turn.includes('data-open-child-chat') || turn.includes('convert_question_to_knowledge')) {
+              throw new Error(turn);
+            }
+            if (!turn.includes('mark_question_understood')) {
+              throw new Error('historical review action disappeared');
+            }
+
+            const madeClasses = () => ({ toggle() {} });
+            var learningTabButtons = ['understanding', 'deposition', 'review'].map(name => ({
+              dataset: { learningTab: name },
+              classList: madeClasses(),
+              setAttribute() {},
+              tabIndex: -1,
+            }));
+            var learningTabPanels = ['understanding', 'deposition', 'review'].map(name => ({
+              dataset: { learningPanel: name },
+              classList: madeClasses(),
+              hidden: true,
+            }));
+            var activeLearningTab = 'understanding';
+            var deckId = 0;
+            setLearningTab('review', { persist: false, recenter: false });
+            if (activeLearningTab !== 'review' || learningTabPanels[2].hidden) {
+              throw new Error('read-only mode blocked review tab');
+            }
+            """
+        )
+
+    def test_historical_read_only_blocks_explanation_answer_and_thread_edits(self):
+        source = READER_HTML.read_text(encoding="utf-8")
+
+        for function_name in [
+            "startEditExplanation",
+            "saveEditedExplanation",
+            "sendExplanationSave",
+            "highlightCurrentSelection",
+            "sendQuestionThreadMerge",
+        ]:
+            function_source = _extract_function(source, function_name)
+            self.assertIn("!learningWritable", function_source, function_name)
+
+        self.assertIn("classList.toggle('learning-readonly', !learningWritable)", source)
+        self.assertIn("body.learning-readonly [data-edit-page]", source)
+        self.assertIn('data-edit-page="${page.slideNumber}"', source)
 
     def test_pending_bookmark_override_prevents_immediate_server_echo_revert(self):
         self.run_js(

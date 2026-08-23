@@ -1324,11 +1324,13 @@ class SyncedReaderFastNavigationTest(unittest.TestCase):
         )
         self.assertIn(".sort((a, b) => (a.centerDistance - b.centerDistance) || (b.entry.intersectionRatio - a.entry.intersectionRatio))", self.source)
 
-    def test_resize_handles_have_wide_hit_area_and_hover_cursor(self):
+    def test_two_area_resize_handle_has_wide_hit_area_and_hover_cursor(self):
         self.assertIn(
-            "grid-template-columns: minmax(260px, 1.15fr) var(--resize-handle-width)",
+            "grid-template-columns: minmax(300px, 1.45fr) var(--resize-handle-width)",
             self.source,
         )
+        self.assertIn('data-resize-handle="pages-sidebar"', self.source)
+        self.assertNotIn('data-resize-handle="notes-chat"', self.source)
         self.assertIn("--resize-handle-width: 14px;", self.source)
         self.assertIn(".resize-handle {", self.source)
         self.assertIn("cursor: col-resize;", self.source)

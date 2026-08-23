@@ -87,15 +87,15 @@ def complete_course(user_id: int, course_id: int) -> dict[str, Any] | None:
             return None
         if course["status"] == "archived":
             raise ValueError("归档课程必须先重新激活，才能完成新的学习阶段。")
-        phase_id = None
-        if course["status"] != "completed":
-            course_repository.set_course_status(conn, owner_id, owned_course_id, "completed")
-            phase_id = course_repository.close_open_learning_phase(
-                conn,
-                owner_id,
-                owned_course_id,
-                "completed",
-            )
+        if course["status"] == "completed":
+            return course
+        course_repository.set_course_status(conn, owner_id, owned_course_id, "completed")
+        phase_id = course_repository.close_open_learning_phase(
+            conn,
+            owner_id,
+            owned_course_id,
+            "completed",
+        )
         completed = course_repository.fetch_course(conn, owner_id, owned_course_id)
         if completed is None:  # pragma: no cover - guarded by the owned read above
             return None
@@ -118,15 +118,18 @@ def archive_course(user_id: int, course_id: int) -> dict[str, Any] | None:
         course = course_repository.fetch_course(conn, owner_id, owned_course_id)
         if course is None:
             return None
-        phase_id = None
-        if course["status"] != "archived":
-            course_repository.set_course_status(conn, owner_id, owned_course_id, "archived")
-            phase_id = course_repository.close_open_learning_phase(
-                conn,
-                owner_id,
-                owned_course_id,
-                "archived",
-            )
+        if course["status"] == "archived":
+            return course
+        previous_status = str(course["status"])
+        course_repository.set_course_status(conn, owner_id, owned_course_id, "archived")
+        if previous_status == "completed":
+            return course_repository.fetch_course(conn, owner_id, owned_course_id)
+        phase_id = course_repository.close_open_learning_phase(
+            conn,
+            owner_id,
+            owned_course_id,
+            "archived",
+        )
         archived = course_repository.fetch_course(conn, owner_id, owned_course_id)
         if archived is None:  # pragma: no cover - guarded by the owned read above
             return None
@@ -208,13 +211,20 @@ def get_course_detail(user_id: int, course_id: int) -> dict[str, Any] | None:
         course = course_repository.fetch_course(conn, owner_id, owned_course_id)
         if course is None:
             return None
+        summary = course_repository.fetch_course_summary(
+            conn,
+            owner_id,
+            owned_course_id,
+        )
+        metrics = (
+            course_repository.build_course_summary(conn, owner_id, course)
+            if course["status"] == "active" or summary is None
+            else summary
+        )
         return {
             "course": course,
-            "summary": course_repository.fetch_course_summary(
-                conn,
-                owner_id,
-                owned_course_id,
-            ),
+            "metrics": metrics,
+            "summary": summary,
             "learning_phases": course_repository.list_learning_phases(
                 conn,
                 owner_id,

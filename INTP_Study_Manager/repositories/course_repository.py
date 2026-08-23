@@ -295,6 +295,30 @@ def build_course_summary(
         """,
         (user_id, user_id, user_id, course_id),
     )
+    resolved_question_count = _count(
+        conn,
+        """
+        SELECT COUNT(*) AS count
+        FROM slide_questions AS question
+        WHERE question.user_id = ?
+          AND (
+              COALESCE(question.understood, 0) = 1
+              OR COALESCE(question.status, '') IN (
+                  '已解决', '已掌握', 'closed', 'understood'
+              )
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM ppt_slides AS slide
+              JOIN ppt_decks AS deck ON deck.id = slide.deck_id
+              WHERE slide.id = question.slide_id
+                AND slide.user_id = ?
+                AND deck.user_id = ?
+                AND deck.course_id = ?
+          )
+        """,
+        (user_id, user_id, user_id, course_id),
+    )
     knowledge_count = _count(
         conn,
         """
@@ -374,6 +398,7 @@ def build_course_summary(
         "deck_count": deck_count,
         "slide_count": slide_count,
         "question_count": question_count,
+        "resolved_question_count": resolved_question_count,
         "knowledge_count": knowledge_count,
         "review_count": review_count,
         "completed_review_count": completed_review_count,

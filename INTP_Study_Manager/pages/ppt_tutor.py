@@ -1494,7 +1494,7 @@ def _render_synced_reader(
     user_id: int | None = None,
 ) -> None:
     st.subheader("同步阅读器")
-    st.caption("提示：右侧学习记录跟随当前页，集中呈现问题树、知识卡与复习状态。")
+    st.caption("提示：右侧学习侧栏跟随当前页，集中呈现理解、沉淀与复习状态。")
     user_id = int(user_id) if user_id is not None else int(deck.get("user_id") or require_login().id)
     active_slide_number = _hydrate_reader_position_from_backend(int(deck["id"]), slides, last_position)
     _sync_active_slide_context(user_id, int(deck["id"]), active_slide_number)
@@ -1581,12 +1581,14 @@ def _handle_synced_reader_action(
         return
 
     course_status = str(deck.get("course_status") or "").strip()
-    if (
-        course_status
-        and course_status != "active"
-        and action in {"canvas_question", "convert_question_to_knowledge"}
-    ):
-        st.warning("历史课程需先在课程中心重新激活，才能新增插问或知识卡。")
+    if course_status and course_status != "active" and action in {
+        "canvas_question",
+        "convert_question_to_knowledge",
+        "save_explanation_edit",
+        "save_question_answer_edit",
+        "merge_question_thread",
+    }:
+        st.warning("历史课程为只读；请先在课程中心重新激活，再修改讲解或学习记录。")
         return
 
     slide = next((item for item in slides if int(item["slide_number"]) == slide_number), None)

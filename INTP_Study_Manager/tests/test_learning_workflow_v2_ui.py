@@ -120,13 +120,13 @@ class LearningWorkflowV2UiTest(unittest.TestCase):
         self.assertEqual(payload["knowledgeCards"][0]["topic"], "线性相位 FIR 条件")
         self.assertEqual(payload["reviewStatus"]["pending_count"], 1)
 
-    def test_synced_reader_right_column_is_unified_learning_record(self):
+    def test_synced_reader_right_column_is_unified_learning_sidebar(self):
         source = (
             PROJECT_ROOT / "components" / "synced_reader" / "index.html"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('class="canvas-chat-title">学习记录', source)
-        for label in ["问题树", "知识卡", "复习"]:
+        self.assertIn('class="canvas-chat-title">学习侧栏', source)
+        for label in ["理解", "AI讲解", "当前问题", "沉淀", "插问", "知识卡", "复习", "掌握度", "复习计划"]:
             self.assertIn(label, source)
 
     def test_knowledge_card_preview_shows_provenance_mastery_and_next_review(self):

@@ -9,6 +9,58 @@ from pages import ppt_tutor
 
 
 class PptCanvasQuestionTest(unittest.TestCase):
+    def test_historical_reader_rejects_learning_content_mutation_actions(self):
+        deck = {
+            "id": 3,
+            "title": "历史课件",
+            "subject": "信号与系统",
+            "course_status": "completed",
+        }
+        slide = {
+            "id": 9,
+            "slide_number": 2,
+            "title": "周期信号",
+            "slide_text": "本页正文",
+        }
+        payloads = [
+            {"action": "canvas_question", "question": "新问题"},
+            {"action": "convert_question_to_knowledge", "questionId": 12},
+            {"action": "save_explanation_edit", "explanation": "覆盖讲解"},
+            {"action": "save_question_answer_edit", "questionId": 12, "answer": "覆盖回答"},
+            {"action": "merge_question_thread", "questionId": 12},
+        ]
+
+        with (
+            patch.object(ppt_tutor.st, "session_state", {}),
+            patch.object(ppt_tutor.st, "warning") as warning,
+            patch.object(ppt_tutor, "add_slide_question") as add_question,
+            patch.object(ppt_tutor, "convert_question_to_knowledge") as convert_question,
+            patch.object(ppt_tutor, "_save_manual_explanation") as save_explanation,
+            patch.object(ppt_tutor, "update_slide_question_answer") as save_answer,
+            patch.object(ppt_tutor, "flatten_question_subtree") as merge_thread,
+        ):
+            for index, payload in enumerate(payloads, start=1):
+                ppt_tutor._handle_synced_reader_action(
+                    deck,
+                    [slide],
+                    {},
+                    {
+                        **payload,
+                        "deckId": 3,
+                        "slideNumber": 2,
+                        "token": f"readonly-{index}",
+                    },
+                    [],
+                    user_id=11,
+                )
+
+        self.assertEqual(warning.call_count, len(payloads))
+        add_question.assert_not_called()
+        convert_question.assert_not_called()
+        save_explanation.assert_not_called()
+        save_answer.assert_not_called()
+        merge_thread.assert_not_called()
+
     def test_display_branch_question_parts_extract_legacy_prompt_question_and_quote(self):
         legacy_question = "\n".join(
             [

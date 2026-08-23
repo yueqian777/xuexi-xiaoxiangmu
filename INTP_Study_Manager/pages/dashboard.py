@@ -5,7 +5,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from db import fetch_one
+from db import fetch_all, fetch_one
 from services.active_learning_context_service import get_active_context
 from services.ai_service import AIServiceError, DEFAULT_MODEL, list_api_providers, provider_label
 from services.api_key_ui import render_local_secret_unlock
@@ -273,8 +273,8 @@ def _install_daily_review_styles() -> None:
 def render() -> None:
     user = require_login()
     render_workbench_header(
-        "学习驾驶舱",
-        "打开软件先确认正在学什么、今天做什么，再进入具体学习现场。",
+        "今日学习驾驶舱",
+        "先续上上次进度，再处理今天到期的复习与仍未解决的问题。",
     )
 
     snapshot = get_dashboard_snapshot(user.id)
@@ -283,12 +283,6 @@ def render() -> None:
     status_counts = snapshot.get("status_counts") or {}
     current_location = _current_learning_location(user.id, current_course)
     today_tasks = get_today_review_tasks(user_id=user.id, include_archived=False)
-    low_cards = low_mastery_cards(user_id=user.id, include_archived=False)
-    blockers = recent_blockers(user_id=user.id, include_archived=False)
-    parking = open_parking_questions(user_id=user.id)
-    links = recent_knowledge_links(user_id=user.id, include_archived=False)
-    reminder_config = get_daily_reminder_config()
-    review_log = get_today_review_log(user_id=user.id)
 
     st.subheader("今日学习")
     with st.container(border=True):
@@ -299,14 +293,16 @@ def render() -> None:
                     current_location.get("section_title"),
                     current_location.get("deck_title"),
                 ]
-                st.markdown(
-                    "**当前位置：** "
-                    + " · ".join(str(item) for item in location_parts if item)
-                )
-                st.caption(
-                    f"第 {current_location['slide_number']} 页 / "
-                    f"{current_location['slide_count']} 页"
-                )
+                st.caption(" · ".join(str(item) for item in location_parts if item))
+                if current_location.get("has_saved_position"):
+                    st.markdown(
+                        f"**继续：第 {current_location['slide_number']} 页**"
+                        f" / 共 {current_location['slide_count']} 页"
+                    )
+                else:
+                    st.markdown(
+                        f"**从第 1 页开始** / 共 {current_location['slide_count']} 页"
+                    )
                 if st.button(
                     "继续学习",
                     type="primary",
@@ -336,12 +332,21 @@ def render() -> None:
                 key="dashboard_open_course_center",
             )
 
-    st.subheader("今日任务")
+    st.subheader("今日复习与待解决")
+    st.caption("今日任务只保留两条主线：复习到期知识点，解决当前课程插问。")
     unresolved_questions = _unresolved_question_count(user.id, current_course)
-    task_cols = st.columns(3)
+    unresolved_previews = _unresolved_question_previews(user.id, current_course)
+    review_knowledge_count = _today_review_knowledge_count(today_tasks)
+    task_cols = st.columns(2)
     with task_cols[0]:
         with st.container(border=True):
-            st.metric("复习", len(today_tasks), help="今天到期且尚未完成的 1-3-7-14 复习任务。")
+            st.metric(
+                "今日复习",
+                f"{review_knowledge_count} 个知识点",
+                help="同一知识点的多个逾期阶段只计一次。",
+            )
+            for topic in _today_review_topics(today_tasks):
+                st.caption(f"· {topic}")
             _go_to_page(
                 "处理复习任务",
                 section_id="review",
@@ -350,28 +355,31 @@ def render() -> None:
             )
     with task_cols[1]:
         with st.container(border=True):
-            st.metric("待解决插问", unresolved_questions)
+            st.metric("待解决", f"{unresolved_questions} 个插问")
+            for question in unresolved_previews:
+                st.caption(f"· {question}")
             _go_to_page(
-                "回到问题树",
+                "回到插问",
                 section_id="materials",
                 page_id="ppt_tutor",
                 key="dashboard_go_questions",
             )
-    with task_cols[2]:
-        with st.container(border=True):
-            recommendation = _today_recommendation(low_cards, unresolved_questions)
-            st.markdown("**推荐行动**")
-            st.write(recommendation)
-            _go_to_page(
-                "整理知识卡片",
-                section_id="knowledge",
-                page_id="knowledge_cards",
-                key="dashboard_go_cards",
-            )
+    recommendation = _today_recommendation(
+        _today_review_topics(today_tasks, limit=1),
+        unresolved_questions,
+    )
+    st.caption(f"推荐行动：{recommendation}")
+    _go_to_page(
+        "整理知识卡片",
+        section_id="knowledge",
+        page_id="knowledge_cards",
+        key="dashboard_go_cards",
+    )
 
-    st.subheader("课程状态")
+    st.subheader("课程概览")
+    st.caption("课程状态一览")
     status_cols = st.columns(3)
-    status_cols[0].metric("正在学习", int(status_counts.get("active", len(active_courses))))
+    status_cols[0].metric("学习中", int(status_counts.get("active", len(active_courses))))
     status_cols[1].metric("已完成", int(status_counts.get("completed", 0)))
     status_cols[2].metric("归档", int(status_counts.get("archived", 0)))
     _go_to_page(
@@ -381,7 +389,13 @@ def render() -> None:
         key="dashboard_manage_courses",
     )
 
-    with st.container(border=True):
+    if st.toggle("展开更多学习支持", value=False, key="dashboard_more_support"):
+        low_cards = low_mastery_cards(user_id=user.id, include_archived=False)
+        blockers = recent_blockers(user_id=user.id, include_archived=False)
+        parking = open_parking_questions(user_id=user.id)
+        links = recent_knowledge_links(user_id=user.id, include_archived=False)
+        reminder_config = get_daily_reminder_config()
+        review_log = get_today_review_log(user_id=user.id)
         st.subheader("每日复盘提醒")
         if review_log:
             st.success(f"今日复盘已完成：{review_log['created_at']}")
@@ -392,7 +406,6 @@ def render() -> None:
         else:
             st.caption("每日复盘提醒当前未启用。")
 
-    with st.expander("查看学习数据与每日 AI 复习", expanded=False):
         st.subheader(f"今天需要复习什么：{date.today().isoformat()}")
         if today_tasks:
             for task in today_tasks:
@@ -454,7 +467,7 @@ def _current_learning_location(user_id: int, current_course: dict | None) -> dic
             SELECT id, title, slide_count
             FROM ppt_decks
             WHERE user_id = ? AND course_id = ?
-            ORDER BY created_at DESC, id DESC
+            ORDER BY sort_order ASC, created_at DESC, id DESC
             LIMIT 1
             """,
             (user_id, course_id),
@@ -483,7 +496,45 @@ def _current_learning_location(user_id: int, current_course: dict | None) -> dic
         "section_title": section.get("title") if section else "",
         "slide_number": slide_number,
         "slide_count": slide_count,
+        "has_saved_position": bool(
+            active_context.get("active")
+            and int(active_context.get("deck_id") or 0) == int(deck["id"])
+            and int(active_context.get("slide_number") or 0) > 0
+        ),
     }
+
+
+def _today_review_knowledge_count(tasks: list[dict]) -> int:
+    return len(_distinct_review_knowledge(tasks))
+
+
+def _today_review_topics(tasks: list[dict], *, limit: int = 3) -> list[str]:
+    return [
+        str(item.get("topic") or "未命名知识点")
+        for item in _distinct_review_knowledge(tasks)[: max(0, int(limit))]
+    ]
+
+
+def _distinct_review_knowledge(tasks: list[dict]) -> list[dict]:
+    distinct: list[dict] = []
+    seen: set[object] = set()
+    for index, task in enumerate(tasks):
+        knowledge_id = task.get("knowledge_id")
+        key: object = (
+            ("id", int(knowledge_id))
+            if knowledge_id not in (None, "")
+            else (
+                "topic",
+                str(task.get("subject") or "").strip(),
+                str(task.get("topic") or "").strip(),
+                index if not str(task.get("topic") or "").strip() else "",
+            )
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        distinct.append(task)
+    return distinct
 
 
 def _unresolved_question_count(user_id: int, current_course: dict | None) -> int:
@@ -505,9 +556,35 @@ def _unresolved_question_count(user_id: int, current_course: dict | None) -> int
     return int(row.get("count") or 0) if row else 0
 
 
-def _today_recommendation(low_cards: list[dict], unresolved_questions: int) -> str:
-    if low_cards:
-        return f"先闭卷解释「{low_cards[0]['topic']}」，再完成对应复习。"
+def _unresolved_question_previews(
+    user_id: int,
+    current_course: dict | None,
+    *,
+    limit: int = 3,
+) -> list[str]:
+    if not current_course:
+        return []
+    rows = fetch_all(
+        """
+        SELECT sq.question
+        FROM slide_questions sq
+        JOIN ppt_slides ps ON ps.id = sq.slide_id AND ps.user_id = sq.user_id
+        JOIN ppt_decks d ON d.id = ps.deck_id AND d.user_id = sq.user_id
+        WHERE sq.user_id = ? AND d.course_id = ?
+          AND COALESCE(sq.understood, 0) = 0
+          AND COALESCE(sq.converted_to_knowledge, 0) = 0
+          AND COALESCE(sq.status, '') NOT IN ('已解决', '归档', 'closed', 'understood')
+        ORDER BY sq.created_at ASC, sq.id ASC
+        LIMIT ?
+        """,
+        (user_id, int(current_course["id"]), max(0, int(limit))),
+    )
+    return [str(row.get("question") or "未命名插问") for row in rows]
+
+
+def _today_recommendation(review_topics: list[str], unresolved_questions: int) -> str:
+    if review_topics:
+        return f"先闭卷解释「{review_topics[0]}」，再完成对应复习。"
     if unresolved_questions:
-        return "回到当前页问题树，整理一个插问并转成知识卡。"
+        return "回到当前页插问，整理一个问题并转成知识卡。"
     return "完成当前章节总结，记录核心问题与下一步。"

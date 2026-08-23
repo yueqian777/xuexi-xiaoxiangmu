@@ -6,6 +6,7 @@ from unittest.mock import patch
 import app
 import db
 from services import ui_helpers
+from services import course_service
 from streamlit.testing.v1 import AppTest
 
 
@@ -164,6 +165,96 @@ class AppNavigationStateTest(unittest.TestCase):
                         [str(item.value) for item in page.exception],
                     )
                     self.assertIn("课程中心", [item.value for item in page.title])
+        finally:
+            db._INITIALIZED_DATABASE_PATH = None
+
+    def test_dashboard_first_view_is_the_today_learning_cockpit(self):
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                data_dir = Path(tmp)
+                with (
+                    patch.object(db, "DATA_DIR", data_dir),
+                    patch.object(db, "DATABASE_PATH", data_dir / "study_manager.db"),
+                ):
+                    db._INITIALIZED_DATABASE_PATH = None
+                    page = AppTest.from_file(
+                        PROJECT_ROOT / "app.py",
+                        default_timeout=20,
+                    ).run()
+
+                    self.assertEqual(len(page.exception), 0)
+                    self.assertIn(
+                        "今日学习驾驶舱",
+                        [item.value for item in page.title],
+                    )
+                    self.assertIn(
+                        "今日学习",
+                        [item.value for item in page.subheader],
+                    )
+                    self.assertIn(
+                        "今日复习与待解决",
+                        [item.value for item in page.subheader],
+                    )
+                    self.assertIn(
+                        "课程概览",
+                        [item.value for item in page.subheader],
+                    )
+                    self.assertEqual(
+                        [item.label for item in page.metric[:2]],
+                        ["今日复习", "待解决"],
+                    )
+        finally:
+            db._INITIALIZED_DATABASE_PATH = None
+
+    def test_completed_course_card_opens_structured_summary_report(self):
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                data_dir = Path(tmp)
+                with (
+                    patch.object(db, "DATA_DIR", data_dir),
+                    patch.object(db, "DATABASE_PATH", data_dir / "study_manager.db"),
+                ):
+                    db._INITIALIZED_DATABASE_PATH = None
+                    course = course_service.create_course(0, "信号与系统")
+                    course_service.complete_course(0, int(course["id"]))
+                    page = AppTest.from_file(
+                        PROJECT_ROOT / "app.py",
+                        default_timeout=20,
+                    ).run()
+                    page.sidebar.radio[1].set_value("course_center")
+                    page.run()
+
+                    self.assertEqual(len(page.exception), 0)
+                    metric_labels = [item.label for item in page.metric]
+                    for label in ["PPT 数量", "问题数量", "知识卡数量", "掌握度"]:
+                        self.assertIn(label, metric_labels)
+
+                    next(
+                        button
+                        for button in page.button
+                        if button.label == "查看总结"
+                    ).click()
+                    page.run()
+
+                    self.assertEqual(
+                        len(page.exception),
+                        0,
+                        [str(item.value) for item in page.exception],
+                    )
+                    self.assertIn(
+                        "课程学习报告",
+                        [item.value for item in page.title],
+                    )
+                    report_metric_labels = [item.label for item in page.metric]
+                    for label in [
+                        "学习时间",
+                        "完成内容",
+                        "解决问题数量",
+                        "知识卡数量",
+                    ]:
+                        self.assertIn(label, report_metric_labels)
+                    for label in ["知识体系", "薄弱点", "未来复习建议", "学习周期"]:
+                        self.assertIn(label, [item.value for item in page.subheader])
         finally:
             db._INITIALIZED_DATABASE_PATH = None
 

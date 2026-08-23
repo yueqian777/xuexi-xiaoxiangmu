@@ -237,7 +237,7 @@ class PptLearningWorkflowV2RegressionTest(unittest.TestCase):
         self.assertIn('data-parent-question-id=', html)
         self.assertIn('.chat-turn[data-depth="2"]', html)
         self.assertIn('.chat-turn[data-depth="3"]', html)
-        self.assertIn("问题树", html)
+        self.assertIn("插问", html)
 
     def test_local_upload_requires_a_nonempty_subject(self):
         with self.assertRaisesRegex(ValueError, "科目"):
