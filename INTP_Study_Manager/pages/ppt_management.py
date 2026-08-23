@@ -9,7 +9,18 @@ from services.auth_service import require_login
 from services.course_service import ensure_course_for_subject
 
 DECK_STATUSES = ["使用中", "归档", "暂停", "待整理"]
-QUESTION_STATUSES = ["未整理", "待追问", "已解决", "待复习", "归档"]
+QUESTION_STATUSES = [
+    "未解决",
+    "理解中",
+    "已转知识卡",
+    "已掌握",
+    "待复习",
+    "归档",
+    # Keep legacy values editable while old databases are normalized lazily.
+    "未整理",
+    "待追问",
+    "已解决",
+]
 QUESTION_CATEGORIES = ["概念卡点", "公式推导", "应用题", "反例", "错因分析", "扩展问题", "其他"]
 
 
@@ -155,8 +166,83 @@ def _save_deck_management_rows(user_id: int, rows: list[dict[str, object]]) -> i
                     owner_id,
                 ),
             )
+            if int(cursor.rowcount or 0) == 1 and course_id:
+                _sync_source_cards_to_deck_course(
+                    conn,
+                    owner_id,
+                    deck_id,
+                    int(course_id),
+                )
             updated += int(cursor.rowcount or 0)
     return updated
+
+
+def _sync_source_cards_to_deck_course(
+    conn,
+    user_id: int,
+    deck_id: int,
+    course_id: int,
+) -> None:
+    """Keep runtime lineage aligned after deck metadata is reclassified.
+
+    The precedence mirrors the migration: direct deck, then direct slide, then
+    source question.  A lower-priority reference to this deck must not override
+    a valid higher-priority reference to another owned deck.
+    """
+
+    canonical_deck_id = """
+        COALESCE(
+            (
+                SELECT direct_deck.id
+                FROM ppt_decks AS direct_deck
+                JOIN courses AS direct_course
+                  ON direct_course.id = direct_deck.course_id
+                 AND direct_course.user_id = direct_deck.user_id
+                WHERE direct_deck.id = card.source_deck_id
+                  AND direct_deck.user_id = card.user_id
+                LIMIT 1
+            ),
+            (
+                SELECT slide_deck.id
+                FROM ppt_slides AS source_slide
+                JOIN ppt_decks AS slide_deck
+                  ON slide_deck.id = source_slide.deck_id
+                 AND slide_deck.user_id = source_slide.user_id
+                JOIN courses AS slide_course
+                  ON slide_course.id = slide_deck.course_id
+                 AND slide_course.user_id = slide_deck.user_id
+                WHERE source_slide.id = card.source_slide_id
+                  AND source_slide.user_id = card.user_id
+                LIMIT 1
+            ),
+            (
+                SELECT question_deck.id
+                FROM slide_questions AS source_question
+                JOIN ppt_slides AS question_slide
+                  ON question_slide.id = source_question.slide_id
+                 AND question_slide.user_id = source_question.user_id
+                JOIN ppt_decks AS question_deck
+                  ON question_deck.id = question_slide.deck_id
+                 AND question_deck.user_id = question_slide.user_id
+                JOIN courses AS question_course
+                  ON question_course.id = question_deck.course_id
+                 AND question_course.user_id = question_deck.user_id
+                WHERE source_question.id = card.source_question_id
+                  AND source_question.user_id = card.user_id
+                LIMIT 1
+            )
+        )
+    """
+    conn.execute(
+        f"""
+        UPDATE knowledge_cards AS card
+        SET course_id = ?
+        WHERE card.user_id = ?
+          AND {canonical_deck_id} = ?
+          AND card.course_id IS NOT ?
+        """,
+        (course_id, user_id, deck_id, course_id),
+    )
 
 
 def _render_question_management(user_id: int) -> None:
@@ -407,9 +493,23 @@ def _fetch_questions(user_id: int, deck_id: int) -> list[dict]:
         (user_id, deck_id),
     )
     for row in rows:
+        row["status"] = _canonical_question_status(row)
         row["question_preview"] = _preview(row["question"], 80)
         row["answer_preview"] = _preview(row["answer"], 90)
     return rows
+
+
+def _canonical_question_status(row: dict) -> str:
+    status = str(row.get("status") or "").strip()
+    if status == "归档":
+        return status
+    if bool(row.get("understood")) or status in {"已掌握", "已解决", "understood", "closed"}:
+        return "已掌握"
+    if bool(row.get("converted_to_knowledge")) or row.get("knowledge_id") or status == "已转知识卡":
+        return "已转知识卡"
+    if bool(row.get("need_review")) or status in {"理解中", "待追问", "待复习"}:
+        return "理解中"
+    return "未解决"
 
 
 def _question_row_style(row) -> list[str]:

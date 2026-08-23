@@ -69,9 +69,32 @@ class CourseWriteIntegrationTest(unittest.TestCase):
             "信号与系统",
         )
         foreign_course_id = course_service.ensure_course_for_subject(99, "自动控制")
-        deck_id, _ = self._create_deck_and_slide(
+        deck_id, slide_id = self._create_deck_and_slide(
             subject="信号与系统",
             course_id=original_course_id,
+        )
+        question_id = db.insert_and_get_id(
+            """
+            INSERT INTO slide_questions (user_id, slide_id, question, answer, model)
+            VALUES (?, ?, '为什么闭环稳定？', '取决于极点。', 'test')
+            """,
+            (self.user_id, slide_id),
+        )
+        slide_card_id = db.insert_and_get_id(
+            """
+            INSERT INTO knowledge_cards (
+                user_id, subject, topic, one_sentence, source_slide_id, course_id
+            ) VALUES (?, '信号与系统', '闭环稳定', '检查闭环极点', ?, ?)
+            """,
+            (self.user_id, slide_id, original_course_id),
+        )
+        question_card_id = db.insert_and_get_id(
+            """
+            INSERT INTO knowledge_cards (
+                user_id, subject, topic, one_sentence, source_question_id, course_id
+            ) VALUES (?, '信号与系统', '稳定判据', '极点位于稳定域', ?, ?)
+            """,
+            (self.user_id, question_id, original_course_id),
         )
 
         updated = ppt_management._save_deck_management_rows(
@@ -103,6 +126,19 @@ class CourseWriteIntegrationTest(unittest.TestCase):
         self.assertEqual(course, {"user_id": self.user_id, "name": "自动控制"})
         self.assertNotEqual(deck["course_id"], original_course_id)
         self.assertNotEqual(deck["course_id"], foreign_course_id)
+        linked_cards = db.fetch_all(
+            """
+            SELECT id, course_id
+            FROM knowledge_cards
+            WHERE id IN (?, ?)
+            ORDER BY id
+            """,
+            (slide_card_id, question_card_id),
+        )
+        self.assertEqual(
+            [int(card["course_id"]) for card in linked_cards],
+            [int(deck["course_id"]), int(deck["course_id"])],
+        )
 
     def test_deck_management_metadata_edit_preserves_historical_canonical_course(self):
         historical = course_service.create_course(self.user_id, "数字信号处理")
@@ -274,10 +310,16 @@ class CourseWriteIntegrationTest(unittest.TestCase):
         self.assertEqual(card["course_name"], "概率论")
 
     def test_study_assets_link_session_and_derived_cards_to_one_course(self):
+        course = course_service.create_course(self.user_id, "通信原理")
+        canonical_course_id = int(course["id"])
+        deck_id, _ = self._create_deck_and_slide(
+            subject="通信原理",
+            course_id=canonical_course_id,
+        )
         assets = {
             "study_session": {
                 "date": "2026-08-23",
-                "subject": "通信原理",
+                "subject": "AI 生成的展示标签",
                 "chapter": "调制",
                 "title": "AM 阅读复盘",
                 "main_question": "为什么需要调制？",
@@ -299,6 +341,7 @@ class CourseWriteIntegrationTest(unittest.TestCase):
         ):
             session_id, knowledge_ids = study_asset_service.save_study_assets(
                 assets,
+                source_deck_id=deck_id,
                 fallback_subject="",
                 fallback_chapter="",
             )
@@ -311,11 +354,142 @@ class CourseWriteIntegrationTest(unittest.TestCase):
             "SELECT subject, course_id, source_session_id FROM knowledge_cards WHERE id = ?",
             (knowledge_ids[0],),
         )
-        course = db.fetch_one("SELECT user_id, name FROM courses WHERE id = ?", (session["course_id"],))
-        self.assertEqual(course, {"user_id": self.user_id, "name": "通信原理"})
+        stored_course = db.fetch_one("SELECT user_id, name FROM courses WHERE id = ?", (session["course_id"],))
+        self.assertEqual(stored_course, {"user_id": self.user_id, "name": "通信原理"})
+        self.assertEqual(session["course_id"], canonical_course_id)
+        self.assertEqual(
+            db.fetch_one("SELECT COUNT(*) AS count FROM courses WHERE user_id = ?", (self.user_id,))["count"],
+            1,
+        )
         self.assertEqual(card["source_session_id"], session_id)
         self.assertEqual(card["subject"], "不同的生成标签")
         self.assertEqual(card["course_id"], session["course_id"])
+
+    def test_study_assets_require_reactivation_of_the_source_deck_course(self):
+        transitions = (
+            ("completed", course_service.complete_course),
+            ("archived", course_service.archive_course),
+        )
+        for status, transition in transitions:
+            with self.subTest(status=status):
+                course_name = f"历史沉淀-{status}"
+                draft_subject = f"不应新建-{status}"
+                course = course_service.create_course(self.user_id, course_name)
+                deck_id, _ = self._create_deck_and_slide(
+                    subject=course_name,
+                    course_id=course["id"],
+                )
+                transition(self.user_id, course["id"])
+                assets = {
+                    "study_session": {
+                        "date": "2026-08-23",
+                        "subject": draft_subject,
+                        "chapter": "历史资料",
+                    },
+                    "knowledge_cards": [
+                        {
+                            "subject": draft_subject,
+                            "topic": "历史知识点",
+                            "one_sentence": "只有重新激活后才能写入。",
+                            "need_review": True,
+                        }
+                    ],
+                }
+
+                with patch.object(
+                    study_asset_service,
+                    "require_login",
+                    return_value=SimpleNamespace(id=self.user_id),
+                ):
+                    with self.assertRaisesRegex(ValueError, "重新激活"):
+                        study_asset_service.save_study_assets(
+                            assets,
+                            source_deck_id=deck_id,
+                            fallback_subject=course_name,
+                            fallback_chapter="",
+                        )
+
+                self.assertEqual(
+                    db.fetch_one(
+                        "SELECT COUNT(*) AS count FROM study_sessions WHERE user_id = ? AND subject = ?",
+                        (self.user_id, draft_subject),
+                    )["count"],
+                    0,
+                )
+                self.assertEqual(
+                    db.fetch_one(
+                        "SELECT COUNT(*) AS count FROM courses WHERE user_id = ? AND name = ?",
+                        (self.user_id, draft_subject),
+                    )["count"],
+                    0,
+                )
+
+                course_service.reactivate_course(self.user_id, course["id"])
+                with patch.object(
+                    study_asset_service,
+                    "require_login",
+                    return_value=SimpleNamespace(id=self.user_id),
+                ):
+                    session_id, knowledge_ids = study_asset_service.save_study_assets(
+                        assets,
+                        source_deck_id=deck_id,
+                        fallback_subject=course_name,
+                        fallback_chapter="",
+                    )
+                self.assertEqual(
+                    db.fetch_one("SELECT course_id FROM study_sessions WHERE id = ?", (session_id,))["course_id"],
+                    course["id"],
+                )
+                self.assertEqual(
+                    db.fetch_one("SELECT course_id FROM knowledge_cards WHERE id = ?", (knowledge_ids[0],))["course_id"],
+                    course["id"],
+                )
+                self.assertEqual(
+                    db.fetch_one(
+                        "SELECT COUNT(*) AS count FROM course_learning_phases WHERE user_id = ? AND course_id = ?",
+                        (self.user_id, course["id"]),
+                    )["count"],
+                    2,
+                )
+
+    def test_study_assets_reject_unbound_or_foreign_source_decks(self):
+        assets = {
+            "study_session": {"subject": "不应落库", "chapter": "边界"},
+            "knowledge_cards": [{"topic": "边界", "one_sentence": "不应落库"}],
+        }
+        unbound_deck_id, _ = self._create_deck_and_slide(subject="无课程", course_id=None)
+        foreign_course = course_service.create_course(99, "外部课程")
+        foreign_deck_id = db.insert_and_get_id(
+            """
+            INSERT INTO ppt_decks (
+                user_id, filename, title, subject, file_path, slide_count, course_id
+            ) VALUES (99, 'foreign.pdf', '外部资料', '外部课程', 'foreign.pdf', 1, ?)
+            """,
+            (foreign_course["id"],),
+        )
+
+        with patch.object(
+            study_asset_service,
+            "require_login",
+            return_value=SimpleNamespace(id=self.user_id),
+        ):
+            for deck_id in (unbound_deck_id, foreign_deck_id):
+                with self.subTest(deck_id=deck_id):
+                    with self.assertRaisesRegex(ValueError, "重新激活"):
+                        study_asset_service.save_study_assets(
+                            assets,
+                            source_deck_id=deck_id,
+                            fallback_subject="不应落库",
+                            fallback_chapter="",
+                        )
+
+        self.assertEqual(
+            db.fetch_one(
+                "SELECT COUNT(*) AS count FROM study_sessions WHERE user_id = ? AND subject = '不应落库'",
+                (self.user_id,),
+            )["count"],
+            0,
+        )
 
     def _create_deck_and_slide(self, *, subject: str, course_id: int | None) -> tuple[int, int]:
         deck_id = db.insert_and_get_id(

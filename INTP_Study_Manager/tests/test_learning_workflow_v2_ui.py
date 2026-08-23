@@ -71,6 +71,18 @@ class LearningWorkflowV2UiTest(unittest.TestCase):
         self.assertTrue(payload["convertedToKnowledge"])
         self.assertFalse(payload["understood"])
         self.assertTrue(payload["needReview"])
+        self.assertEqual(
+            ppt_tutor._question_learning_status(
+                {"status": "未整理", "understood": 0, "converted_to_knowledge": 0}
+            ),
+            "未解决",
+        )
+        self.assertEqual(
+            ppt_tutor._question_learning_status(
+                {"status": "理解中", "understood": 0, "converted_to_knowledge": 0}
+            ),
+            "理解中",
+        )
 
     def test_reader_payload_contains_current_page_cards_and_review_state(self):
         slides = [
@@ -145,6 +157,12 @@ class LearningWorkflowV2UiTest(unittest.TestCase):
         ]:
             self.assertIn(text, markdown)
 
+        page_source = (PROJECT_ROOT / "pages" / "knowledge_cards.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("新知识卡必须进入复习闭环", page_source)
+        self.assertIn("科目、知识点、核心问题、一句话解释不能为空", page_source)
+
     def test_course_center_exposes_full_lifecycle_actions(self):
         path = PROJECT_ROOT / "pages" / "course_center.py"
         self.assertTrue(path.exists(), "课程中心页面尚未创建")
@@ -161,6 +179,7 @@ class LearningWorkflowV2UiTest(unittest.TestCase):
             "核心知识体系",
         ]:
             self.assertIn(label, source)
+        self.assertIn("except ValueError as exc", source)
 
     def test_course_center_continue_uses_the_saved_position_for_that_course(self):
         decks = [{"id": 4}, {"id": 9}]

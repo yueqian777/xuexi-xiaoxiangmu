@@ -17,6 +17,13 @@ def create_course(user_id: int, name: str) -> dict[str, Any]:
     course_name = _course_name(name)
     db.init_db()
     with db.write_transaction() as conn:
+        existing = course_repository.fetch_active_course_by_name(
+            conn,
+            owner_id,
+            course_name,
+        )
+        if existing is not None:
+            raise ValueError(f"课程「{course_name}」正在学习中。")
         return course_repository.insert_course(conn, owner_id, course_name)
 
 
@@ -144,6 +151,13 @@ def reactivate_course(user_id: int, course_id: int) -> dict[str, Any] | None:
             return None
         if course["status"] == "active":
             return course
+        same_named_active = course_repository.fetch_active_course_by_name(
+            conn,
+            owner_id,
+            str(course["name"]),
+        )
+        if same_named_active is not None and int(same_named_active["id"]) != owned_course_id:
+            raise ValueError("已有同名课程正在学习；请先结束当前课程，再重新激活历史阶段。")
         course_repository.set_course_status(conn, owner_id, owned_course_id, "active")
         course_repository.append_learning_phase(conn, owner_id, owned_course_id)
         return course_repository.fetch_course(conn, owner_id, owned_course_id)

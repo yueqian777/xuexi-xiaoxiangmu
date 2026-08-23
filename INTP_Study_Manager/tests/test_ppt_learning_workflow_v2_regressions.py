@@ -249,6 +249,24 @@ class PptLearningWorkflowV2RegressionTest(unittest.TestCase):
             inspect.getsource(ppt_tutor._render_upload_form),
         )
 
+    def test_study_asset_writer_is_available_only_for_active_owned_course(self):
+        self.assertTrue(
+            ppt_tutor._study_asset_learning_writable(
+                {"course_id": 8, "course_status": "active"}
+            )
+        )
+        for deck in (
+            {"course_id": 8, "course_status": "completed"},
+            {"course_id": 8, "course_status": "archived"},
+            {"course_id": None, "course_status": ""},
+        ):
+            with self.subTest(deck=deck):
+                self.assertFalse(ppt_tutor._study_asset_learning_writable(deck))
+
+        source = inspect.getsource(ppt_tutor._render_study_asset_generator_inner)
+        self.assertIn("_study_asset_learning_writable(deck)", source)
+        self.assertIn('source_deck_id=int(deck["id"])', source)
+
 
 if __name__ == "__main__":
     unittest.main()

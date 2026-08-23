@@ -130,7 +130,11 @@ def _render_course_card(user_id: int, course: dict, *, historical: bool) -> None
                 key=f"course_reactivate_{course_id}",
                 use_container_width=True,
             ):
-                reactivate_course(user_id, course_id)
+                try:
+                    reactivate_course(user_id, course_id)
+                except ValueError as exc:
+                    st.error(str(exc))
+                    return
                 st.success("课程已重新激活，并创建了新的学习阶段；历史阶段未被覆盖。")
                 st.rerun()
 

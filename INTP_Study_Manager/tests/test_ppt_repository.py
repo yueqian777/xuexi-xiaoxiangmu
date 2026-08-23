@@ -52,7 +52,7 @@ class PptRepositoryTest(unittest.TestCase):
         self.assertEqual(params, (4, 9, "模型", "讲解"))
 
     def test_add_slide_question_normalizes_ids_and_returns_insert_id(self):
-        conn = FakeConnection(lastrowid=88)
+        conn = FakeConnection(lastrowid=88, rows=[{"id": 9, "course_status": None}])
         with patch.object(ppt_repository, "write_transaction", fake_transaction(conn)):
             result = ppt_repository.add_slide_question("4", "9", "问题", "答案", "模型", quote_text="引用")
 
@@ -409,6 +409,24 @@ class PptRepositorySqliteIntegrationTest(unittest.TestCase):
         self.assertEqual(result[self.slide_id][0]["image_path"], "owner.png")
         self.assertEqual(result[other_slide_id], [])
 
+    def test_create_slide_question_rejects_slide_owned_by_another_user(self):
+        other_slide_id = self._create_slide(user_id=12)
+
+        with self.assertRaisesRegex(ValueError, "幻灯片不存在或不属于当前用户"):
+            ppt_repository.create_slide_question_tree_node(
+                11,
+                other_slide_id,
+                "cross-user question",
+                "answer",
+                "model",
+            )
+
+        leaked = db.fetch_one(
+            "SELECT id FROM slide_questions WHERE user_id = ? AND slide_id = ?",
+            (11, other_slide_id),
+        )
+        self.assertIsNone(leaked)
+
     def test_create_slide_question_tree_node_persists_root_child_depth_and_sort_order(self):
         root_1 = ppt_repository.create_slide_question_tree_node(
             11,
@@ -466,6 +484,7 @@ class PptRepositorySqliteIntegrationTest(unittest.TestCase):
         self.assertEqual(child_1_row["depth"], 1)
         self.assertEqual(child_1_row["sort_order"], 1)
         self.assertEqual(child_2_row["sort_order"], 2)
+        self.assertEqual(self._question_row(root_1)["status"], "理解中")
 
         self.assertEqual(grandchild_row["parent_question_id"], child_1)
         self.assertEqual(grandchild_row["root_question_id"], root_1)

@@ -81,8 +81,9 @@ class QuestionToKnowledgeServiceTest(unittest.TestCase):
         self.assertTrue(all(card["source_slide_id"] == self.slide_id for card in cards))
 
         question_rows = db.fetch_all(
-            "SELECT id, converted_to_knowledge, knowledge_id FROM slide_questions ORDER BY id ASC"
+            "SELECT id, status, converted_to_knowledge, knowledge_id FROM slide_questions ORDER BY id ASC"
         )
+        self.assertEqual([row["status"] for row in question_rows], ["已转知识卡"] * 3)
         self.assertEqual([row["converted_to_knowledge"] for row in question_rows], [1, 1, 1])
         self.assertEqual([row["knowledge_id"] for row in question_rows], created_ids)
 
@@ -204,7 +205,7 @@ class QuestionToKnowledgeServiceTest(unittest.TestCase):
         self.assertIsNone(card["source_deck_id"])
         self.assertIsNone(card["source_slide_id"])
 
-    def test_mark_question_understood_only_sets_understood_flag(self):
+    def test_mark_question_understood_sets_canonical_mastered_status(self):
         question_id = self._create_question("Understood?")
 
         changed = question_to_knowledge_service.mark_question_understood(self.user_id, question_id)
@@ -212,7 +213,7 @@ class QuestionToKnowledgeServiceTest(unittest.TestCase):
         self.assertTrue(changed)
         row = db.fetch_one("SELECT understood, status, knowledge_id FROM slide_questions WHERE id = ?", (question_id,))
         self.assertEqual(row["understood"], 1)
-        self.assertEqual(row["status"], "understood")
+        self.assertEqual(row["status"], "已掌握")
         self.assertIsNone(row["knowledge_id"])
 
 

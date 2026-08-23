@@ -39,10 +39,13 @@ FORMULA_WRITING_PATTERNS = [
 
 def get_today_ai_review_plan(*, user_id: int | None = None) -> dict[str, Any] | None:
     user_id = user_id if user_id is not None else require_login().id
-    return fetch_one(
+    plan_row = fetch_one(
         "SELECT * FROM daily_ai_review_plans WHERE user_id = ? AND review_date = ?",
         (user_id, date.today().isoformat()),
     )
+    if plan_row and _plan_references_archived_or_missing_cards(user_id, plan_row):
+        return None
+    return plan_row
 
 
 def collect_review_candidates(
@@ -194,13 +197,30 @@ def evaluate_today_ai_review(
         stored = evaluation_payload(plan_row)
         if stored is not None:
             return stored
-    latest_plan = fetch_one("SELECT status, evaluation_json FROM daily_ai_review_plans WHERE id = ? AND user_id = ?", (plan_row["id"], user_id))
+    latest_plan = fetch_one(
+        """
+        SELECT status, evaluation_json, plan_json, source_snapshot_json
+        FROM daily_ai_review_plans
+        WHERE id = ? AND user_id = ?
+        """,
+        (plan_row["id"], user_id),
+    )
     if latest_plan and str(latest_plan.get("status") or "") == "已批改":
         stored = evaluation_payload(latest_plan)
         if stored is not None:
             return stored
+    expected_plan_json = str(plan_row.get("plan_json") or "")
+    expected_source_snapshot_json = str(plan_row.get("source_snapshot_json") or "")
+    if not latest_plan or not _review_plan_version_matches(
+        latest_plan,
+        expected_plan_json=expected_plan_json,
+        expected_source_snapshot_json=expected_source_snapshot_json,
+    ):
+        raise ValueError("当天自测计划已更新，请刷新页面后重新作答。")
 
     plan = json.loads(plan_row["plan_json"])
+    if _plan_references_archived_or_missing_cards(user_id, plan):
+        raise ValueError("该自测计划包含已归档课程内容，请刷新后重新生成当天计划。")
     normalized_answers = {
         question_id: answer.strip()
         for question_id, answer in answers.items()
@@ -229,6 +249,8 @@ def evaluate_today_ai_review(
         answers=normalized_answers,
         plan_id=int(plan_row["id"]),
         user_id=user_id,
+        expected_plan_json=expected_plan_json,
+        expected_source_snapshot_json=expected_source_snapshot_json,
     )
     if updates is None:
         stored = fetch_one("SELECT evaluation_json FROM daily_ai_review_plans WHERE id = ? AND user_id = ?", (plan_row["id"], user_id))
@@ -244,6 +266,71 @@ def plan_payload(plan_row: dict[str, Any]) -> dict[str, Any]:
     return json.loads(plan_row.get("plan_json") or "{}")
 
 
+def _plan_references_archived_or_missing_cards(
+    user_id: int,
+    plan_or_row: dict[str, Any],
+    *,
+    conn=None,
+) -> bool:
+    """Reject stale plans whose displayed questions are no longer current.
+
+    A course can be archived after today's plan was generated.  Candidate
+    filtering alone cannot protect that persisted row, so both reads and the
+    grading transaction revalidate the question card IDs against current
+    ownership and lifecycle state.
+    """
+
+    plan = plan_or_row
+    if "plan_json" in plan_or_row:
+        try:
+            parsed = json.loads(plan_or_row.get("plan_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return True
+        if not isinstance(parsed, dict):
+            return True
+        plan = parsed
+    questions = plan.get("questions") if isinstance(plan, dict) else None
+    if not isinstance(questions, list):
+        return False
+    knowledge_ids: set[int] = set()
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        try:
+            knowledge_id = int(question.get("knowledge_id"))
+        except (TypeError, ValueError):
+            continue
+        if knowledge_id > 0:
+            knowledge_ids.add(knowledge_id)
+    if not knowledge_ids:
+        return False
+
+    placeholders = ", ".join("?" for _ in knowledge_ids)
+    query = f"""
+        SELECT
+            COUNT(DISTINCT card.id) AS owned_count,
+            COALESCE(SUM(CASE WHEN course.status = 'archived' THEN 1 ELSE 0 END), 0)
+                AS archived_count
+        FROM knowledge_cards AS card
+        LEFT JOIN courses AS course
+          ON course.id = card.course_id
+         AND course.user_id = card.user_id
+        WHERE card.user_id = ? AND card.id IN ({placeholders})
+    """
+    params = (int(user_id), *sorted(knowledge_ids))
+    row = (
+        conn.execute(query, params).fetchone()
+        if conn is not None
+        else fetch_one(query, params)
+    )
+    if not row:
+        return True
+    return (
+        int(row["owned_count"] or 0) != len(knowledge_ids)
+        or int(row["archived_count"] or 0) > 0
+    )
+
+
 def evaluation_payload(plan_row: dict[str, Any]) -> dict[str, Any] | None:
     text = plan_row.get("evaluation_json") or ""
     if not text.strip():
@@ -255,6 +342,19 @@ def answers_payload(plan_row: dict[str, Any]) -> dict[str, str]:
     text = plan_row.get("answers_json") or "{}"
     data = json.loads(text)
     return {str(key): str(value) for key, value in data.items()} if isinstance(data, dict) else {}
+
+
+def _review_plan_version_matches(
+    stored_row: dict[str, Any],
+    *,
+    expected_plan_json: str,
+    expected_source_snapshot_json: str,
+) -> bool:
+    return (
+        str(stored_row.get("plan_json") or "") == expected_plan_json
+        and str(stored_row.get("source_snapshot_json") or "")
+        == expected_source_snapshot_json
+    )
 
 
 def daily_review_question_markdown(question: dict[str, Any], index: int) -> str:
@@ -463,30 +563,71 @@ def _apply_evaluation_results(
     answers: dict[str, str] | None = None,
     plan_id: int | None = None,
     user_id: int | None = None,
+    expected_plan_json: str | None = None,
+    expected_source_snapshot_json: str | None = None,
 ) -> list[dict[str, Any]] | None:
     user_id = user_id if user_id is not None else require_login().id
     answers = answers or {}
-    grouped: dict[int, list[dict[str, Any]]] = {}
-    for item in evaluation.get("evaluations", []):
-        grouped.setdefault(int(item["knowledge_id"]), []).append(item)
 
     updates: list[dict[str, Any]] = []
     with write_transaction() as conn:
         if plan_id is None:
             plan_row = conn.execute(
-                "SELECT id, status, source_snapshot_json FROM daily_ai_review_plans WHERE user_id = ? AND review_date = ?",
+                """
+                SELECT id, status, plan_json, source_snapshot_json
+                FROM daily_ai_review_plans
+                WHERE user_id = ? AND review_date = ?
+                """,
                 (user_id, date.today().isoformat()),
             ).fetchone()
         else:
             plan_row = conn.execute(
-                "SELECT id, status, source_snapshot_json FROM daily_ai_review_plans WHERE id = ? AND user_id = ?",
+                """
+                SELECT id, status, plan_json, source_snapshot_json
+                FROM daily_ai_review_plans
+                WHERE id = ? AND user_id = ?
+                """,
                 (int(plan_id), user_id),
             ).fetchone()
         if not plan_row or str(plan_row["status"] or "") == "已批改":
             return None
+        current_row = dict(plan_row)
+        if (
+            expected_plan_json is not None
+            and expected_source_snapshot_json is not None
+            and not _review_plan_version_matches(
+                current_row,
+                expected_plan_json=expected_plan_json,
+                expected_source_snapshot_json=expected_source_snapshot_json,
+            )
+        ):
+            raise ValueError("当天自测计划已更新，请刷新页面后重新作答。")
+        try:
+            current_plan = json.loads(current_row.get("plan_json") or "{}")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("当天自测计划已更新，请刷新页面后重新作答。") from exc
+        if not isinstance(current_plan, dict) or current_plan != plan:
+            raise ValueError("当天自测计划已更新，请刷新页面后重新作答。")
+        if _plan_references_archived_or_missing_cards(
+            user_id,
+            current_plan,
+            conn=conn,
+        ):
+            raise ValueError("该自测计划包含已归档课程内容，请刷新后重新生成当天计划。")
 
-        source_items = json.loads((dict(plan_row).get("source_snapshot_json") or "[]"))
+        source_items = json.loads((current_row.get("source_snapshot_json") or "[]"))
         source_by_knowledge_id = {int(item["knowledge_id"]): item for item in source_items}
+        allowed_questions = {
+            (str(item.get("question_id") or ""), int(item["knowledge_id"]))
+            for item in current_plan.get("questions", [])
+            if isinstance(item, dict) and item.get("knowledge_id") is not None
+        }
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for item in evaluation.get("evaluations", []):
+            pair = (str(item.get("question_id") or ""), int(item["knowledge_id"]))
+            if pair not in allowed_questions:
+                raise ValueError("批改结果与当天自测计划不一致，请刷新页面后重试。")
+            grouped.setdefault(pair[1], []).append(item)
 
         for knowledge_id, items in grouped.items():
             avg_score = round(sum(int(item["score"]) for item in items) / len(items))
@@ -526,7 +667,7 @@ def _apply_evaluation_results(
             updates.append(
                 {
                     "knowledge_id": knowledge_id,
-                    "topic": source.get("topic") or _topic_for_plan(plan, knowledge_id),
+                    "topic": source.get("topic") or _topic_for_plan(current_plan, knowledge_id),
                     "score": avg_score,
                     "result": result,
                     "mastery_before": before,
@@ -542,12 +683,15 @@ def _apply_evaluation_results(
                 status = '已批改',
                 evaluated_at = datetime('now', 'localtime')
             WHERE id = ? AND user_id = ? AND status != '已批改'
+              AND plan_json = ? AND source_snapshot_json = ?
             """,
             (
                 json.dumps(answers, ensure_ascii=False),
                 json.dumps(evaluation, ensure_ascii=False),
                 int(plan_row["id"]),
                 user_id,
+                current_row.get("plan_json") or "",
+                current_row.get("source_snapshot_json") or "",
             ),
         )
         if updated.rowcount != 1:

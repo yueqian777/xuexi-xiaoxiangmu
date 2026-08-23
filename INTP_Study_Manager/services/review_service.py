@@ -104,7 +104,7 @@ def get_review_tasks(
     params: tuple = (),
     *,
     user_id: int | None = None,
-    include_archived: bool = True,
+    include_archived: bool = False,
 ) -> list[dict]:
     user_id = user_id if user_id is not None else require_login().id
     base_where = "WHERE rt.user_id = ?"
@@ -150,7 +150,7 @@ def get_review_tasks(
 def get_today_review_tasks(
     *,
     user_id: int | None = None,
-    include_archived: bool = True,
+    include_archived: bool = False,
 ) -> list[dict]:
     today = date.today().isoformat()
     return get_review_tasks(
@@ -164,7 +164,7 @@ def get_today_review_tasks(
 def get_all_pending_review_tasks(
     *,
     user_id: int | None = None,
-    include_archived: bool = True,
+    include_archived: bool = False,
 ) -> list[dict]:
     return get_review_tasks(
         "WHERE rt.status = '待复习'",

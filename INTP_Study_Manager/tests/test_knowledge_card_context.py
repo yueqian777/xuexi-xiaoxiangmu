@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import db
+from pages import knowledge_cards as knowledge_cards_page
 from services.course_service import archive_course, create_course
 from services.knowledge_card_service import (
     knowledge_card_preview_markdown,
@@ -146,6 +147,45 @@ class KnowledgeCardContextTest(unittest.TestCase):
         rendered = knowledge_card_preview_markdown(session_card)
         self.assertIn("页码范围", rendered)
         self.assertIn("第 31-32 页", rendered)
+
+    def test_archived_linked_cards_require_the_same_explicit_opt_in(self) -> None:
+        active = create_course(self.user_id, "当前知识")
+        archived = create_course(self.user_id, "历史知识")
+        active_card_id = self._insert_simple_card(
+            self.user_id,
+            active["id"],
+            "当前卡",
+        )
+        archived_card_id = self._insert_simple_card(
+            self.user_id,
+            archived["id"],
+            "历史卡",
+        )
+        db.insert_and_get_id(
+            """
+            INSERT INTO knowledge_links (
+                user_id, source_knowledge_id, target_knowledge_id, relation_type
+            ) VALUES (?, ?, ?, '前置知识')
+            """,
+            (self.user_id, active_card_id, archived_card_id),
+        )
+        archive_course(self.user_id, archived["id"])
+
+        current_links = knowledge_cards_page._knowledge_links_for_card(
+            self.user_id,
+            active_card_id,
+            direction="outgoing",
+            include_archived=False,
+        )
+        all_links = knowledge_cards_page._knowledge_links_for_card(
+            self.user_id,
+            active_card_id,
+            direction="outgoing",
+            include_archived=True,
+        )
+
+        self.assertEqual(current_links, [])
+        self.assertEqual([row["linked_id"] for row in all_links], [archived_card_id])
 
     @staticmethod
     def _insert_simple_card(user_id: int, course_id: int, topic: str) -> int:

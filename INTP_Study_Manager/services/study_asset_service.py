@@ -5,10 +5,10 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from db import managed_connection
+from db import write_transaction
 from models import REVIEW_INTERVALS
+from repositories.course_repository import fetch_active_course_for_deck
 from services.auth_service import require_login
-from services.course_service import ensure_course_for_subject
 
 
 def parse_study_assets(raw_text: str) -> dict[str, Any]:
@@ -36,6 +36,7 @@ def parse_study_assets(raw_text: str) -> dict[str, Any]:
 def save_study_assets(
     assets: dict[str, Any],
     *,
+    source_deck_id: int,
     fallback_subject: str,
     fallback_chapter: str,
 ) -> tuple[int, list[int]]:
@@ -48,8 +49,15 @@ def save_study_assets(
 
     knowledge_ids: list[int] = []
     review_rows: list[tuple[int, int, str, str]] = []
-    with managed_connection() as conn:
-        course_id = ensure_course_for_subject(user.id, subject, conn=conn)
+    with write_transaction() as conn:
+        source_course = fetch_active_course_for_deck(
+            conn,
+            int(user.id),
+            int(source_deck_id),
+        )
+        if source_course is None:
+            raise ValueError("当前资料所属课程不是进行中状态；请先在课程中心重新激活。")
+        course_id = int(source_course["id"])
         cursor = conn.execute(
             """
             INSERT INTO study_sessions (

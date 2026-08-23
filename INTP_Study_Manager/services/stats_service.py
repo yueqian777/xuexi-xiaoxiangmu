@@ -8,7 +8,7 @@ def low_mastery_cards(
     limit: int = 10,
     *,
     user_id: int | None = None,
-    include_archived: bool = True,
+    include_archived: bool = False,
 ) -> list[dict]:
     user_id = user_id if user_id is not None else require_login().id
     archive_clause = "" if include_archived else "AND COALESCE(course.status, 'active') <> 'archived'"
@@ -28,14 +28,25 @@ def low_mastery_cards(
     )
 
 
-def recent_blockers(limit: int = 8, *, user_id: int | None = None) -> list[dict]:
+def recent_blockers(
+    limit: int = 8,
+    *,
+    user_id: int | None = None,
+    include_archived: bool = False,
+) -> list[dict]:
     user_id = user_id if user_id is not None else require_login().id
+    archive_clause = "" if include_archived else "AND COALESCE(course.status, 'active') <> 'archived'"
     return fetch_all(
-        """
-        SELECT id, date, subject, title, blockers, mastery
-        FROM study_sessions
-        WHERE user_id = ? AND TRIM(blockers) != ''
-        ORDER BY date DESC, id DESC
+        f"""
+        SELECT session.id, session.date, session.subject, session.title,
+               session.blockers, session.mastery
+        FROM study_sessions AS session
+        LEFT JOIN courses AS course
+          ON course.id = session.course_id
+         AND course.user_id = session.user_id
+        WHERE session.user_id = ? AND TRIM(session.blockers) != ''
+          {archive_clause}
+        ORDER BY session.date DESC, session.id DESC
         LIMIT ?
         """,
         (user_id, limit),
@@ -56,10 +67,19 @@ def open_parking_questions(limit: int = 10, *, user_id: int | None = None) -> li
     )
 
 
-def recent_knowledge_links(limit: int = 8, *, user_id: int | None = None) -> list[dict]:
+def recent_knowledge_links(
+    limit: int = 8,
+    *,
+    user_id: int | None = None,
+    include_archived: bool = False,
+) -> list[dict]:
     user_id = user_id if user_id is not None else require_login().id
+    archive_clause = "" if include_archived else """
+        AND COALESCE(source_course.status, 'active') <> 'archived'
+        AND COALESCE(target_course.status, 'active') <> 'archived'
+    """
     return fetch_all(
-        """
+        f"""
         SELECT
             kl.relation_type,
             kl.relation_note,
@@ -72,7 +92,14 @@ def recent_knowledge_links(limit: int = 8, *, user_id: int | None = None) -> lis
         FROM knowledge_links kl
         JOIN knowledge_cards source ON source.id = kl.source_knowledge_id AND source.user_id = kl.user_id
         JOIN knowledge_cards target ON target.id = kl.target_knowledge_id AND target.user_id = kl.user_id
+        LEFT JOIN courses source_course
+          ON source_course.id = source.course_id
+         AND source_course.user_id = source.user_id
+        LEFT JOIN courses target_course
+          ON target_course.id = target.course_id
+         AND target_course.user_id = target.user_id
         WHERE kl.user_id = ?
+          {archive_clause}
         ORDER BY kl.created_at DESC, kl.id DESC
         LIMIT ?
         """,

@@ -52,6 +52,42 @@ class PptManagementTest(unittest.TestCase):
         self.assertEqual(result[1]["question_kind"], "child")
         self.assertEqual(result[1]["question_preview"], "子问题")
 
+    def test_fetch_questions_normalizes_legacy_and_flag_derived_statuses(self):
+        rows = [
+            {
+                "id": 1,
+                "question": "legacy understood",
+                "answer": "answer",
+                "status": "understood",
+                "understood": 1,
+                "converted_to_knowledge": 0,
+            },
+            {
+                "id": 2,
+                "question": "converted",
+                "answer": "answer",
+                "status": "未整理",
+                "understood": 0,
+                "converted_to_knowledge": 1,
+            },
+            {
+                "id": 3,
+                "question": "legacy open",
+                "answer": "answer",
+                "status": "未整理",
+                "understood": 0,
+                "converted_to_knowledge": 0,
+            },
+        ]
+        with patch.object(ppt_management, "fetch_all", return_value=rows):
+            result = ppt_management._fetch_questions(11, 3)
+
+        self.assertEqual(
+            [row["status"] for row in result],
+            ["已掌握", "已转知识卡", "未解决"],
+        )
+        self.assertTrue(all(row["status"] in ppt_management.QUESTION_STATUSES for row in result))
+
     def test_question_row_style_distinguishes_root_and_child_without_level_label(self):
         root_style = ppt_management._question_row_style({"question_kind": "root", "id": 1})
         child_style = ppt_management._question_row_style({"question_kind": "child", "id": 2})

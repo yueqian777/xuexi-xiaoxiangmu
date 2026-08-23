@@ -114,12 +114,23 @@ def update_study_session_record(
     clean_subject = _required_subject(subject)
     with write_transaction() as conn:
         owned = conn.execute(
-            "SELECT id FROM study_sessions WHERE user_id = ? AND id = ?",
+            """
+            SELECT session.id, session.subject,
+                   owned_course.id AS owned_course_id
+            FROM study_sessions AS session
+            LEFT JOIN courses AS owned_course
+              ON owned_course.id = session.course_id
+             AND owned_course.user_id = session.user_id
+            WHERE session.user_id = ? AND session.id = ?
+            """,
             (owner_id, record_id),
         ).fetchone()
         if not owned:
             return False
-        course_id = ensure_course_for_subject(owner_id, clean_subject, conn=conn)
+        original_subject = _text(owned["subject"])
+        course_id = owned["owned_course_id"]
+        if clean_subject != original_subject or not course_id:
+            course_id = ensure_course_for_subject(owner_id, clean_subject, conn=conn)
         cursor = conn.execute(
             """
             UPDATE study_sessions
@@ -145,6 +156,17 @@ def update_study_session_record(
                 record_id,
                 owner_id,
             ),
+        )
+        conn.execute(
+            """
+            UPDATE knowledge_cards
+            SET course_id = ?
+            WHERE user_id = ? AND source_session_id = ?
+              AND source_deck_id IS NULL
+              AND source_slide_id IS NULL
+              AND source_question_id IS NULL
+            """,
+            (course_id, owner_id, record_id),
         )
         return int(cursor.rowcount or 0) == 1
 
@@ -176,6 +198,9 @@ def create_knowledge_card_record(
                 raise ValueError("关联学习记录不存在。")
             owned_source_session_id = int(source["id"])
             owned_course_id = source.get("owned_course_id")
+            owned_course_status = _text(source.get("owned_course_status"))
+            if owned_course_id and owned_course_status != "active":
+                raise ValueError("历史课程需先重新激活，才能从该学习记录新增知识卡。")
         course_id = owned_course_id or ensure_course_for_subject(
             owner_id,
             clean_subject,
@@ -237,7 +262,9 @@ def update_knowledge_card_record(
                 kc.*,
                 owned_card_course.id AS owned_card_course_id,
                 source_session_course.id AS source_session_course_id,
-                source_deck_course.id AS source_deck_course_id
+                source_deck_course.id AS source_deck_course_id,
+                source_slide_course.id AS source_slide_course_id,
+                source_question_course.id AS source_question_course_id
             FROM knowledge_cards kc
             LEFT JOIN courses owned_card_course
               ON owned_card_course.id = kc.course_id
@@ -254,6 +281,27 @@ def update_knowledge_card_record(
             LEFT JOIN courses source_deck_course
               ON source_deck_course.id = source_deck.course_id
              AND source_deck_course.user_id = kc.user_id
+            LEFT JOIN ppt_slides source_slide
+              ON source_slide.id = kc.source_slide_id
+             AND source_slide.user_id = kc.user_id
+            LEFT JOIN ppt_decks source_slide_deck
+              ON source_slide_deck.id = source_slide.deck_id
+             AND source_slide_deck.user_id = kc.user_id
+            LEFT JOIN courses source_slide_course
+              ON source_slide_course.id = source_slide_deck.course_id
+             AND source_slide_course.user_id = kc.user_id
+            LEFT JOIN slide_questions source_question
+              ON source_question.id = kc.source_question_id
+             AND source_question.user_id = kc.user_id
+            LEFT JOIN ppt_slides source_question_slide
+              ON source_question_slide.id = source_question.slide_id
+             AND source_question_slide.user_id = kc.user_id
+            LEFT JOIN ppt_decks source_question_deck
+              ON source_question_deck.id = source_question_slide.deck_id
+             AND source_question_deck.user_id = kc.user_id
+            LEFT JOIN courses source_question_course
+              ON source_question_course.id = source_question_deck.course_id
+             AND source_question_course.user_id = kc.user_id
             WHERE kc.user_id = ? AND kc.id = ?
             """,
             (owner_id, card_id),
@@ -261,10 +309,17 @@ def update_knowledge_card_record(
         if not card_row:
             return False
         card = dict(card_row)
-        has_source = bool(card.get("source_deck_id") or card.get("source_session_id"))
+        has_source = bool(
+            card.get("source_deck_id")
+            or card.get("source_slide_id")
+            or card.get("source_question_id")
+            or card.get("source_session_id")
+        )
         if has_source:
             course_id = (
                 card.get("source_deck_course_id")
+                or card.get("source_slide_course_id")
+                or card.get("source_question_course_id")
                 or card.get("source_session_course_id")
                 or card.get("owned_card_course_id")
             )
@@ -374,7 +429,7 @@ def convert_parking_question_to_card(
 def _owned_source_session(conn, user_id: int, session_id: int) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT s.id, c.id AS owned_course_id
+        SELECT s.id, c.id AS owned_course_id, c.status AS owned_course_status
         FROM study_sessions s
         LEFT JOIN courses c
           ON c.id = s.course_id

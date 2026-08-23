@@ -94,19 +94,29 @@ def render() -> None:
     with edit_right:
         _render_recall_panel(card)
 
-    _render_knowledge_links(user.id, card, cards)
+    _render_knowledge_links(
+        user.id,
+        card,
+        cards,
+        include_archived=include_archived,
+    )
 
 
 def _list_source_sessions(user_id: int, *, include_archived: bool) -> list[dict]:
-    archive_filter = "" if include_archived else "AND COALESCE(c.status, 'active') <> 'archived'"
+    # The archive toggle controls browsing existing cards. Creating a new card
+    # is a learning write, so terminal-course sessions stay out of this picker
+    # until their course is explicitly reactivated.
+    _ = include_archived
     return fetch_all(
-        f"""
-        SELECT s.id, s.date, s.subject, s.title, c.id AS owned_course_id
+        """
+        SELECT s.id, s.date, s.subject, s.title,
+               c.id AS owned_course_id, c.status AS owned_course_status
         FROM study_sessions s
         LEFT JOIN courses c
           ON c.id = s.course_id
          AND c.user_id = s.user_id
-        WHERE s.user_id = ? {archive_filter}
+        WHERE s.user_id = ?
+          AND (c.id IS NULL OR c.status = 'active')
         ORDER BY s.date DESC, s.id DESC
         """,
         (int(user_id),),
@@ -124,17 +134,27 @@ def _render_create_form(user_id: int, sessions: list[dict], session_options: lis
         one_sentence = st.text_area("一句话解释")
         logic_or_formula = st.text_area("公式 / 逻辑推导")
         application = st.text_area("典型题 / 应用场景")
-        need_review = st.checkbox("创建 1-3-7-14 复习任务", value=True)
+        need_review = st.checkbox(
+            "创建 1-3-7-14 复习任务",
+            value=True,
+            disabled=True,
+            help="新知识卡必须进入复习闭环；掌握后可在复习流程中完成任务。",
+        )
         source_session_id = st.selectbox(
-            "关联学习记录（可选）",
+            "关联学习记录（可选；未选择时仍保留课程来源）",
             session_options,
             format_func=lambda item: "不关联" if item is None else _session_label(sessions, item),
         )
         submitted = st.form_submit_button("保存知识点卡片")
 
     if submitted:
-        if not subject.strip() or not topic.strip() or not one_sentence.strip():
-            st.error("科目、知识点、一句话解释不能为空。")
+        if (
+            not subject.strip()
+            or not topic.strip()
+            or not core_question.strip()
+            or not one_sentence.strip()
+        ):
+            st.error("科目、知识点、核心问题、一句话解释不能为空。")
         else:
             knowledge_id = create_knowledge_card_record(
                 user_id,
@@ -222,8 +242,13 @@ def _render_edit_form(user_id: int, card: dict) -> None:
         edit_need_review = st.checkbox("需要复习", value=bool(card["need_review"]))
         update_submitted = st.form_submit_button("更新知识点")
     if update_submitted:
-        if not edit_subject.strip():
-            st.error("科目不能为空。")
+        if (
+            not edit_subject.strip()
+            or not edit_topic.strip()
+            or not edit_question.strip()
+            or not edit_one.strip()
+        ):
+            st.error("科目、知识点、核心问题、一句话解释不能为空。")
         else:
             update_knowledge_card_record(
                 user_id,
@@ -319,7 +344,13 @@ def _session_label(sessions: list[dict], session_id: int) -> str:
     return f"{session['date']} · {session['subject']} · {session['title']}"
 
 
-def _render_knowledge_links(user_id: int, card: dict, cards: list[dict]) -> None:
+def _render_knowledge_links(
+    user_id: int,
+    card: dict,
+    cards: list[dict],
+    *,
+    include_archived: bool,
+) -> None:
     selected_id = int(card["id"])
     candidates = [item for item in cards if int(item["id"]) != selected_id]
 
@@ -396,8 +427,18 @@ def _render_knowledge_links(user_id: int, card: dict, cards: list[dict]) -> None
     else:
         st.info("至少需要两张知识卡片，才能建立知识双链。")
 
-    outgoing = _knowledge_links_for_card(user_id, selected_id, direction="outgoing")
-    incoming = _knowledge_links_for_card(user_id, selected_id, direction="incoming")
+    outgoing = _knowledge_links_for_card(
+        user_id,
+        selected_id,
+        direction="outgoing",
+        include_archived=include_archived,
+    )
+    incoming = _knowledge_links_for_card(
+        user_id,
+        selected_id,
+        direction="incoming",
+        include_archived=include_archived,
+    )
 
     left, right = st.columns(2)
     with left:
@@ -408,10 +449,17 @@ def _render_knowledge_links(user_id: int, card: dict, cards: list[dict]) -> None
         _render_link_list(user_id, incoming, direction="incoming")
 
 
-def _knowledge_links_for_card(user_id: int, card_id: int, *, direction: str) -> list[dict]:
+def _knowledge_links_for_card(
+    user_id: int,
+    card_id: int,
+    *,
+    direction: str,
+    include_archived: bool = True,
+) -> list[dict]:
+    archive_clause = "" if include_archived else "AND COALESCE(course.status, 'active') <> 'archived'"
     if direction == "outgoing":
         return fetch_all(
-            """
+            f"""
             SELECT
                 kl.id,
                 kl.relation_type,
@@ -425,14 +473,16 @@ def _knowledge_links_for_card(user_id: int, card_id: int, *, direction: str) -> 
                 kc.mastery AS linked_mastery
             FROM knowledge_links kl
             JOIN knowledge_cards kc ON kc.id = kl.target_knowledge_id AND kc.user_id = kl.user_id
+            LEFT JOIN courses course ON course.id = kc.course_id AND course.user_id = kc.user_id
             WHERE kl.user_id = ? AND kl.source_knowledge_id = ?
+              {archive_clause}
             ORDER BY kl.created_at DESC, kl.id DESC
             """,
             (user_id, card_id),
         )
 
     return fetch_all(
-        """
+        f"""
         SELECT
             kl.id,
             kl.relation_type,
@@ -446,7 +496,9 @@ def _knowledge_links_for_card(user_id: int, card_id: int, *, direction: str) -> 
             kc.mastery AS linked_mastery
         FROM knowledge_links kl
         JOIN knowledge_cards kc ON kc.id = kl.source_knowledge_id AND kc.user_id = kl.user_id
+        LEFT JOIN courses course ON course.id = kc.course_id AND course.user_id = kc.user_id
         WHERE kl.user_id = ? AND kl.target_knowledge_id = ?
+          {archive_clause}
         ORDER BY kl.created_at DESC, kl.id DESC
         """,
         (user_id, card_id),

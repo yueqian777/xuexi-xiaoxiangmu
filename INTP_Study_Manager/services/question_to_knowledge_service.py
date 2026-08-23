@@ -41,7 +41,8 @@ def convert_question_to_knowledge(
                 ps.slide_text,
                 d.subject AS deck_subject,
                 d.title AS deck_title,
-                owned_course.id AS deck_course_id
+                owned_course.id AS deck_course_id,
+                owned_course.status AS deck_course_status
             FROM slide_questions sq
             LEFT JOIN ppt_slides ps ON ps.id = sq.slide_id AND ps.user_id = sq.user_id
             LEFT JOIN ppt_decks d ON d.id = ps.deck_id AND d.user_id = sq.user_id
@@ -59,6 +60,11 @@ def convert_question_to_knowledge(
         if current_card:
             knowledge_id = int(current_card["id"])
         else:
+            deck_course_status = str(
+                question_row.get("deck_course_status") or ""
+            ).strip()
+            if deck_course_status and deck_course_status != "active":
+                raise ValueError("历史课程需先重新激活，才能把插问转为新的知识卡。")
             conn.execute(
                 """
                 UPDATE slide_questions
@@ -108,7 +114,10 @@ def convert_question_to_knowledge(
         conn.execute(
             """
             UPDATE slide_questions
-            SET knowledge_id = ?, converted_to_knowledge = 1, need_review = ?
+            SET knowledge_id = ?,
+                converted_to_knowledge = 1,
+                need_review = ?,
+                status = CASE WHEN understood = 1 THEN '已掌握' ELSE '已转知识卡' END
             WHERE user_id = ? AND id = ?
             """,
             (knowledge_id, int(need_review), user_id_int, question_id_int),
@@ -140,7 +149,7 @@ def mark_question_understood(user_id: int, question_id: int) -> bool:
             SET understood = 1, status = ?
             WHERE user_id = ? AND id = ?
             """,
-            ("understood", int(user_id), int(question_id)),
+            ("已掌握", int(user_id), int(question_id)),
         )
         return int(cursor.rowcount or 0) > 0
 

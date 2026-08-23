@@ -210,6 +210,31 @@ def create_slide_question_tree_node(
     clean_quote_source = str(quote_source or "slide").strip() or "slide"
 
     with write_transaction() as conn:
+        slide_course = conn.execute(
+            """
+            SELECT slide.id, course.status AS course_status
+            FROM ppt_slides AS slide
+            LEFT JOIN ppt_decks AS deck
+              ON deck.id = slide.deck_id
+             AND deck.user_id = slide.user_id
+            LEFT JOIN courses AS course
+              ON course.id = deck.course_id
+             AND course.user_id = slide.user_id
+            WHERE slide.user_id = ? AND slide.id = ?
+            """,
+            (user_id_int, slide_id_int),
+        ).fetchone()
+        if slide_course is None:
+            raise ValueError("幻灯片不存在或不属于当前用户。")
+        try:
+            raw_course_status = slide_course["course_status"]
+        except (KeyError, IndexError):
+            # Lightweight repository unit doubles predate the lifecycle join;
+            # real SQLite rows always expose the selected alias.
+            raw_course_status = ""
+        course_status = str(raw_course_status or "").strip()
+        if course_status and course_status != "active":
+            raise ValueError("历史课程需先重新激活，才能继续新增插问。")
         if parent_id is not None:
             parent = _fetch_slide_question_for_update(conn, user_id_int, parent_id)
             if not parent or int(parent["slide_id"]) != slide_id_int:
@@ -227,6 +252,17 @@ def create_slide_question_tree_node(
                     """,
                     (root_id, user_id_int, parent_id),
                 )
+            conn.execute(
+                """
+                UPDATE slide_questions
+                SET status = CASE
+                    WHEN status IN ('未整理', '未解决', '待追问') THEN '理解中'
+                    ELSE status
+                END
+                WHERE user_id = ? AND id = ?
+                """,
+                (user_id_int, parent_id),
+            )
             question_depth = parent_depth + 1
         else:
             root_id = None

@@ -284,9 +284,9 @@ def render() -> None:
     current_location = _current_learning_location(user.id, current_course)
     today_tasks = get_today_review_tasks(user_id=user.id, include_archived=False)
     low_cards = low_mastery_cards(user_id=user.id, include_archived=False)
-    blockers = recent_blockers(user_id=user.id)
+    blockers = recent_blockers(user_id=user.id, include_archived=False)
     parking = open_parking_questions(user_id=user.id)
-    links = recent_knowledge_links(user_id=user.id)
+    links = recent_knowledge_links(user_id=user.id, include_archived=False)
     reminder_config = get_daily_reminder_config()
     review_log = get_today_review_log(user_id=user.id)
 

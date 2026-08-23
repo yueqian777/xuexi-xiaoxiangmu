@@ -201,7 +201,7 @@ def _fetch_reader_decks(
     try:
         return fetch_all(
             f"""
-            SELECT d.*
+            SELECT d.*, c.status AS course_status
             FROM ppt_decks d
             LEFT JOIN courses c
               ON c.id = d.course_id
@@ -1526,11 +1526,17 @@ def _render_synced_reader(
         st.caption("请确认项目里的 components/synced_reader/index.html 存在，然后重启 Streamlit。")
         return
 
+    course_status = str(deck.get("course_status") or "").strip()
+    learning_writable = not course_status or course_status == "active"
+    if not learning_writable:
+        st.info("当前为历史课程阅读模式；浏览与复习数据保留，新增插问或知识卡前请先在课程中心重新激活。")
+
     component_payload = synced_reader_component(
         deck_id=int(deck["id"]),
         title=deck.get("title") or "学习资料",
         subject=deck.get("subject") or "未分类",
         active_model=_active_model_label(user_id=user_id),
+        learning_writable=learning_writable,
         pages=payload,
         sections=_reader_sections_payload(sections),
         initial_slide_number=active_slide_number,
@@ -1572,6 +1578,15 @@ def _handle_synced_reader_action(
     except (TypeError, ValueError):
         return
     if query_deck_id != int(deck["id"]):
+        return
+
+    course_status = str(deck.get("course_status") or "").strip()
+    if (
+        course_status
+        and course_status != "active"
+        and action in {"canvas_question", "convert_question_to_knowledge"}
+    ):
+        st.warning("历史课程需先在课程中心重新激活，才能新增插问或知识卡。")
         return
 
     slide = next((item for item in slides if int(item["slide_number"]) == slide_number), None)
@@ -1981,6 +1996,9 @@ def _render_study_asset_generator_inner(
     latest_by_slide_id: dict[int, dict],
 ) -> None:
     st.caption("根据当前资料的目录块、手动选择的今日学习页码范围和已生成讲解，调用当前 API 生成草稿；确认后写入学习登记、知识点卡片和 1-3-7-14 复习计划。")
+    if not _study_asset_learning_writable(deck):
+        st.info("历史课程资料仅供回顾；请先在课程中心重新激活课程，再生成新的学习沉淀。")
+        return
 
     user = require_login()
     slides_with_explanations = _slides_with_latest_explanations(slides, latest_by_slide_id)
@@ -2085,6 +2103,7 @@ def _render_study_asset_generator_inner(
             try:
                 session_id, knowledge_ids = save_study_assets(
                     draft,
+                    source_deck_id=int(deck["id"]),
                     fallback_subject=deck.get("subject") or "未分类",
                     fallback_chapter=deck.get("title") or "",
                 )
@@ -2110,6 +2129,10 @@ def _render_study_asset_generator_inner(
             st.session_state.pop(meta_key, None)
             st.session_state.pop(task_key, None)
             st.rerun()
+
+
+def _study_asset_learning_writable(deck: dict) -> bool:
+    return bool(deck.get("course_id")) and str(deck.get("course_status") or "").strip() == "active"
 
 
 def _render_study_asset_draft_preview(draft: dict) -> None:
@@ -4999,9 +5022,12 @@ def _question_learning_status(row: dict) -> str:
         return "已掌握"
     if bool(row.get("converted_to_knowledge")) or row.get("knowledge_id"):
         return "已转知识卡"
-    if bool(row.get("need_review")):
-        return "待复习"
-    return str(row.get("status") or "未整理")
+    status = str(row.get("status") or "").strip()
+    if status in {"理解中", "待追问"} or bool(row.get("need_review")):
+        return "理解中"
+    if status in {"已掌握", "已解决", "understood"}:
+        return "已掌握"
+    return "未解决"
 
 
 def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:

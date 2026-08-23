@@ -673,8 +673,9 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
 def _migrate_course_schema(conn: sqlite3.Connection) -> None:
     """Create and gently extend the course lifecycle schema.
 
-    Existing subject-based rows are associated with a course only when their
-    ``course_id`` is empty.  In particular, this migration never reuses or
+    Existing subject-based rows are associated with an owned course when their
+    link is empty, dangling, or cross-user. Knowledge-card provenance takes
+    precedence over its display subject. In particular, this migration never
     changes ``ppt_decks.status`` because that column describes deck management,
     not the course lifecycle.
     """
@@ -728,6 +729,15 @@ def _migrate_course_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    # Keep name normalization, duplicate reconciliation, content backfill, and
+    # the active-course uniqueness guard in one writer transaction.  The
+    # preceding executescript commits any pending transaction by design, so the
+    # explicit BEGIN must live after it.
+    conn.execute("BEGIN IMMEDIATE")
+    # Older versions of this migration used an ASCII-TRIM expression index.
+    # Drop it before Python's Unicode-aware normalization so a formerly
+    # distinct name such as ``\u3000课程\u3000`` can be reconciled safely.
+    conn.execute("DROP INDEX IF EXISTS idx_courses_user_active_name_unique")
 
     course_columns = _table_columns(conn, "courses")
     _ensure_column(conn, "courses", "user_id", "INTEGER NOT NULL DEFAULT 0")
@@ -758,6 +768,26 @@ def _migrate_course_schema(conn: sqlite3.Connection) -> None:
         WHERE TRIM(COALESCE(name, '')) = ''
         """
     )
+    python_legacy_name_columns = [
+        column
+        for column in ("subject", "course_name", "title")
+        if column in course_columns
+    ]
+    course_name_select = ", ".join(["id", "name", *python_legacy_name_columns])
+    for course_row in conn.execute(
+        f"SELECT {course_name_select} FROM courses"
+    ).fetchall():
+        candidates = [course_row["name"]]
+        candidates.extend(course_row[column] for column in python_legacy_name_columns)
+        normalized_name = next(
+            (str(candidate or "").strip() for candidate in candidates if str(candidate or "").strip()),
+            f"未命名课程 {int(course_row['id'])}",
+        )
+        if normalized_name != course_row["name"]:
+            conn.execute(
+                "UPDATE courses SET name = ? WHERE id = ?",
+                (normalized_name, int(course_row["id"])),
+            )
     conn.execute(
         """
         UPDATE courses
@@ -784,7 +814,6 @@ def _migrate_course_schema(conn: sqlite3.Connection) -> None:
         WHERE TRIM(COALESCE(updated_at, '')) = ''
         """
     )
-
     _ensure_column(conn, "course_learning_phases", "user_id", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "course_learning_phases", "course_id", "INTEGER")
     _ensure_column(conn, "course_learning_phases", "phase_number", "INTEGER NOT NULL DEFAULT 1")
@@ -793,6 +822,7 @@ def _migrate_course_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "course_learning_phases", "outcome", "TEXT DEFAULT ''")
     _ensure_column(conn, "course_learning_phases", "course_summary", "TEXT DEFAULT ''")
     _ensure_column(conn, "course_learning_phases", "created_at", "TEXT DEFAULT ''")
+    _backfill_course_terminal_timestamps(conn)
 
     summary_columns = _table_columns(conn, "course_summaries")
     _ensure_column(conn, "course_summaries", "user_id", "INTEGER NOT NULL DEFAULT 0")
@@ -844,89 +874,287 @@ def _migrate_course_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "study_sessions", "course_id", "INTEGER")
     _ensure_column(conn, "knowledge_cards", "course_id", "INTEGER")
 
-    _backfill_subject_courses(conn)
+    _repair_invalid_course_asset_links(conn)
     _backfill_course_child_user_scope(conn)
+    _normalize_duplicate_active_courses(conn)
+    _backfill_subject_courses(conn)
     _ensure_initial_course_phases(conn)
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_courses_user_active_name_unique
+        ON courses(user_id, TRIM(name))
+        WHERE status = 'active'
+        """
+    )
+
+
+def _backfill_course_terminal_timestamps(conn: sqlite3.Connection) -> None:
+    for status, localized_status, timestamp_column in (
+        ("completed", "已完成", "completed_at"),
+        ("archived", "已归档", "archived_at"),
+    ):
+        extra_fallback = (
+            "NULLIF(TRIM(course.completed_at), ''),"
+            if status == "archived"
+            else ""
+        )
+        conn.execute(
+            f"""
+            UPDATE courses AS course
+            SET {timestamp_column} = COALESCE(
+                NULLIF(TRIM({timestamp_column}), ''),
+                (
+                    SELECT MAX(NULLIF(TRIM(phase.ended_at), ''))
+                    FROM course_learning_phases AS phase
+                    WHERE phase.course_id = course.id
+                      AND TRIM(COALESCE(phase.outcome, '')) IN (?, ?)
+                ),
+                NULLIF(TRIM(course.updated_at), ''),
+                {extra_fallback}
+                NULLIF(TRIM(course.created_at), ''),
+                datetime('now', 'localtime')
+            )
+            WHERE course.status = ?
+              AND TRIM(COALESCE(course.{timestamp_column}, '')) = ''
+            """,
+            (status, localized_status, status),
+        )
 
 
 def _backfill_subject_courses(conn: sqlite3.Connection) -> None:
-    subjects = conn.execute(
-        """
-        SELECT DISTINCT user_id, name
-        FROM (
-            SELECT user_id, TRIM(COALESCE(subject, '')) AS name FROM ppt_decks
-            UNION ALL
-            SELECT user_id, TRIM(COALESCE(subject, '')) AS name FROM study_sessions
-            UNION ALL
-            SELECT user_id, TRIM(COALESCE(subject, '')) AS name FROM knowledge_cards
-        )
-        WHERE name != ''
-        ORDER BY user_id ASC, name ASC
-        """
-    ).fetchall()
-    for row in subjects:
-        user_id = int(row["user_id"] or 0)
-        name = str(row["name"] or "").strip()
-        course = conn.execute(
+    _backfill_subject_rows(conn, ("ppt_decks", "study_sessions"))
+    _backfill_knowledge_card_courses_from_sources(conn)
+    _backfill_subject_rows(conn, ("knowledge_cards",))
+
+
+def _backfill_subject_rows(
+    conn: sqlite3.Connection,
+    tables: tuple[str, ...],
+) -> None:
+    allowed_tables = {"ppt_decks", "study_sessions", "knowledge_cards"}
+    if not tables or any(table not in allowed_tables for table in tables):
+        raise ValueError("Unsupported course backfill table.")
+    course_cache: dict[tuple[int, str], int] = {}
+    for table in tables:
+        assets = conn.execute(
+            f"""
+            SELECT id, user_id, subject
+            FROM {table}
+            WHERE course_id IS NULL OR course_id <= 0
+            ORDER BY user_id ASC, id ASC
             """
-            SELECT id
-            FROM courses
-            WHERE user_id = ? AND TRIM(name) = ?
-            ORDER BY CASE status
-                         WHEN 'active' THEN 0
-                         WHEN 'completed' THEN 1
-                         ELSE 2
-                     END,
-                     id ASC
-            LIMIT 1
-            """,
-            (user_id, name),
-        ).fetchone()
-        if course:
-            course_id = int(course["id"])
-        else:
-            cursor = conn.execute(
-                """
-                INSERT INTO courses (user_id, name, status)
-                VALUES (?, ?, 'active')
-                """,
-                (user_id, name),
-            )
-            course_id = int(cursor.lastrowid)
-        for table in ("ppt_decks", "study_sessions", "knowledge_cards"):
+        ).fetchall()
+        for asset in assets:
+            user_id = int(asset["user_id"] or 0)
+            name = str(asset["subject"] or "").strip()
+            if not name:
+                continue
+            cache_key = (user_id, name)
+            course_id = course_cache.get(cache_key)
+            if course_id is None:
+                course = conn.execute(
+                    """
+                    SELECT id
+                    FROM courses
+                    WHERE user_id = ? AND name = ?
+                    ORDER BY CASE status
+                                 WHEN 'active' THEN 0
+                                 WHEN 'completed' THEN 1
+                                 ELSE 2
+                             END,
+                             COALESCE(updated_at, '') DESC,
+                             id DESC
+                    LIMIT 1
+                    """,
+                    (user_id, name),
+                ).fetchone()
+                if course:
+                    course_id = int(course["id"])
+                else:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO courses (user_id, name, status)
+                        VALUES (?, ?, 'active')
+                        """,
+                        (user_id, name),
+                    )
+                    course_id = int(cursor.lastrowid)
+                course_cache[cache_key] = course_id
             conn.execute(
                 f"""
                 UPDATE {table}
                 SET course_id = ?
-                WHERE user_id = ?
-                  AND TRIM(COALESCE(subject, '')) = ?
+                WHERE id = ? AND user_id = ?
                   AND (course_id IS NULL OR course_id <= 0)
                 """,
-                (course_id, user_id, name),
+                (course_id, int(asset["id"]), user_id),
             )
+
+
+def _repair_invalid_course_asset_links(conn: sqlite3.Connection) -> None:
+    for table in ("ppt_decks", "study_sessions", "knowledge_cards"):
+        conn.execute(
+            f"""
+            UPDATE {table} AS asset
+            SET course_id = NULL
+            WHERE course_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM courses AS course
+                  WHERE course.id = asset.course_id
+                    AND course.user_id = asset.user_id
+              )
+            """
+        )
+
+
+def _backfill_knowledge_card_courses_from_sources(conn: sqlite3.Connection) -> None:
+    canonical_course = """
+        COALESCE(
+            (
+                SELECT course.id
+                FROM ppt_decks AS deck
+                JOIN courses AS course
+                  ON course.id = deck.course_id
+                 AND course.user_id = deck.user_id
+                WHERE deck.id = card.source_deck_id
+                  AND deck.user_id = card.user_id
+                LIMIT 1
+            ),
+            (
+                SELECT course.id
+                FROM ppt_slides AS slide
+                JOIN ppt_decks AS deck
+                  ON deck.id = slide.deck_id
+                 AND deck.user_id = slide.user_id
+                JOIN courses AS course
+                  ON course.id = deck.course_id
+                 AND course.user_id = deck.user_id
+                WHERE slide.id = card.source_slide_id
+                  AND slide.user_id = card.user_id
+                LIMIT 1
+            ),
+            (
+                SELECT course.id
+                FROM slide_questions AS question
+                JOIN ppt_slides AS slide
+                  ON slide.id = question.slide_id
+                 AND slide.user_id = question.user_id
+                JOIN ppt_decks AS deck
+                  ON deck.id = slide.deck_id
+                 AND deck.user_id = slide.user_id
+                JOIN courses AS course
+                  ON course.id = deck.course_id
+                 AND course.user_id = deck.user_id
+                WHERE question.id = card.source_question_id
+                  AND question.user_id = card.user_id
+                LIMIT 1
+            ),
+            (
+                SELECT course.id
+                FROM study_sessions AS session
+                JOIN courses AS course
+                  ON course.id = session.course_id
+                 AND course.user_id = session.user_id
+                WHERE session.id = card.source_session_id
+                  AND session.user_id = card.user_id
+                LIMIT 1
+            )
+        )
+    """
+    conn.execute(
+        f"""
+        UPDATE knowledge_cards AS card
+        SET course_id = {canonical_course}
+        WHERE {canonical_course} IS NOT NULL
+          AND course_id IS NOT {canonical_course}
+        """
+    )
+
+
+def _normalize_duplicate_active_courses(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, user_id, TRIM(name) AS normalized_name, updated_at
+        FROM courses
+        WHERE status = 'active'
+        ORDER BY user_id ASC, TRIM(name) ASC,
+                 COALESCE(updated_at, '') DESC, id DESC
+        """
+    ).fetchall()
+    seen: set[tuple[int, str]] = set()
+    for row in rows:
+        key = (int(row["user_id"] or 0), str(row["normalized_name"] or ""))
+        if key not in seen:
+            seen.add(key)
+            continue
+        course_id = int(row["id"])
+        terminal_at = str(row["updated_at"] or "").strip()
+        conn.execute(
+            """
+            UPDATE courses
+            SET status = 'archived',
+                archived_at = COALESCE(
+                    NULLIF(TRIM(archived_at), ''),
+                    NULLIF(?, ''),
+                    datetime('now', 'localtime')
+                ),
+                updated_at = datetime('now', 'localtime')
+            WHERE id = ? AND user_id = ? AND status = 'active'
+            """,
+            (terminal_at, course_id, key[0]),
+        )
+        conn.execute(
+            """
+            UPDATE course_learning_phases
+            SET ended_at = COALESCE(
+                    NULLIF(TRIM(ended_at), ''),
+                    NULLIF(?, ''),
+                    datetime('now', 'localtime')
+                ),
+                outcome = 'archived'
+            WHERE course_id = ? AND user_id = ?
+              AND TRIM(COALESCE(ended_at, '')) = ''
+            """,
+            (terminal_at, course_id, key[0]),
+        )
 
 
 def _backfill_course_child_user_scope(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
-        UPDATE course_learning_phases
-        SET user_id = COALESCE(
-            (SELECT c.user_id FROM courses c WHERE c.id = course_learning_phases.course_id),
-            user_id,
-            0
+        UPDATE course_learning_phases AS phase
+        SET user_id = (
+            SELECT course.user_id
+            FROM courses AS course
+            WHERE course.id = phase.course_id
         )
-        WHERE COALESCE(user_id, 0) = 0
+        WHERE EXISTS (
+            SELECT 1 FROM courses AS course WHERE course.id = phase.course_id
+        )
+          AND phase.user_id IS NOT (
+              SELECT course.user_id
+              FROM courses AS course
+              WHERE course.id = phase.course_id
+          )
         """
     )
     conn.execute(
         """
-        UPDATE course_summaries
-        SET user_id = COALESCE(
-            (SELECT c.user_id FROM courses c WHERE c.id = course_summaries.course_id),
-            user_id,
-            0
+        UPDATE course_summaries AS summary
+        SET user_id = (
+            SELECT course.user_id
+            FROM courses AS course
+            WHERE course.id = summary.course_id
         )
-        WHERE COALESCE(user_id, 0) = 0
+        WHERE EXISTS (
+            SELECT 1 FROM courses AS course WHERE course.id = summary.course_id
+        )
+          AND summary.user_id IS NOT (
+              SELECT course.user_id
+              FROM courses AS course
+              WHERE course.id = summary.course_id
+          )
         """
     )
 

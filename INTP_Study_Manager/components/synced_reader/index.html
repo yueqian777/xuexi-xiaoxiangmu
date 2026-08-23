@@ -1584,6 +1584,7 @@
     let sections = [];
     let deckId = 0;
     let activeModel = '';
+    let learningWritable = true;
     let observer = null;
     let currentSelectionPayload = null;
     let currentSlideNumber = 1;
@@ -4851,6 +4852,13 @@
       pages = nextPages;
       sections = incomingSections;
       activeModel = String(args.active_model || '');
+      learningWritable = args.learning_writable !== false;
+      canvasInput.disabled = !learningWritable;
+      canvasSendButton.disabled = !learningWritable;
+      askSelectionButton.disabled = !learningWritable;
+      canvasInput.placeholder = learningWritable
+        ? '直接问当前页，例如：这里为什么必须看 ROC？'
+        : '历史课程为只读；重新激活后可继续提问';
       const height = Number(args.height || 850);
       frame.style.height = `${Math.max(360, height - 15)}px`;
       Streamlit.setFrameHeight(height);
@@ -4864,14 +4872,16 @@
       if (!pendingExplanationSaves.size) {
         selectionHint.textContent = '可引用到插问、复制或高亮选中文本';
       }
-      canvasChatMeta.textContent = `当前模型：${activeModel || '当前模型'} · 学习记录跟随当前页`;
-      if (canvasSendButton.disabled) {
+      canvasChatMeta.textContent = learningWritable
+        ? `当前模型：${activeModel || '当前模型'} · 学习记录跟随当前页`
+        : '历史课程只读 · 重新激活后可新增学习记录';
+      if (!learningWritable) {
         canvasInput.value = '';
         currentChatQuote = null;
         renderQuotePreview();
-        canvasHint.textContent = '回答已保存，可继续围绕当前页追问';
+        canvasHint.textContent = '历史课程只读；重新激活后可继续提问并形成新的学习阶段';
       }
-      canvasSendButton.disabled = false;
+      canvasSendButton.disabled = !learningWritable;
       canvasSendButton.textContent = '问当前模型';
 
       if (canPatchRenderedReader) {
@@ -5237,10 +5247,13 @@
       const questionId = questionIdForItem(item);
       const isChild = Number(item.parentQuestionId || 0) > 0;
       const learningStatus = item.learningStatus || item.status || '未整理';
+      const canWriteLearning = typeof learningWritable === 'undefined' || learningWritable;
       const actionButtons = [];
       if (!options.inChildPanel && questionId) {
-        actionButtons.push(`<button type="button" data-open-child-chat="${questionId}">子插问</button>`);
-        if (!item.convertedToKnowledge) {
+        if (canWriteLearning) {
+          actionButtons.push(`<button type="button" data-open-child-chat="${questionId}">子插问</button>`);
+        }
+        if (canWriteLearning && !item.convertedToKnowledge) {
           actionButtons.push(`<button type="button" data-question-learning-action="convert_question_to_knowledge" data-question-id="${questionId}">转为知识卡</button>`);
         }
         if (!item.understood) {
@@ -5373,6 +5386,10 @@
       const item = questionById(questionId);
       if (!item) return;
       const isConvert = action === 'convert_question_to_knowledge';
+      if (isConvert && !learningWritable) {
+        canvasHint.textContent = '请先在课程中心重新激活历史课程';
+        return;
+      }
       const confirmation = isConvert
         ? '确认将该插问转为知识卡，并生成初始复习任务吗？'
         : '确认已理解该插问，并标记为掌握吗？';
@@ -5388,6 +5405,10 @@
     }
 
     function sendCanvasQuestion() {
+      if (!learningWritable) {
+        canvasHint.textContent = '请先在课程中心重新激活历史课程';
+        return;
+      }
       const question = canvasInput.value.trim();
       if (!question) {
         canvasHint.textContent = '请先输入问题';
@@ -5416,6 +5437,7 @@
     }
 
     function sendChildQuestion(layerId) {
+      if (!learningWritable) return;
       const layer = childChatLayers.find(item => item.layerId === layerId);
       if (!layer) return;
       const input = childChatStack.querySelector(`[data-child-input="${layerId}"]`);
@@ -5649,6 +5671,10 @@
     }
 
     function sendSelectionToBranch() {
+      if (!learningWritable) {
+        selectionHint.textContent = '历史课程只读；重新激活后可继续提问';
+        return;
+      }
       const payload = currentSelectionPayload || buildSelectionPayload();
       if (!payload) return;
       if (openChildChatFromQuote(payload)) {
