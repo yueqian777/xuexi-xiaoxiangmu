@@ -120,6 +120,7 @@ DEFAULT_PAGE_ID = "dashboard"
 SELECTED_SECTION_STATE_KEY = "app_selected_section_id"
 SELECTED_PAGE_STATE_KEY = "app_selected_page_id"
 PAGE_SECTION_SYNC_STATE_KEY = "app_selected_page_section_id"
+QUERY_PAGE_TARGET_STATE_KEY = "app_query_page_target"
 
 ACTIVE_PAGE_STATE_KEY = "app_active_page_name"
 PAGE_JUST_ENTERED_STATE_KEY = "app_page_just_entered"
@@ -177,6 +178,37 @@ def _apply_pending_navigation_target(state: dict | None = None) -> bool:
     state[SELECTED_SECTION_STATE_KEY] = section_id
     state[SELECTED_PAGE_STATE_KEY] = page_id
     state[PAGE_SECTION_SYNC_STATE_KEY] = section_id
+    return True
+
+
+def _apply_query_page_target(state: dict | None = None) -> bool:
+    """Open a stable page from a desktop/browser shortcut without changing app state later."""
+
+    state = st.session_state if state is None else state
+    query_params = getattr(st, "query_params", None)
+    if query_params is None:
+        return False
+    try:
+        requested = query_params.get("page")
+    except (AttributeError, TypeError):
+        return False
+    if isinstance(requested, (list, tuple)):
+        requested = requested[0] if requested else ""
+    requested = str(requested or "").strip()
+    if not requested or (
+        requested not in PAGES and requested not in LEGACY_PAGE_IDS
+    ):
+        return False
+
+    page_id = _normalize_page_id(requested)
+    marker = f"{requested}:{page_id}"
+    if state.get(QUERY_PAGE_TARGET_STATE_KEY) == marker:
+        return False
+    entry = _entry_by_id(page_id)
+    state[SELECTED_SECTION_STATE_KEY] = entry.section_id
+    state[SELECTED_PAGE_STATE_KEY] = entry.id
+    state[PAGE_SECTION_SYNC_STATE_KEY] = entry.section_id
+    state[QUERY_PAGE_TARGET_STATE_KEY] = marker
     return True
 
 
@@ -316,6 +348,7 @@ def main() -> None:
     user_id = user.id
     ensure_default_api_providers(user_id=user_id)
 
+    _apply_query_page_target(st.session_state)
     entry = _render_sidebar_navigation()
     _mark_active_page(entry.id)
     entry.render()

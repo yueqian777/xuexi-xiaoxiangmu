@@ -6,6 +6,7 @@ from typing import Any
 
 import streamlit as st
 
+from db import fetch_all, fetch_one
 from services.active_learning_context_service import get_active_context
 from services.auth_service import require_login
 from services.course_service import (
@@ -15,6 +16,11 @@ from services.course_service import (
     get_course_detail,
     list_courses,
     reactivate_course,
+)
+from services.ppt_reader_state import (
+    parse_reader_position,
+    reader_deck_position_setting_key,
+    reader_position_setting_key,
 )
 from services.ui_helpers import render_workbench_header, set_navigation_target
 
@@ -113,6 +119,17 @@ def _render_course_card(
     model = _course_card_view_model(course, detail, active_context)
     decks = detail.get("decks") or []
     phases = detail.get("learning_phases") or []
+    persisted_position = (
+        _course_persisted_learning_target(user_id, decks)
+        if course.get("status") == "active"
+        else None
+    )
+    model = _course_card_view_model(
+        course,
+        detail,
+        active_context,
+        persisted_position=persisted_position,
+    )
 
     with st.container(border=True):
         heading, status = st.columns([2.2, 1])
@@ -342,6 +359,8 @@ def _course_card_view_model(
     course: dict,
     detail: dict,
     active_context: dict,
+    *,
+    persisted_position: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     decks = detail.get("decks") or []
     phases = detail.get("learning_phases") or []
@@ -352,6 +371,7 @@ def _course_card_view_model(
         decks,
         phases,
         active_context,
+        persisted_position=persisted_position,
     )
     current_cycle = _learning_cycle_view_models(phases)
     stored_summary = detail.get("summary")
@@ -422,6 +442,8 @@ def _course_progress(
     decks: list[dict],
     phases: list[dict],
     active_context: dict,
+    *,
+    persisted_position: dict[str, int] | None = None,
 ) -> tuple[str, int | None]:
     status = str(course.get("status") or "")
     latest_phase = max(
@@ -435,11 +457,9 @@ def _course_progress(
     if status == "archived":
         return "课程已归档", None
 
-    context_deck_id = (
-        int(active_context.get("deck_id") or 0)
-        if active_context.get("active")
-        else 0
-    )
+    position = persisted_position or active_context
+    position_is_active = persisted_position is not None or position.get("active")
+    context_deck_id = int(position.get("deck_id") or 0) if position_is_active else 0
     deck = next(
         (item for item in decks if int(item.get("id") or 0) == context_deck_id),
         None,
@@ -447,7 +467,7 @@ def _course_progress(
     if not deck:
         return "尚未开始阅读", 0
     total = max(1, int(deck.get("slide_count") or 1))
-    current = min(total, max(1, int(active_context.get("slide_number") or 1)))
+    current = min(total, max(1, int(position.get("slide_number") or 1)))
     title = str(deck.get("title") or deck.get("filename") or "未命名资料")
     return (
         f"当前《{title}》第 {current} / {total} 页",
@@ -557,6 +577,9 @@ def _open_course_deck(user_id: int, course: dict, decks: list[dict]) -> None:
 def _course_learning_target(user_id: int, decks: list[dict]) -> dict[str, int]:
     if not decks:
         raise ValueError("课程没有可进入的学习资料。")
+    persisted = _course_persisted_learning_target(user_id, decks)
+    if persisted:
+        return persisted
     context = get_active_context(user_id)
     deck_ids = {int(deck["id"]) for deck in decks}
     context_deck_id = int(context.get("deck_id") or 0) if context.get("active") else 0
@@ -566,6 +589,62 @@ def _course_learning_target(user_id: int, decks: list[dict]) -> dict[str, int]:
             "slide_number": max(1, int(context.get("slide_number") or 1)),
         }
     return {"deck_id": int(decks[0]["id"]), "slide_number": 1}
+
+
+def _course_persisted_learning_target(
+    user_id: int,
+    decks: list[dict],
+) -> dict[str, int] | None:
+    deck_by_id = {int(deck["id"]): deck for deck in decks}
+    if not deck_by_id:
+        return None
+
+    keys = [
+        reader_deck_position_setting_key(user_id, deck_id)
+        for deck_id in deck_by_id
+    ]
+    placeholders = ", ".join("?" for _ in keys)
+    rows = fetch_all(
+        f"""
+        SELECT key, value, updated_at
+        FROM app_settings
+        WHERE user_id = ? AND key IN ({placeholders})
+        ORDER BY updated_at DESC, key ASC
+        """,
+        (int(user_id), *keys),
+    )
+    candidates: list[tuple[dict[str, int], int]] = []
+    for row in rows:
+        position = parse_reader_position(row.get("value"))
+        target = _course_position_for_decks(position, deck_by_id)
+        if target:
+            candidates.append((target, int(position.get("saved_at_ns") or 0)))
+    if candidates:
+        timestamped = [candidate for candidate in candidates if candidate[1] > 0]
+        if timestamped:
+            return max(timestamped, key=lambda candidate: candidate[1])[0]
+        return candidates[0][0]
+
+    global_row = fetch_one(
+        "SELECT value FROM app_settings WHERE key = ? AND user_id = ?",
+        (reader_position_setting_key(user_id), int(user_id)),
+    )
+    global_position = parse_reader_position(global_row.get("value")) if global_row else {}
+    return _course_position_for_decks(global_position, deck_by_id)
+
+
+def _course_position_for_decks(
+    position: dict[str, int],
+    deck_by_id: dict[int, dict],
+) -> dict[str, int] | None:
+    deck_id = int(position.get("deck_id") or 0)
+    if deck_id not in deck_by_id:
+        return None
+    slide_number = max(1, int(position.get("slide_number") or 1))
+    slide_count = int(deck_by_id[deck_id].get("slide_count") or 0)
+    if slide_count > 0:
+        slide_number = min(slide_number, slide_count)
+    return {"deck_id": deck_id, "slide_number": slide_number}
 
 
 def _summary_fallback(

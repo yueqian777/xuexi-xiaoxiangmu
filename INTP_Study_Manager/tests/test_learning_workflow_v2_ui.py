@@ -75,13 +75,23 @@ class LearningWorkflowV2UiTest(unittest.TestCase):
             ppt_tutor._question_learning_status(
                 {"status": "未整理", "understood": 0, "converted_to_knowledge": 0}
             ),
-            "未解决",
+            "待理解",
         )
         self.assertEqual(
             ppt_tutor._question_learning_status(
                 {"status": "理解中", "understood": 0, "converted_to_knowledge": 0}
             ),
-            "理解中",
+            "待理解",
+        )
+        self.assertEqual(
+            ppt_tutor._question_learning_status(
+                {
+                    "status": "已掌握",
+                    "understood": 1,
+                    "converted_to_knowledge": 1,
+                }
+            ),
+            "已转知识卡",
         )
 
     def test_reader_payload_contains_current_page_cards_and_review_state(self):
@@ -183,14 +193,58 @@ class LearningWorkflowV2UiTest(unittest.TestCase):
 
     def test_course_center_continue_uses_the_saved_position_for_that_course(self):
         decks = [{"id": 4}, {"id": 9}]
-        with patch.object(
-            course_center,
-            "get_active_context",
-            return_value={"active": True, "deck_id": 9, "slide_number": 31},
+        with (
+            patch.object(course_center, "fetch_all", return_value=[]),
+            patch.object(course_center, "fetch_one", return_value=None),
+            patch.object(
+                course_center,
+                "get_active_context",
+                return_value={"active": True, "deck_id": 9, "slide_number": 31},
+            ),
         ):
             target = course_center._course_learning_target(7, decks)
 
         self.assertEqual(target, {"deck_id": 9, "slide_number": 31})
+
+    def test_course_center_restores_course_a_after_course_b_became_active(self):
+        course_a_decks = [{"id": 4, "title": "A", "slide_count": 40}]
+        with (
+            patch.object(
+                course_center,
+                "fetch_all",
+                return_value=[
+                    {
+                        "key": "user:7:ppt_reader_position:deck:4",
+                        "value": '{"deck_id": 4, "slide_number": 12, "saved_at_ns": 100}',
+                        "updated_at": "2026-08-24 10:00:00",
+                    }
+                ],
+            ),
+            patch.object(
+                course_center,
+                "fetch_one",
+                return_value={"value": '{"deck_id": 9, "slide_number": 31}'},
+            ),
+            patch.object(
+                course_center,
+                "get_active_context",
+                return_value={"active": True, "deck_id": 9, "slide_number": 31},
+            ),
+        ):
+            target = course_center._course_learning_target(7, course_a_decks)
+
+        self.assertEqual(target, {"deck_id": 4, "slide_number": 12})
+
+    def test_course_card_progress_uses_its_persisted_position(self):
+        progress = course_center._course_progress(
+            {"status": "active"},
+            [{"id": 4, "title": "A", "slide_count": 40}],
+            [],
+            {"active": True, "deck_id": 9, "slide_number": 31},
+            persisted_position={"deck_id": 4, "slide_number": 12},
+        )
+
+        self.assertEqual(progress, ("当前《A》第 12 / 40 页", None))
 
     def test_review_page_hides_archived_courses_until_explicitly_requested(self):
         source = (PROJECT_ROOT / "pages" / "reviews.py").read_text(

@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import db
 from repositories import ppt_repository
-from services import question_to_knowledge_service
+from services import course_service, question_to_knowledge_service
 
 
 class QuestionToKnowledgeServiceTest(unittest.TestCase):
@@ -215,6 +215,28 @@ class QuestionToKnowledgeServiceTest(unittest.TestCase):
         self.assertEqual(row["understood"], 1)
         self.assertEqual(row["status"], "已掌握")
         self.assertIsNone(row["knowledge_id"])
+
+    def test_mark_question_understood_preserves_historical_course(self):
+        course = course_service.create_course(self.user_id, "历史信号课")
+        db.execute(
+            "UPDATE ppt_decks SET course_id = ? WHERE user_id = ? AND id = ?",
+            (int(course["id"]), self.user_id, self.deck_id),
+        )
+        question_id = self._create_question("Historical question?")
+        course_service.complete_course(self.user_id, int(course["id"]))
+
+        changed = question_to_knowledge_service.mark_question_understood(
+            self.user_id,
+            question_id,
+        )
+
+        self.assertFalse(changed)
+        row = db.fetch_one(
+            "SELECT understood, status FROM slide_questions WHERE id = ?",
+            (question_id,),
+        )
+        self.assertEqual(row["understood"], 0)
+        self.assertNotEqual(row["status"], "已掌握")
 
 
 if __name__ == "__main__":

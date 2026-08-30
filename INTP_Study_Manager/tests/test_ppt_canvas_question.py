@@ -25,6 +25,7 @@ class PptCanvasQuestionTest(unittest.TestCase):
         payloads = [
             {"action": "canvas_question", "question": "新问题"},
             {"action": "convert_question_to_knowledge", "questionId": 12},
+            {"action": "mark_question_understood", "questionId": 12},
             {"action": "save_explanation_edit", "explanation": "覆盖讲解"},
             {"action": "save_question_answer_edit", "questionId": 12, "answer": "覆盖回答"},
             {"action": "merge_question_thread", "questionId": 12},
@@ -35,6 +36,8 @@ class PptCanvasQuestionTest(unittest.TestCase):
             patch.object(ppt_tutor.st, "warning") as warning,
             patch.object(ppt_tutor, "add_slide_question") as add_question,
             patch.object(ppt_tutor, "convert_question_to_knowledge") as convert_question,
+            patch.object(ppt_tutor, "mark_question_understood") as mark_understood,
+            patch.object(ppt_tutor, "fetch_one", return_value={"id": 12}),
             patch.object(ppt_tutor, "_save_manual_explanation") as save_explanation,
             patch.object(ppt_tutor, "update_slide_question_answer") as save_answer,
             patch.object(ppt_tutor, "flatten_question_subtree") as merge_thread,
@@ -57,6 +60,7 @@ class PptCanvasQuestionTest(unittest.TestCase):
         self.assertEqual(warning.call_count, len(payloads))
         add_question.assert_not_called()
         convert_question.assert_not_called()
+        mark_understood.assert_not_called()
         save_explanation.assert_not_called()
         save_answer.assert_not_called()
         merge_thread.assert_not_called()

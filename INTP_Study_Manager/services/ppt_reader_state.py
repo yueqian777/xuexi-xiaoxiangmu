@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 LAST_READER_POSITION_SETTING_KEY = "ppt_reader_last_position"
+DECK_READER_POSITION_SETTING_KEY_PREFIX = "ppt_reader_position:deck"
 LAST_READER_DECK_STATE_KEY = "ppt_reader_deck_id"
 READER_ACTIVE_SLIDE_STATE_PREFIX = "ppt_reader_active_slide_"
 
@@ -25,11 +26,24 @@ def parse_reader_position(raw_value: str | None) -> dict[str, int]:
             continue
         if value > 0:
             position[key] = value
+    try:
+        saved_at_ns = int(data.get("saved_at_ns") or 0)
+    except (TypeError, ValueError):
+        saved_at_ns = 0
+    if saved_at_ns > 0:
+        position["saved_at_ns"] = saved_at_ns
     return position
 
 
 def reader_position_setting_key(user_id: int) -> str:
     return f"user:{int(user_id)}:{LAST_READER_POSITION_SETTING_KEY}"
+
+
+def reader_deck_position_setting_key(user_id: int, deck_id: int) -> str:
+    return (
+        f"user:{int(user_id)}:{DECK_READER_POSITION_SETTING_KEY_PREFIX}:"
+        f"{int(deck_id)}"
+    )
 
 
 def build_reader_position_payload(

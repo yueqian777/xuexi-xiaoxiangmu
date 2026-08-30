@@ -44,6 +44,12 @@ class PptReaderPositionTest(unittest.TestCase):
             {"deck_id": 4},
         )
 
+    def test_reader_deck_position_setting_key_is_scoped_by_user_and_deck(self):
+        self.assertEqual(
+            ppt_reader_state.reader_deck_position_setting_key(42, 7),
+            "user:42:ppt_reader_position:deck:7",
+        )
+
     def test_default_reader_deck_id_prefers_session_when_no_valid_memory(self):
         self.assertEqual(
             ppt_reader_state.default_reader_deck_id([2, 4], {"deck_id": 99}, "4"),
@@ -110,6 +116,29 @@ class PptReaderPositionTest(unittest.TestCase):
 
         args = execute.call_args.args
         self.assertEqual(json.loads(args[1][2]), {"deck_id": 4})
+
+    def test_save_last_reader_position_persists_explicit_deck_checkpoint(self):
+        with (
+            patch.object(
+                ppt_tutor,
+                "_read_last_reader_position",
+                return_value={"deck_id": 8, "slide_number": 3},
+            ),
+            patch.object(ppt_tutor.time, "time_ns", return_value=987654321),
+            patch.object(ppt_tutor, "execute") as execute,
+        ):
+            ppt_tutor._save_last_reader_position(42, 7, 12)
+
+        self.assertEqual(execute.call_count, 2)
+        deck_checkpoint = execute.call_args_list[1].args[1]
+        self.assertEqual(
+            deck_checkpoint[0],
+            "user:42:ppt_reader_position:deck:7",
+        )
+        self.assertEqual(
+            json.loads(deck_checkpoint[2]),
+            {"deck_id": 7, "slide_number": 12, "saved_at_ns": 987654321},
+        )
 
     def test_save_last_reader_position_reads_existing_position_once(self):
         with (

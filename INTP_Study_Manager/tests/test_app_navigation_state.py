@@ -73,6 +73,18 @@ class AppNavigationStateTest(unittest.TestCase):
         self.assertEqual(state[app.ACTIVE_PAGE_STATE_KEY], "ppt_tutor")
         self.assertTrue(state[app.PAGE_JUST_ENTERED_STATE_KEY])
 
+    def test_query_page_param_opens_the_requested_mcp_page(self):
+        state = {}
+        with patch.object(app.st, "query_params", {"page": "chatgpt_mcp"}):
+            self.assertTrue(app._apply_query_page_target(state))
+
+        self.assertEqual(state[app.SELECTED_SECTION_STATE_KEY], "maintenance")
+        self.assertEqual(state[app.SELECTED_PAGE_STATE_KEY], "chatgpt_mcp")
+        self.assertEqual(state[app.PAGE_SECTION_SYNC_STATE_KEY], "maintenance")
+
+        with patch.object(app.st, "query_params", {"page": "chatgpt_mcp"}):
+            self.assertFalse(app._apply_query_page_target(state))
+
     def test_pending_navigation_target_is_consumed_and_keeps_exact_page(self):
         state = {
             ui_helpers.PENDING_NAVIGATION_STATE_KEY: {
@@ -118,6 +130,13 @@ class AppNavigationStateTest(unittest.TestCase):
                     ).run()
 
                     self.assertEqual(len(page.exception), 0)
+
+                    next(
+                        toggle
+                        for toggle in page.toggle
+                        if toggle.label == "展开更多学习支持"
+                    ).set_value(True)
+                    page.run()
 
                     next(
                         button
@@ -195,13 +214,33 @@ class AppNavigationStateTest(unittest.TestCase):
                         "今日复习与待解决",
                         [item.value for item in page.subheader],
                     )
-                    self.assertIn(
+                    self.assertNotIn(
                         "课程概览",
                         [item.value for item in page.subheader],
                     )
                     self.assertEqual(
-                        [item.label for item in page.metric[:2]],
+                        [item.label for item in page.metric],
                         ["今日复习", "待解决"],
+                    )
+                    self.assertNotIn(
+                        "整理知识卡片",
+                        [item.label for item in page.button],
+                    )
+
+                    next(
+                        toggle
+                        for toggle in page.toggle
+                        if toggle.label == "展开更多学习支持"
+                    ).set_value(True)
+                    page.run()
+
+                    self.assertIn(
+                        "课程概览",
+                        [item.value for item in page.subheader],
+                    )
+                    self.assertIn(
+                        "整理知识卡片",
+                        [item.label for item in page.button],
                     )
         finally:
             db._INITIALIZED_DATABASE_PATH = None

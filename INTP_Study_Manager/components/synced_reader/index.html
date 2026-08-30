@@ -1096,7 +1096,7 @@
     }
     .learning-understand-panel {
       display: grid;
-      grid-template-rows: auto minmax(0, 1fr) auto minmax(110px, .34fr);
+      grid-template-rows: auto auto minmax(0, 1fr);
       background: var(--panel);
     }
     .learning-deposit-panel {
@@ -1125,6 +1125,12 @@
       border-radius: 999px;
       background: linear-gradient(180deg, #18a58f, #43a9e8);
       content: "";
+    }
+    .learning-current-explanation-title {
+      padding: 8px 14px 0;
+      color: #5d7c86;
+      font-size: 12px;
+      font-weight: 800;
     }
     .learning-understand-panel .notes {
       height: auto;
@@ -1370,6 +1376,100 @@
       color: #267c75;
       cursor: pointer;
       font-size: 12px;
+    }
+    .question-tree,
+    .question-tree [role="group"] {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .question-tree [role="group"] {
+      position: relative;
+      margin: 7px 0 0 15px;
+      padding-left: 14px;
+      border-left: 2px solid #c7e5e8;
+    }
+    .question-tree-node.chat-turn {
+      position: relative;
+      margin: 0 0 8px;
+    }
+    .question-tree [role="group"] > .question-tree-node::before {
+      position: absolute;
+      top: 19px;
+      left: -14px;
+      width: 12px;
+      border-top: 2px solid #c7e5e8;
+      content: "";
+    }
+    .question-tree-details {
+      overflow: hidden;
+      border: 1px solid #cbe5ea;
+      border-radius: 12px;
+      background: rgba(255,255,255,.94);
+    }
+    .question-tree-summary {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 44px;
+      padding: 9px 10px;
+      color: #244e59;
+      cursor: pointer;
+      list-style: none;
+    }
+    .question-tree-summary::-webkit-details-marker {
+      display: none;
+    }
+    .question-tree-summary::before {
+      color: #4e8791;
+      content: "›";
+      font-size: 18px;
+      font-weight: 900;
+      line-height: 1;
+      transition: transform .14s ease;
+    }
+    .question-tree-details[open] > .question-tree-summary::before {
+      transform: rotate(90deg);
+    }
+    .question-tree-question {
+      min-width: 0;
+      font-size: 13px;
+      font-weight: 800;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    .question-tree-statuses {
+      display: inline-flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 4px;
+    }
+    .question-tree-statuses .learning-status {
+      margin-left: 0;
+      white-space: nowrap;
+    }
+    .question-tree-body {
+      padding: 10px 12px 11px 30px;
+      border-top: 1px solid #e1eef0;
+      background: #f8fcfd;
+    }
+    .question-tree-answer.chat-answer {
+      margin: 0;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+    }
+    .question-tree-body .chat-quote {
+      margin: 0 0 9px;
+    }
+    .question-tree-body .chat-turn-meta {
+      margin-top: 8px;
+    }
+    .question-tree-actions {
+      justify-content: flex-start;
+      flex-wrap: wrap;
     }
     .child-chat-stack {
       position: fixed;
@@ -1651,15 +1751,12 @@
         <div class="learning-tab-panels">
           <section class="learning-tab-panel learning-understand-panel" id="learningPanelUnderstand" role="tabpanel" aria-labelledby="learningTabUnderstand" data-learning-panel="understanding">
             <div class="learning-panel-label">AI讲解</div>
+            <div class="learning-current-explanation-title">当前页解释</div>
             <div class="notes" id="notes"></div>
-            <div class="learning-panel-label">当前问题</div>
-            <div class="learning-current-questions" id="understandingQuestions">
-              <div class="canvas-empty">本页暂时没有未解决问题。</div>
-            </div>
           </section>
           <section class="learning-tab-panel learning-deposit-panel" id="learningPanelDeposit" role="tabpanel" aria-labelledby="learningTabDeposit" data-learning-panel="deposition" hidden>
             <div class="canvas-messages" id="canvasMessages">
-              <section class="learning-record-section"><div class="learning-record-heading">插问</div></section>
+              <section class="learning-record-section"><div class="learning-record-heading">插问 · 问题树</div></section>
               <section class="learning-record-section"><div class="learning-record-heading">知识卡</div></section>
             </div>
             <button type="button" class="chat-scroll-bottom canvas-scroll-bottom hidden" id="canvasScrollBottomButton" title="滚到最下" hidden>↓</button>
@@ -5502,7 +5599,7 @@
         if (canWriteLearning && !item.convertedToKnowledge) {
           actionButtons.push(`<button type="button" data-question-learning-action="convert_question_to_knowledge" data-question-id="${questionId}">转为知识卡</button>`);
         }
-        if (!item.understood) {
+        if (canWriteLearning && !item.understood) {
           actionButtons.push(`<button type="button" data-question-learning-action="mark_question_understood" data-question-id="${questionId}">标记掌握</button>`);
         }
       }
@@ -5522,6 +5619,107 @@
       `;
     }
 
+    function questionStatusLabels(item) {
+      const rawStatus = String(item?.learningStatus || item?.status || '').trim();
+      const converted = Boolean(
+        item?.convertedToKnowledge
+        || item?.knowledgeId
+        || rawStatus === '已转知识卡'
+      );
+      const mastered = Boolean(
+        item?.understood
+        || ['已掌握', '已解决', 'understood', 'closed'].includes(rawStatus)
+      );
+      const labels = [];
+      if (converted) labels.push('已转知识卡');
+      if (mastered) labels.push('已掌握');
+      if (!labels.length) labels.push('待理解');
+      return labels;
+    }
+
+    function buildQuestionForest(questions) {
+      const source = Array.isArray(questions) ? questions : [];
+      const nodes = source.map((item, index) => ({
+        item,
+        index,
+        children: [],
+      }));
+      const nodesById = new Map();
+      nodes.forEach(node => {
+        const questionId = questionIdForItem(node.item);
+        if (questionId) nodesById.set(questionId, node);
+      });
+      const roots = [];
+      nodes.forEach(node => {
+        const questionId = questionIdForItem(node.item);
+        const parentId = Number(node.item?.parentQuestionId || 0);
+        const parent = parentId ? nodesById.get(parentId) : null;
+        if (parent && parent !== node && questionId !== parentId) {
+          parent.children.push(node);
+        } else {
+          roots.push(node);
+        }
+      });
+      return roots;
+    }
+
+    function renderQuestionTreeNode(node, level = 1) {
+      const item = node?.item || {};
+      const questionId = questionIdForItem(item);
+      const parentQuestionId = Number(item.parentQuestionId || 0);
+      const canWriteLearning = typeof learningWritable === 'undefined' || learningWritable;
+      const quoteText = String(item.quoteText || '').trim();
+      const quoteHtml = quoteText
+        ? `<div class="chat-quote"><div class="chat-quote-label">引用内容</div><div>${escapeHtml(quoteText).replaceAll('\n', '<br>')}</div></div>`
+        : '';
+      const statusHtml = questionStatusLabels(item)
+        .map(label => `<span class="learning-status">${escapeHtml(label)}</span>`)
+        .join('');
+      const actionButtons = [];
+      if (canWriteLearning && questionId) {
+        actionButtons.push(`<button type="button" data-open-child-chat="${questionId}">继续追问</button>`);
+        if (!item.convertedToKnowledge) {
+          actionButtons.push(`<button type="button" data-question-learning-action="convert_question_to_knowledge" data-question-id="${questionId}">转为知识卡</button>`);
+        }
+        if (!item.understood) {
+          actionButtons.push(`<button type="button" data-question-learning-action="mark_question_understood" data-question-id="${questionId}">标记掌握</button>`);
+        }
+      }
+      const childHtml = Array.isArray(node?.children) && node.children.length
+        ? `<ol role="group">${node.children.map(child => renderQuestionTreeNode(child, level + 1)).join('')}</ol>`
+        : '';
+      return `
+        <li class="question-tree-node chat-turn" role="treeitem" aria-level="${level}" data-question-id="${questionId || ''}" data-parent-question-id="${parentQuestionId || ''}" data-depth="${Math.max(0, level - 1)}">
+          <details class="question-tree-details">
+            <summary class="question-tree-summary">
+              <span class="question-tree-question">${escapeHtml(item.question || '未命名问题').replaceAll('\n', '<br>')}</span>
+              <span class="question-tree-statuses">${statusHtml}</span>
+            </summary>
+            <div class="question-tree-body">
+              ${quoteHtml}
+              <div class="question-tree-answer chat-answer">
+                <div class="chat-answer-body" data-question-id="${questionId || ''}" data-slide-number="${currentSlideNumber}">${renderMarkdown(item.answer || '')}</div>
+              </div>
+              <div class="chat-turn-meta">
+                ${escapeHtml(item.model || '未知模型')} ${item.createdAt ? '· ' + escapeHtml(item.createdAt) : ''}
+              </div>
+              ${actionButtons.length ? `<div class="chat-turn-actions question-tree-actions">${actionButtons.join('')}</div>` : ''}
+            </div>
+          </details>
+          ${childHtml}
+        </li>
+      `;
+    }
+
+    function renderQuestionTree(questions) {
+      const roots = buildQuestionForest(questions);
+      if (!roots.length) {
+        return '<div class="canvas-empty">本页还没有插问。</div>';
+      }
+      return `<ol class="question-tree" role="tree" aria-label="本页插问问题树">${roots.map(root => renderQuestionTreeNode(root)).join('')}</ol>`;
+    }
+
+    // v3.1：“当前问题”统一归入沉淀区的问题树，不再占用理解面板。
     function currentQuestionsForPage(page) {
       const questions = Array.isArray(page?.questions) ? page.questions : [];
       return questions.filter(item => {
@@ -5618,7 +5816,7 @@
     function renderLearningRecord(page, questionHtml) {
       return `
         <section class="learning-record-section">
-          <div class="learning-record-heading">插问</div>
+          <div class="learning-record-heading">插问 · 问题树</div>
           ${questionHtml}
         </section>
         <section class="learning-record-section">
@@ -5633,7 +5831,6 @@
       const previousScrollTop = canvasMessages.scrollTop;
       if (!page) {
         canvasContext.textContent = '当前上下文：未识别页面';
-        understandingQuestions.innerHTML = renderCurrentQuestions(null);
         reviewTabContent.innerHTML = renderReviewPanel(null);
         canvasMessages.innerHTML = renderLearningRecord(
           null,
@@ -5652,14 +5849,8 @@
       canvasContext.textContent = `当前上下文：${contextParts.join(' · ')}`;
       const messages = Array.isArray(page.questions) ? page.questions : [];
       const rootMessages = messages.filter(item => !Number(item.parentQuestionId || 0));
-      const questionHtml = rootMessages.length
-        ? rootMessages.map(item => [
-          renderChatTurn(item),
-          ...messages
-            .filter(child => Number(child.rootQuestionId || child.id || 0) === Number(item.rootQuestionId || item.id || 0)
-              && Number(child.parentQuestionId || 0) > 0)
-            .map(child => renderChatTurn(child)),
-        ].join('')).join('')
+      const questionHtml = messages.length
+        ? renderQuestionTree(messages)
         : `
           <div class="canvas-empty">
             本页还没有插问。你可以直接围绕当前 PPT 页面和右侧讲解提问；回答会保存到这一页，不会覆盖主线讲解。
@@ -5669,7 +5860,6 @@
         || (options.focusLatestQuestion && rootMessages.length
           ? Number(questionIdForItem(rootMessages[rootMessages.length - 1]) || 0)
           : 0);
-      understandingQuestions.innerHTML = renderCurrentQuestions(page);
       reviewTabContent.innerHTML = renderReviewPanel(page);
       canvasMessages.innerHTML = renderLearningRecord(page, questionHtml);
       if (options.preserveScroll) {
@@ -5680,7 +5870,7 @@
       } else {
         canvasMessages.scrollTop = canvasMessages.scrollHeight;
       }
-      typesetTargets([canvasMessages, understandingQuestions, reviewTabContent]).then(typesetDone => {
+      typesetTargets([canvasMessages, reviewTabContent]).then(typesetDone => {
         if (typesetDone !== false) applyChatSourceMaps(canvasMessages);
       }).finally(() => {
         if (focusQuestionId) scrollChatQuestionToTop(canvasMessages, focusQuestionId);

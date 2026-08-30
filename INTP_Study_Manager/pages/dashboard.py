@@ -369,27 +369,31 @@ def render() -> None:
         unresolved_questions,
     )
     st.caption(f"推荐行动：{recommendation}")
-    _go_to_page(
-        "整理知识卡片",
-        section_id="knowledge",
-        page_id="knowledge_cards",
-        key="dashboard_go_cards",
-    )
-
-    st.subheader("课程概览")
-    st.caption("课程状态一览")
-    status_cols = st.columns(3)
-    status_cols[0].metric("学习中", int(status_counts.get("active", len(active_courses))))
-    status_cols[1].metric("已完成", int(status_counts.get("completed", 0)))
-    status_cols[2].metric("归档", int(status_counts.get("archived", 0)))
-    _go_to_page(
-        "管理全部课程",
-        section_id="today",
-        page_id="course_center",
-        key="dashboard_manage_courses",
-    )
 
     if st.toggle("展开更多学习支持", value=False, key="dashboard_more_support"):
+        _go_to_page(
+            "整理知识卡片",
+            section_id="knowledge",
+            page_id="knowledge_cards",
+            key="dashboard_go_cards",
+        )
+
+        st.subheader("课程概览")
+        st.caption("课程状态一览")
+        status_cols = st.columns(3)
+        status_cols[0].metric(
+            "学习中",
+            int(status_counts.get("active", len(active_courses))),
+        )
+        status_cols[1].metric("已完成", int(status_counts.get("completed", 0)))
+        status_cols[2].metric("归档", int(status_counts.get("archived", 0)))
+        _go_to_page(
+            "管理全部课程",
+            section_id="today",
+            page_id="course_center",
+            key="dashboard_manage_courses",
+        )
+
         low_cards = low_mastery_cards(user_id=user.id, include_archived=False)
         blockers = recent_blockers(user_id=user.id, include_archived=False)
         parking = open_parking_questions(user_id=user.id)

@@ -53,6 +53,10 @@ class ChatGptWebExplanationUiTest(unittest.TestCase):
         self.assertIn("chatgpt_web_explanation_nav_intent", source)
         self.assertIn('set_navigation_target("materials", "chatgpt_web_explanation")', source)
         self.assertIn("st.rerun()", source)
+        self.assertRegex(
+            source,
+            r'elif workbench_mode == "生成讲解":\s+_render_chatgpt_web_bridge_shortcut\(',
+        )
 
     def test_manual_import_reports_archive_failure_without_false_success(self):
         outcome = {

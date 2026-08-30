@@ -131,6 +131,10 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             "wrapMarkdownSelection",
             "renderChatQuestion",
             "renderChatTurn",
+            "questionStatusLabels",
+            "buildQuestionForest",
+            "renderQuestionTreeNode",
+            "renderQuestionTree",
             "currentQuestionsForPage",
             "renderCurrentQuestions",
             "renderKnowledgeCards",
@@ -1467,7 +1471,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             if (suppressObserverUntil <= 0) {
               throw new Error(String(suppressObserverUntil));
             }
-            if (emitted.length !== 1 || emitted[0].action !== 'merge_question_thread' || emitted[0].questionId !== 10) {
+            if (emitted.length !== 0) {
               throw new Error(JSON.stringify(emitted));
             }
             """
@@ -1666,7 +1670,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             r'<button[^>]+class="[^"]*chat-scroll-bottom[^"]*child-chat-bottom',
         )
 
-    def test_closing_child_layer_sends_merge_for_closed_anchor(self):
+    def test_closing_child_layer_preserves_question_tree_without_merge_action(self):
         self.run_js(
             r"""
             const emitted = [];
@@ -1693,13 +1697,13 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             if (childChatLayers.length !== 0) {
               throw new Error(JSON.stringify(childChatLayers));
             }
-            if (emitted.length !== 1 || emitted[0].action !== 'merge_question_thread' || emitted[0].questionId !== 10) {
+            if (emitted.length !== 0) {
               throw new Error(JSON.stringify(emitted));
             }
             """
         )
 
-    def test_slide_change_merges_open_child_stack_before_clearing(self):
+    def test_slide_change_preserves_question_tree_without_merge_action(self):
         self.run_js(
             r"""
             const emitted = [];
@@ -1719,7 +1723,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             if (childChatLayers.length !== 0) {
               throw new Error(JSON.stringify(childChatLayers));
             }
-            if (emitted.length !== 1 || emitted[0].action !== 'merge_question_thread' || emitted[0].questionId !== 10) {
+            if (emitted.length !== 0) {
               throw new Error(JSON.stringify(emitted));
             }
             """
@@ -1800,18 +1804,23 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
         self.assertIn('data-resize-handle="pages-sidebar"', source)
         self.assertNotIn('data-resize-handle="notes-chat"', source)
 
-    def test_learning_sidebar_panels_match_v3_information_architecture(self):
+    def test_learning_sidebar_panels_match_v31_information_architecture(self):
         source = READER_HTML.read_text(encoding="utf-8")
 
-        for label in ["AI讲解", "当前问题", "插问", "知识卡", "掌握度", "复习计划"]:
+        for label in ["AI讲解", "当前页解释", "插问", "问题树", "知识卡", "掌握度", "复习计划"]:
             self.assertIn(label, source)
-        self.assertRegex(
+        understanding_panel = re.search(
+            r'data-learning-panel="understanding"([\s\S]*?)</section>',
             source,
-            r'data-learning-panel="understanding"[\s\S]*?AI讲解[\s\S]*?当前问题',
+        ).group(1)
+        self.assertRegex(
+            understanding_panel,
+            r'AI讲解[\s\S]*?当前页解释',
         )
+        self.assertNotIn("当前问题", understanding_panel)
         self.assertRegex(
             source,
-            r'data-learning-panel="deposition"[\s\S]*?插问[\s\S]*?知识卡',
+            r'data-learning-panel="deposition"[\s\S]*?插问[\s\S]*?问题树[\s\S]*?知识卡',
         )
         self.assertRegex(
             source,
@@ -1879,6 +1888,110 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             """
         )
 
+    def test_deposition_renders_recursive_question_tree_with_canonical_statuses(self):
+        self.run_js(
+            r"""
+            global.window = {
+              marked: { parse: value => String(value) },
+              DOMPurify: { sanitize: value => String(value) },
+            };
+            var learningWritable = true;
+            var currentSlideNumber = 8;
+            const questions = [
+              {
+                id: 1,
+                question: '为什么需要窗函数？',
+                answer: '用于控制截断效应。',
+                parentQuestionId: null,
+                depth: 0,
+                learningStatus: '未解决',
+                understood: false,
+                convertedToKnowledge: false,
+              },
+              {
+                id: 2,
+                question: '为什么矩形窗旁瓣高？',
+                answer: '边界突变产生高频分量。',
+                parentQuestionId: 1,
+                depth: 1,
+                learningStatus: '已掌握',
+                understood: true,
+                convertedToKnowledge: false,
+              },
+              {
+                id: 3,
+                question: 'Gibbs现象有什么影响？',
+                answer: '截断附近会出现振铃。',
+                parentQuestionId: 2,
+                depth: 2,
+                learningStatus: '已转知识卡',
+                understood: false,
+                convertedToKnowledge: true,
+              },
+            ];
+
+            const rendered = renderQuestionTree(questions);
+            for (const fragment of [
+              'role="tree"',
+              'role="treeitem"',
+              'role="group"',
+              'aria-level="1"',
+              'aria-level="2"',
+              'aria-level="3"',
+              '待理解',
+              '已掌握',
+              '已转知识卡',
+            ]) {
+              if (!rendered.includes(fragment)) throw new Error(`${fragment}: ${rendered}`);
+            }
+            const rootIndex = rendered.indexOf('为什么需要窗函数？');
+            const childIndex = rendered.indexOf('为什么矩形窗旁瓣高？');
+            const grandchildIndex = rendered.indexOf('Gibbs现象有什么影响？');
+            if (!(rootIndex < childIndex && childIndex < grandchildIndex)) {
+              throw new Error(rendered);
+            }
+            """
+        )
+
+    def test_question_tree_collapses_answers_and_actions_by_default(self):
+        self.run_js(
+            r"""
+            global.window = {
+              marked: { parse: value => String(value) },
+              DOMPurify: { sanitize: value => String(value) },
+            };
+            var learningWritable = true;
+            var currentSlideNumber = 8;
+            const rendered = renderQuestionTree([{
+              id: 1,
+              question: '为什么需要窗函数？',
+              answer: '详细回答',
+              parentQuestionId: null,
+              depth: 0,
+              understood: false,
+              convertedToKnowledge: false,
+            }]);
+
+            if (!rendered.includes('<details class="question-tree-details">')) {
+              throw new Error(rendered);
+            }
+            if (rendered.includes('<details class="question-tree-details" open')) {
+              throw new Error('answer should be collapsed by default');
+            }
+            const summary = rendered.match(/<summary[\s\S]*?<\/summary>/)?.[0] || '';
+            if (!summary || summary.includes('<button')) {
+              throw new Error(summary || rendered);
+            }
+            for (const action of [
+              'data-open-child-chat="1"',
+              'data-question-learning-action="convert_question_to_knowledge"',
+              'data-question-learning-action="mark_question_understood"',
+            ]) {
+              if (!rendered.includes(action)) throw new Error(`${action}: ${rendered}`);
+            }
+            """
+        )
+
     def test_current_questions_and_review_are_projected_from_existing_page_payload(self):
         self.run_js(
             r"""
@@ -1917,7 +2030,7 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
         self.assertIn("setLearningTab('deposition'", send_selection)
         self.assertNotIn("learning_tab", send_selection)
 
-    def test_historical_read_only_keeps_sidebar_navigation_and_review_actions(self):
+    def test_historical_read_only_keeps_navigation_and_hides_all_question_mutations(self):
         self.run_js(
             r"""
             global.window = {
@@ -1933,11 +2046,29 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
               understood: false,
               convertedToKnowledge: false,
             });
-            if (turn.includes('data-open-child-chat') || turn.includes('convert_question_to_knowledge')) {
+            if (
+              turn.includes('data-open-child-chat')
+              || turn.includes('convert_question_to_knowledge')
+              || turn.includes('mark_question_understood')
+            ) {
               throw new Error(turn);
             }
-            if (!turn.includes('mark_question_understood')) {
-              throw new Error('historical review action disappeared');
+
+            const tree = renderQuestionTree([{
+              id: 12,
+              question: '历史插问',
+              answer: '历史回答',
+              parentQuestionId: null,
+              depth: 0,
+              understood: false,
+              convertedToKnowledge: false,
+            }]);
+            if (
+              tree.includes('data-open-child-chat')
+              || tree.includes('convert_question_to_knowledge')
+              || tree.includes('mark_question_understood')
+            ) {
+              throw new Error(tree);
             }
 
             const madeClasses = () => ({ toggle() {} });

@@ -80,6 +80,7 @@ from services.ppt_reader_state import (
     parse_reader_position,
     reader_active_slide_number,
     reader_active_slide_state_key,
+    reader_deck_position_setting_key,
     reader_image_window_slide_numbers,
     reader_position_setting_key,
     should_refresh_task,
@@ -288,20 +289,36 @@ def _save_last_reader_position(
     if not payload:
         return
 
-    if existing == payload:
-        return
+    if existing != payload:
+        execute(
+            """
+            INSERT INTO app_settings (key, user_id, value, updated_at)
+            VALUES (?, ?, ?, datetime('now', 'localtime'))
+            ON CONFLICT(key) DO UPDATE SET
+                user_id = excluded.user_id,
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (reader_position_setting_key(user_id), user_id, json.dumps(payload, ensure_ascii=False)),
+        )
 
-    execute(
-        """
-        INSERT INTO app_settings (key, user_id, value, updated_at)
-        VALUES (?, ?, ?, datetime('now', 'localtime'))
-        ON CONFLICT(key) DO UPDATE SET
-            user_id = excluded.user_id,
-            value = excluded.value,
-            updated_at = excluded.updated_at
-        """,
-        (reader_position_setting_key(user_id), user_id, json.dumps(payload, ensure_ascii=False)),
-    )
+    if slide_number is not None and "slide_number" in payload:
+        deck_payload = {**payload, "saved_at_ns": time.time_ns()}
+        execute(
+            """
+            INSERT INTO app_settings (key, user_id, value, updated_at)
+            VALUES (?, ?, ?, datetime('now', 'localtime'))
+            ON CONFLICT(key) DO UPDATE SET
+                user_id = excluded.user_id,
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (
+                reader_deck_position_setting_key(user_id, deck_id),
+                user_id,
+                json.dumps(deck_payload, ensure_ascii=False),
+            ),
+        )
 
 
 def _default_reader_deck_id(deck_ids: list[int], last_position: dict[str, int]) -> int:
