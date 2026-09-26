@@ -1827,6 +1827,18 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
             r'data-learning-panel="review"[\s\S]*?掌握度[\s\S]*?复习计划',
         )
 
+    def test_understanding_panel_prioritizes_current_explanation_content(self):
+        source = READER_HTML.read_text(encoding="utf-8")
+
+        self.assertRegex(source, r"\.canvas-chat-meta\s*\{[\s\S]*?display:\s*none")
+        self.assertRegex(
+            source,
+            r"\.learning-understand-panel \.learning-panel-label\s*,\s*\.learning-understand-panel \.learning-current-explanation-title\s*\{[\s\S]*?display:\s*none",
+        )
+        self.assertRegex(source, r"\.note-meta\s*\{[\s\S]*?display:\s*none")
+        self.assertIn('<details class="note-context">', source)
+        self.assertIn('<summary class="note-context-summary">', source)
+
     def test_learning_sidebar_defaults_expanded_and_remains_available_on_narrow_layouts(self):
         source = READER_HTML.read_text(encoding="utf-8")
 

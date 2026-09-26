@@ -1,5 +1,5 @@
 param(
-    [int]$Port = 8502
+    [int]$Port = 8501
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,17 +20,34 @@ if (-not $PythonExe) {
     throw "Python was not found. Install Python or create a project .venv."
 }
 
-$BaseUrl = "http://127.0.0.1:$Port"
-$HealthUrl = "$BaseUrl/_stcore/health"
+# Reuse the standard app port when it is already running.  Starting the MCP
+# shortcut on a second port would create a second Streamlit process against
+# the same SQLite/WAL files and makes transient write failures much more
+# likely, especially while the data directory is being cloud-synced.
 $Ready = $false
-try {
-    $Health = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 1
-    $Ready = $Health.StatusCode -eq 200
-} catch {
-    $Ready = $false
+$CandidatePorts = @($Port)
+if ($Port -eq 8501) {
+    # 8502 was used by the first version of the desktop shortcut. Reuse it if
+    # it is still the only healthy instance instead of creating another one.
+    $CandidatePorts += 8502
+}
+foreach ($CandidatePort in $CandidatePorts) {
+    $CandidateBaseUrl = "http://127.0.0.1:$CandidatePort"
+    try {
+        $Health = Invoke-WebRequest -Uri "$CandidateBaseUrl/_stcore/health" -UseBasicParsing -TimeoutSec 1
+        if ($Health.StatusCode -eq 200) {
+            $Port = $CandidatePort
+            $BaseUrl = $CandidateBaseUrl
+            $Ready = $true
+            break
+        }
+    } catch {
+        # Try the next candidate or start a new instance below.
+    }
 }
 
 if (-not $Ready) {
+    $BaseUrl = "http://127.0.0.1:$Port"
     $StreamlitArgs = @(
         "-m",
         "streamlit",

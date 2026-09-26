@@ -137,9 +137,14 @@ class ChatGptExplanationTaskServiceTest(unittest.TestCase):
             [(item["slide_id"], item["slide_number"]) for item in slides_payload["slides"]],
             [(slide_ids[1], 2), (slide_ids[3], 4)],
         )
+        self.assertTrue(slides_payload["outline"])
+        self.assertTrue(slides_payload["sections"])
         self.assertIn(manifest["task_id"], instructions)
         self.assertIn("explanation_result.json", instructions)
         self.assertIn("不要只把最终结果打印在聊天正文中", instructions)
+        self.assertIn("detailed_page_tutor_v2", instructions)
+        self.assertIn("正文知识页目标 900–1500 个中文字符", instructions)
+        self.assertIn("公式与推导逐步拆解", instructions)
         example_text = instructions.split("```json", 1)[1].split("```", 1)[0]
         result_example = json.loads(example_text)
         self.assertRegex(result_example["result_id"], r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")

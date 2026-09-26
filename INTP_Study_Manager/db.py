@@ -14,6 +14,7 @@ DATABASE_PATH = DATA_DIR / "study_manager.db"
 SQLITE_TIMEOUT_SECONDS = 30
 SQLITE_BUSY_TIMEOUT_MS = SQLITE_TIMEOUT_SECONDS * 1000
 WRITE_RETRY_ATTEMPTS = 4
+WRITE_RETRY_DELAY_SECONDS = 0.05
 _INIT_LOCK = threading.Lock()
 _INITIALIZED_DATABASE_PATH: Path | None = None
 
@@ -1593,23 +1594,49 @@ def insert_and_get_id(query: str, params: Iterable[Any] = ()) -> int:
         return int(cursor.lastrowid)
 
 
+def _is_retryable_write_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "locked",
+            "busy",
+            "readonly database",
+            "read-only",
+            "read only",
+        )
+    )
+
+
 @contextmanager
 def write_transaction(*, attempts: int = WRITE_RETRY_ATTEMPTS) -> Iterator[sqlite3.Connection]:
-    conn = get_connection()
-    delay = 0.05
+    total_attempts = max(1, attempts)
+    conn: sqlite3.Connection | None = None
+    delay = WRITE_RETRY_DELAY_SECONDS
+
+    # A cloud-sync client can briefly replace SQLite's WAL/SHM sidecars.  A
+    # connection opened during that window may report "readonly database" even
+    # though the directory and database are writable again moments later.  Do
+    # not reuse that connection: reopen it for every retry so SQLite refreshes
+    # its view of the database files.
+    for attempt in range(total_attempts):
+        try:
+            conn = get_connection()
+            conn.execute("BEGIN IMMEDIATE")
+            break
+        except sqlite3.OperationalError as exc:
+            if conn is not None:
+                conn.close()
+                conn = None
+            if not _is_retryable_write_error(exc) or attempt == total_attempts - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
+
+    if conn is None:  # pragma: no cover - defensive guard for invalid adapters
+        raise sqlite3.OperationalError("unable to open a write transaction")
+
     try:
-        for attempt in range(max(1, attempts)):
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-                break
-            except sqlite3.OperationalError as exc:
-                message = str(exc).lower()
-                if "locked" not in message and "busy" not in message:
-                    raise
-                if attempt == attempts - 1:
-                    raise
-                time.sleep(delay)
-                delay *= 2
         yield conn
         conn.commit()
     except Exception:

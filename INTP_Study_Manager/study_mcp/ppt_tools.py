@@ -13,7 +13,9 @@ from study_mcp.tool_runtime import READ_TOOL_ANNOTATIONS, ToolRuntime
 def register_ppt_tools(server: MCPServer, runtime: ToolRuntime) -> None:
     @server.tool(
         description=(
-            "Read the active PPT slide, its structure and latest explanation. Read-only. "
+            "Read the active PPT slide for detailed_page_tutor_v2 generation. Read-only. "
+            "The result includes its directory section, deck outline, latest explanation, "
+            "generation_profile, and page-specific generation_context. "
             "Set `include_neighbor_context` to include nearby pages and `neighbor_radius` "
             "to 0-2; neighboring context is bounded to at most two slides on each side."
         ),
@@ -43,7 +45,11 @@ def register_ppt_tools(server: MCPServer, runtime: ToolRuntime) -> None:
 
     @server.tool(
         description=(
-            "Read a numbered range from one user-owned PPT deck. Read-only. "
+            "Read a numbered range from one user-owned PPT deck for detailed_page_tutor_v2 "
+            "generation. Read-only. The result includes the deck outline, intersecting directory "
+            "sections, per-page `generation_context`, and a `generation_profile` that defines "
+            "required teaching blocks and target depth; follow that profile instead of producing "
+            "short page summaries. "
             "`deck_id` identifies the owned deck; `start_slide` and `end_slide` are inclusive "
             "page numbers. The range is limited to 25 slides and cannot cross users."
         ),

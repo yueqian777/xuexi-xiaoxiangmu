@@ -12,6 +12,7 @@ from typing import Any
 import db
 from repositories.ppt_repository import latest_explanations_by_slide_ids
 from services import chatgpt_explanation_schema as schema
+from services import ppt_context_service
 from services.export_manifest_service import write_manifest
 from services.export_path_service import ensure_clean_dir, safe_filename, zip_directory
 
@@ -353,6 +354,7 @@ def _create_one_package(
         "deck_fingerprint": plan["deck_fingerprint"],
         "subject": plan["subject"],
         "deck_title": plan["deck_title"],
+        "outline": _as_text(plan["deck"].get("outline")),
         "sections": list(chunk.get("sections") or []),
         "slides": slide_payloads,
     }
@@ -496,17 +498,34 @@ def _instructions(manifest: Mapping[str, Any]) -> str:
         ],
     }
     example_json = json.dumps(example, ensure_ascii=False, indent=2)
+    profile = ppt_context_service.detailed_explanation_profile()
+    required_blocks = "\n".join(
+        f"{index}. {block}"
+        for index, block in enumerate(profile["required_blocks"], start=1)
+    )
     return f"""# INTP Study Manager：ChatGPT 网页逐页讲解任务
 
 请先阅读 `manifest.json` 与完整的 `slides.json`，理解本任务中的目录结构、页面顺序和前后页关系，再逐页生成讲解。不要只复述幻灯片原文。
 
-每页讲解应尽量说明：
+本任务使用质量档案 `{profile['profile_id']}`：
+
+- 正文知识页目标 900–1500 个中文字符；过渡页或目录页目标 250–450 个中文字符。
+- 批量任务仍要逐页完整讲解，不得把多页压缩成一段章节摘要。
+- 先利用 `outline` 与 `sections` 建立目录主线，再解释每页承接什么、为下一页准备什么。
+- OCR、图示或公式无法可靠辨认时明确指出不确定处，不得自行补造。
+
+每个正文知识页必须包含以下六个三级标题：
+
+{required_blocks}
+
+具体深度要求：
 
 1. 这一页解决什么问题；
-2. 核心概念，以及公式、推导或逻辑；
-3. 为什么这样处理；
+2. 核心概念及其物理图像，不能只改写页面文字；
+3. 公式与推导逐步拆解：逐一定义关键符号、方向、单位或量纲、成立条件和中间逻辑；
 4. 它与前后页的关系；
-5. 容易混淆或误用的地方。
+5. 容易混淆、误用或忽略的适用条件；
+6. 两道闭卷自测题，并给出简短答案线索。
 
 正文使用 Markdown，数学公式尽量使用 LaTeX。不得修改或自行补造 `task_id`、`deck_id`、`deck_fingerprint`、`slide_id`、`slide_number`，也不得添加任务中不存在的页面。必须覆盖 `manifest.json` 的 `requested_slides`；如果确实无法完成某页，就不要伪造内容。
 
@@ -544,7 +563,7 @@ def _load_deck_context(
     db.init_db()
     deck = db.fetch_one(
         """
-        SELECT id, user_id, title, subject, slide_count
+        SELECT id, user_id, title, subject, slide_count, outline
         FROM ppt_decks
         WHERE id = ? AND user_id = ?
         """,
@@ -573,6 +592,20 @@ def _load_deck_context(
         (int(deck_id), int(user_id)),
     )
     sections = [_section_payload(section) for section in sections_raw]
+    if not sections and slides:
+        structure = ppt_context_service.infer_document_structure_from_titles(slides)
+        sections = [_section_payload(section) for section in structure.get("sections") or []]
+        deck["outline"] = _as_text(deck.get("outline")) or _as_text(structure.get("outline"))
+        page_by_number = {
+            int(page["slide_number"]): page
+            for page in structure.get("pages") or []
+        }
+        for slide in slides:
+            page = page_by_number.get(int(slide["slide_number"]), {})
+            slide["section_index"] = int(page.get("section_index") or 0)
+            for field in ("page_type", "one_sentence_summary", "slide_role", "key_points"):
+                if not _as_text(slide.get(field)):
+                    slide[field] = _as_text(page.get(field))
     return deck, slides, sections
 
 

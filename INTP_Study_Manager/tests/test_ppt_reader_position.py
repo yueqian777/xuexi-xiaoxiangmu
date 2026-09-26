@@ -781,6 +781,33 @@ class PptReaderPositionTest(unittest.TestCase):
         self.assertIn("当前目录块：收敛域", prompt)
         self.assertIn("ROC 怎么决定系统性质？", prompt)
 
+    def test_slide_prompt_uses_the_same_detailed_profile_as_mcp(self):
+        with (
+            patch.object(ppt_tutor, "_related_knowledge_context", return_value="暂无同科目知识卡片。"),
+            patch.object(ppt_tutor, "_image_exists", return_value=False),
+        ):
+            prompt = ppt_tutor._build_slide_prompt(
+                {"title": "矢量分析", "subject": "电磁场与微波"},
+                {"slide_number": 4, "title": "矢量与标量", "slide_text": "标量只有大小，矢量还有方向。"},
+                context={
+                    "deck_title": "矢量分析",
+                    "section": {"title": "1.1 矢量", "start_slide": 3, "end_slide": 8},
+                    "slide": {"slide_number": 4, "title": "矢量与标量"},
+                },
+            )
+
+        self.assertIn("detailed_page_tutor_v2", prompt)
+        self.assertIn("900 到 1500 个中文字符", prompt)
+        for heading in (
+            "章节定位与本页任务",
+            "核心概念与物理图像",
+            "公式与推导逐步拆解",
+            "前后页连接",
+            "易错点与适用条件",
+            "闭卷自测",
+        ):
+            self.assertIn(f"### {heading}", prompt)
+
     def test_slide_prompt_includes_animation_summary_once(self):
         with (
             patch.object(ppt_tutor, "_related_knowledge_context", return_value="暂无同科目知识卡片。"),

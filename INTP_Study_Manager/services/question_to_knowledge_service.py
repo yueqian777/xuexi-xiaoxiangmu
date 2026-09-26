@@ -143,6 +143,27 @@ def ensure_question_review_tasks(user_id: int, question_id: int) -> dict[str, An
 
 def mark_question_understood(user_id: int, question_id: int) -> bool:
     with write_transaction() as conn:
+        question = conn.execute(
+            """
+            SELECT
+                sq.id,
+                owned_course.status AS deck_course_status
+            FROM slide_questions sq
+            LEFT JOIN ppt_slides ps
+              ON ps.id = sq.slide_id AND ps.user_id = sq.user_id
+            LEFT JOIN ppt_decks d
+              ON d.id = ps.deck_id AND d.user_id = sq.user_id
+            LEFT JOIN courses owned_course
+              ON owned_course.id = d.course_id AND owned_course.user_id = sq.user_id
+            WHERE sq.user_id = ? AND sq.id = ?
+            """,
+            (int(user_id), int(question_id)),
+        ).fetchone()
+        if not question:
+            return False
+        course_status = str(question["deck_course_status"] or "").strip()
+        if course_status and course_status != "active":
+            return False
         cursor = conn.execute(
             """
             UPDATE slide_questions

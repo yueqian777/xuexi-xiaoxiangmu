@@ -56,26 +56,28 @@ def record_audit_log(
     clean_summary = _normalize_summary(summary)
 
     db.init_db()
-    return db.insert_and_get_id(
-        """
-        INSERT INTO mcp_audit_logs (
-            user_id, request_id, tool_name, operation_type, target_type,
-            target_id, success, permission_result, summary
+    with db.write_transaction() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO mcp_audit_logs (
+                user_id, request_id, tool_name, operation_type, target_type,
+                target_id, success, permission_result, summary
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id_int,
+                clean_request_id,
+                clean_tool_name,
+                clean_operation_type,
+                clean_target_type,
+                clean_target_id,
+                int(success),
+                permission_result,
+                clean_summary,
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            user_id_int,
-            clean_request_id,
-            clean_tool_name,
-            clean_operation_type,
-            clean_target_type,
-            clean_target_id,
-            int(success),
-            permission_result,
-            clean_summary,
-        ),
-    )
+        return int(cursor.lastrowid)
 
 
 def list_recent_audit_logs(user_id: int, limit: int = 50) -> list[dict[str, Any]]:

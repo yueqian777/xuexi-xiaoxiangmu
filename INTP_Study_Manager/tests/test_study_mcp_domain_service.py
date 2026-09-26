@@ -32,6 +32,10 @@ class StudyMcpDomainServiceTest(unittest.TestCase):
         self.deck_id, self.slide_ids = self._create_deck(self.user_id, "Signals", 4)
         self.other_deck_id, self.other_slide_ids = self._create_deck(self.other_user_id, "Private", 2)
         db.execute(
+            "UPDATE ppt_decks SET outline = 'ROC then stability' WHERE id = ? AND user_id = ?",
+            (self.deck_id, self.user_id),
+        )
+        db.execute(
             """
             INSERT INTO ppt_sections (
                 user_id, deck_id, section_index, title, topic, core_question,
@@ -171,8 +175,17 @@ class StudyMcpDomainServiceTest(unittest.TestCase):
         result = domain.read_slide_range(self.user_id, self.deck_id, 2, 4)
 
         self.assertEqual(result["deck"]["deck_id"], self.deck_id)
+        self.assertEqual(result["deck"]["outline"], "ROC then stability")
         self.assertEqual([row["slide_number"] for row in result["slides"]], [2, 3, 4])
         self.assertEqual([row["section_index"] for row in result["sections"]], [1])
+        self.assertEqual(result["generation_profile"]["profile_id"], "detailed_page_tutor_v2")
+        self.assertEqual(
+            result["generation_profile"]["target_length"]["content_page_chars"],
+            [900, 1500],
+        )
+        self.assertIn("当前目录块：ROC block", result["slides"][0]["generation_context"])
+        self.assertIn("上一页：第 1 页", result["slides"][0]["generation_context"])
+        self.assertIn("下一页：第 3 页", result["slides"][0]["generation_context"])
         self.assertTrue(result["deck_fingerprint"].startswith("sha256:"))
         self.assert_no_local_paths(result)
 

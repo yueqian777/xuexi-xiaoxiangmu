@@ -11,6 +11,39 @@ LIGHTWEIGHT_PAGE_TYPES = {"过渡页", "目录页", "章节标题页", "标题�
 CONTENT_PAGE_TYPES = {"讲解页", "正文页", "公式页", "例题页", "总结页"}
 
 
+def detailed_explanation_profile() -> dict[str, Any]:
+    """Return the shared, transport-neutral contract for a high-detail page explanation."""
+
+    return {
+        "profile_id": "detailed_page_tutor_v2",
+        "intent": "以目录块为骨架，把当前页讲成可独立复习、又能接回整章主线的学习材料。",
+        "target_length": {
+            "content_page_chars": [900, 1500],
+            "transition_page_chars": [250, 450],
+        },
+        "required_blocks": [
+            "章节定位与本页任务",
+            "核心概念与物理图像",
+            "公式与推导逐步拆解",
+            "前后页连接",
+            "易错点与适用条件",
+            "闭卷自测",
+        ],
+        "formula_rules": [
+            "逐一定义公式中的关键符号、方向、单位或量纲以及成立条件。",
+            "按从已知到结论的顺序补出页面省略的中间逻辑，但不得编造课件之外的结论。",
+            "区分数学形式、物理意义和实际使用步骤；有方向约定时必须明确说明。",
+        ],
+        "quality_rules": [
+            "先说明本页位于哪个目录块、承接什么、为下一页准备什么。",
+            "不要复述 OCR；优先解释为什么、如何推导、何时使用以及和相邻概念的区别。",
+            "OCR、图示或公式无法可靠辨认时要明确标注不确定处，不得自行补造。",
+            "过渡页保持简洁；正文、公式和例题页必须达到可脱离幻灯片复习的完整度。",
+            "每页保留独立标题和页面标签，批量生成时不得把多页压缩成一段总摘要。",
+        ],
+    }
+
+
 def format_pages_for_structure_prompt(slides: list[dict], *, per_page_limit: int = 420) -> str:
     chunks = []
     for slide in slides:
@@ -108,81 +141,230 @@ def normalize_document_structure(payload: dict[str, Any], slides: list[int] | li
     }
 
 
-def save_deck_structure(deck_id: int, structure: dict[str, Any], *, user_id: int | None = None) -> None:
+def infer_document_structure_from_titles(slides: list[dict]) -> dict[str, Any]:
+    """Infer a conservative local outline without calling an AI provider.
+
+    Many teaching decks repeat the course title on each subsection divider. Those
+    repeated, well-spaced pages are strong structural signals. When the signal is
+    absent this returns one continuous block instead of inventing fixed-size chapters.
+    """
+
+    slide_meta = _slide_metadata_map(slides)
+    ordered = [slide_meta[number] for number in sorted(slide_meta)]
+    if not ordered:
+        return {"outline": "", "sections": [], "pages": []}
+
+    title_occurrences: dict[str, list[int]] = {}
+    for slide in ordered:
+        key = _normalized_title_key(slide.get("title"))
+        if key:
+            title_occurrences.setdefault(key, []).append(int(slide["slide_number"]))
+
+    repeated_transition_keys = {
+        key
+        for key, numbers in title_occurrences.items()
+        if _is_repeated_transition_group(numbers, len(ordered))
+    }
+    first_slide = int(ordered[0]["slide_number"])
+    boundary_numbers = {first_slide}
+    transition_numbers: set[int] = set()
+    for slide in ordered:
+        number = int(slide["slide_number"])
+        title_key = _normalized_title_key(slide.get("title"))
+        combined = f"{_text(slide.get('title'))}\n{_text(slide.get('slide_text'))}".strip()
+        repeated_divider = title_key in repeated_transition_keys
+        explicit_divider = (
+            len(re.sub(r"\s+", "", combined)) <= 220
+            and _looks_like_transition_title(_text(slide.get("title")))
+            and (number == first_slide or title_key not in {"引言", "绪论"})
+        )
+        if repeated_divider or explicit_divider:
+            boundary_numbers.add(number)
+            transition_numbers.add(number)
+
+    max_reasonable_boundaries = min(12, max(2, (len(ordered) + 1) // 2))
+    if len(boundary_numbers) > max_reasonable_boundaries:
+        boundary_numbers = {first_slide}
+        transition_numbers.clear()
+
+    starts = sorted(boundary_numbers)
+    last_slide = int(ordered[-1]["slide_number"])
+    sections: list[dict[str, Any]] = []
+    for position, start_slide in enumerate(starts):
+        end_slide = starts[position + 1] - 1 if position + 1 < len(starts) else last_slide
+        block = [
+            slide
+            for slide in ordered
+            if start_slide <= int(slide["slide_number"]) <= end_slide
+        ]
+        title = _infer_local_section_title(
+            block,
+            repeated_transition_keys=repeated_transition_keys,
+        )
+        section_index = len(sections) + 1
+        sections.append(
+            {
+                "section_index": section_index,
+                "title": title,
+                "topic": title,
+                "core_question": f"如何理解并串联“{title}”中的核心定义、公式与物理意义？",
+                "summary": _local_section_summary(block, repeated_transition_keys),
+                "key_terms": _local_section_key_terms(block, repeated_transition_keys),
+                "prerequisite_concepts": [],
+                "start_slide": start_slide,
+                "end_slide": end_slide,
+            }
+        )
+
+    if len(sections) == 1 and first_slide not in transition_numbers:
+        transition_numbers.clear()
+
+    transition_pages = []
+    for slide_number in sorted(transition_numbers):
+        section = next(
+            item
+            for item in sections
+            if int(item["start_slide"]) <= slide_number <= int(item["end_slide"])
+        )
+        next_start = min(slide_number + 1, int(section["end_slide"]))
+        transition_pages.append(
+            {
+                "slide_number": slide_number,
+                "section_index": int(section["section_index"]),
+                "page_type": "过渡页",
+                "one_sentence_summary": f"进入“{section['title']}”目录块。",
+                "slide_role": "章节入口，建立本块问题主线。",
+                "key_points": (
+                    f"先明确本块核心问题，再阅读第 {next_start}-{section['end_slide']} 页。"
+                    if next_start < int(section["end_slide"])
+                    else "先明确本块核心问题，再进入正文。"
+                ),
+            }
+        )
+
+    outline = "；".join(
+        f"{section['section_index']}. {section['title']}（第 {section['start_slide']}-{section['end_slide']} 页）"
+        for section in sections
+    )
+    return normalize_document_structure(
+        {
+            "outline": outline,
+            "sections": sections,
+            "transition_pages": transition_pages,
+        },
+        ordered,
+    )
+
+
+def save_deck_structure(
+    deck_id: int,
+    structure: dict[str, Any],
+    *,
+    user_id: int | None = None,
+    conn: Any | None = None,
+) -> None:
     deck_id = int(deck_id)
     expected_user_id = int(user_id) if user_id is not None else None
     sections = structure.get("sections") if isinstance(structure.get("sections"), list) else []
     pages = structure.get("pages") if isinstance(structure.get("pages"), list) else []
-    with write_transaction() as conn:
-        if expected_user_id is None:
-            deck = conn.execute("SELECT id, user_id FROM ppt_decks WHERE id = ?", (deck_id,)).fetchone()
-        else:
-            deck = conn.execute(
-                "SELECT id, user_id FROM ppt_decks WHERE id = ? AND user_id = ?",
-                (deck_id, expected_user_id),
-            ).fetchone()
-        if not deck:
-            raise PermissionError("无权更新这份 PPT 资料。") if expected_user_id is not None else ValueError("PPT 资料不存在。")
-        owner_id = int(deck["user_id"])
+    if conn is not None:
+        _save_deck_structure_with_connection(
+            conn,
+            deck_id,
+            expected_user_id,
+            structure,
+            sections,
+            pages,
+        )
+        return
+    with write_transaction() as write_conn:
+        _save_deck_structure_with_connection(
+            write_conn,
+            deck_id,
+            expected_user_id,
+            structure,
+            sections,
+            pages,
+        )
 
-        conn.execute("DELETE FROM ppt_sections WHERE deck_id = ? AND user_id = ?", (deck_id, owner_id))
-        conn.execute(
-            """
-            UPDATE ppt_decks
-            SET outline = ?, outline_generated_at = datetime('now', 'localtime')
-            WHERE id = ? AND user_id = ?
-            """,
-            (_text(structure.get("outline")), deck_id, owner_id),
+
+def _save_deck_structure_with_connection(
+    conn: Any,
+    deck_id: int,
+    expected_user_id: int | None,
+    structure: dict[str, Any],
+    sections: list[dict[str, Any]],
+    pages: list[dict[str, Any]],
+) -> None:
+    if expected_user_id is None:
+        deck = conn.execute("SELECT id, user_id FROM ppt_decks WHERE id = ?", (deck_id,)).fetchone()
+    else:
+        deck = conn.execute(
+            "SELECT id, user_id FROM ppt_decks WHERE id = ? AND user_id = ?",
+            (deck_id, expected_user_id),
+        ).fetchone()
+    if not deck:
+        raise PermissionError("无权更新这份 PPT 资料。") if expected_user_id is not None else ValueError("PPT 资料不存在。")
+    owner_id = int(deck["user_id"])
+
+    conn.execute("DELETE FROM ppt_sections WHERE deck_id = ? AND user_id = ?", (deck_id, owner_id))
+    conn.execute(
+        """
+        UPDATE ppt_decks
+        SET outline = ?, outline_generated_at = datetime('now', 'localtime')
+        WHERE id = ? AND user_id = ?
+        """,
+        (_text(structure.get("outline")), deck_id, owner_id),
+    )
+    conn.executemany(
+        """
+        INSERT INTO ppt_sections (
+            user_id, deck_id, section_index, title, topic, core_question, summary,
+            key_terms_json, prerequisite_concepts_json, start_slide, end_slide
         )
-        conn.executemany(
-            """
-            INSERT INTO ppt_sections (
-                user_id, deck_id, section_index, title, topic, core_question, summary,
-                key_terms_json, prerequisite_concepts_json, start_slide, end_slide
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                owner_id,
+                deck_id,
+                int(section["section_index"]),
+                section["title"],
+                section.get("topic") or "",
+                section.get("core_question") or "",
+                section.get("summary") or "",
+                json.dumps(section.get("key_terms") or [], ensure_ascii=False),
+                json.dumps(section.get("prerequisite_concepts") or [], ensure_ascii=False),
+                int(section["start_slide"]),
+                int(section["end_slide"]),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            for section in sections
+        ),
+    )
+    conn.executemany(
+        """
+        UPDATE ppt_slides
+        SET section_index = ?,
+            page_type = ?,
+            one_sentence_summary = ?,
+            slide_role = ?,
+            key_points = ?
+        WHERE user_id = ? AND deck_id = ? AND slide_number = ?
+        """,
+        (
             (
-                (
-                    owner_id,
-                    deck_id,
-                    int(section["section_index"]),
-                    section["title"],
-                    section.get("topic") or "",
-                    section.get("core_question") or "",
-                    section.get("summary") or "",
-                    json.dumps(section.get("key_terms") or [], ensure_ascii=False),
-                    json.dumps(section.get("prerequisite_concepts") or [], ensure_ascii=False),
-                    int(section["start_slide"]),
-                    int(section["end_slide"]),
-                )
-                for section in sections
-            ),
-        )
-        conn.executemany(
-            """
-            UPDATE ppt_slides
-            SET section_index = ?,
-                page_type = ?,
-                one_sentence_summary = ?,
-                slide_role = ?,
-                key_points = ?
-            WHERE user_id = ? AND deck_id = ? AND slide_number = ?
-            """,
-            (
-                (
-                    int(page.get("section_index") or 0),
-                    _normalize_optional_page_type(page.get("page_type")),
-                    _text(page.get("one_sentence_summary")),
-                    _text(page.get("slide_role")),
-                    _text(page.get("key_points")),
-                    owner_id,
-                    deck_id,
-                    int(page["slide_number"]),
-                )
-                for page in pages
-            ),
-        )
+                int(page.get("section_index") or 0),
+                _normalize_optional_page_type(page.get("page_type")),
+                _text(page.get("one_sentence_summary")),
+                _text(page.get("slide_role")),
+                _text(page.get("key_points")),
+                owner_id,
+                deck_id,
+                int(page["slide_number"]),
+            )
+            for page in pages
+        ),
+    )
 
 
 def fetch_deck_sections(deck_id: int, *, user_id: int | None = None) -> list[dict[str, Any]]:
@@ -309,7 +491,12 @@ def _limited_context_lines(items: list[tuple[int, str]], current_slide_number: i
 
 
 def should_use_lightweight_explanation(slide: dict) -> bool:
-    page_type = str(slide.get("page_type") or "").strip()
+    # Older imported structures may persist labels such as "章节页" or
+    # "章节标题页". Normalize before deciding so legacy transition pages do
+    # not get sent through the full content-page generation path. The
+    # normalizer checks content labels (for example "章节正文页") first, so a
+    # real正文页 remains a content page.
+    page_type = _normalize_page_type(slide.get("page_type"))
     return page_type in LIGHTWEIGHT_PAGE_TYPES
 
 
@@ -466,6 +653,93 @@ def _looks_like_transition_title(text: str) -> bool:
         r"^引言$",
     )
     return any(re.search(pattern, normalized) for pattern in patterns)
+
+
+def _normalized_title_key(value: Any) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", _text(value).lower())
+
+
+def _is_repeated_transition_group(numbers: list[int], slide_count: int) -> bool:
+    if len(numbers) < 3:
+        return False
+    if len(numbers) > max(3, int(slide_count * 0.45)):
+        return False
+    gaps = [right - left for left, right in zip(numbers, numbers[1:])]
+    if not gaps:
+        return False
+    return sum(gap >= 2 for gap in gaps) >= max(1, len(gaps) - 1) and max(gaps) >= 3
+
+
+def _infer_local_section_title(
+    block: list[dict[str, Any]],
+    *,
+    repeated_transition_keys: set[str],
+) -> str:
+    if not block:
+        return "未分块内容"
+    heading = _extract_section_heading(block[0])
+    if heading:
+        return heading
+    for slide in block:
+        title = _text(slide.get("title"))
+        if title and _normalized_title_key(title) not in repeated_transition_keys:
+            return _clip_text(title, 48)
+    first_number = int(block[0]["slide_number"])
+    last_number = int(block[-1]["slide_number"])
+    return f"第 {first_number}-{last_number} 页"
+
+
+def _extract_section_heading(slide: dict[str, Any]) -> str:
+    candidates = [
+        line.strip(" ：:·-")
+        for line in re.split(r"[\r\n]+", _text(slide.get("slide_text")))
+        if line.strip()
+    ]
+    patterns = (
+        r"^第[一二三四五六七八九十百\d]+章\s*.{1,48}$",
+        r"^\d+(?:\.\d+)+\s*.{1,48}$",
+    )
+    for line in candidates:
+        normalized = re.sub(r"\s+", " ", line).strip()
+        if len(normalized) <= 64 and any(re.match(pattern, normalized) for pattern in patterns):
+            return normalized
+    title = re.sub(r"\s+", " ", _text(slide.get("title"))).strip()
+    if title and _looks_like_transition_title(title):
+        return _clip_text(title, 48)
+    return ""
+
+
+def _local_section_summary(block: list[dict[str, Any]], repeated_keys: set[str]) -> str:
+    titles = _distinct_local_titles(block, repeated_keys, limit=4)
+    if titles:
+        return "本块依次覆盖：" + "、".join(titles) + "。"
+    start = int(block[0]["slide_number"])
+    end = int(block[-1]["slide_number"])
+    return f"本块覆盖第 {start}-{end} 页，按页面顺序建立知识主线。"
+
+
+def _local_section_key_terms(block: list[dict[str, Any]], repeated_keys: set[str]) -> list[str]:
+    return [_clip_text(title, 30) for title in _distinct_local_titles(block, repeated_keys, limit=6)]
+
+
+def _distinct_local_titles(
+    block: list[dict[str, Any]],
+    repeated_keys: set[str],
+    *,
+    limit: int,
+) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for slide in block:
+        title = re.sub(r"\s+", " ", _text(slide.get("title"))).strip()
+        key = _normalized_title_key(title)
+        if not title or key in repeated_keys or key in seen:
+            continue
+        seen.add(key)
+        result.append(_clip_text(title, 48))
+        if len(result) >= limit:
+            break
+    return result
 
 
 def _normalize_sections(raw_sections: list[Any], first_slide: int, last_slide: int) -> list[dict[str, Any]]:

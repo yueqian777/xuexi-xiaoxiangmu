@@ -123,6 +123,22 @@ class StudyMcpServerProtocolTest(unittest.IsolatedAsyncioTestCase):
                     tool.description,
                     f"{tool.name} description must explain {parameter}",
                 )
+        self.assertIn(
+            "detailed_page_tutor_v2",
+            tools["study_read_slide_range"].description,
+        )
+        self.assertIn(
+            "generation_profile",
+            tools["study_read_slide_range"].description,
+        )
+        self.assertIn(
+            "detailed_page_tutor_v2",
+            tools["study_get_current_slide"].description,
+        )
+        self.assertIn(
+            "generation_context",
+            tools["study_get_current_slide"].description,
+        )
 
     async def test_current_context_and_slide_are_structured_and_audited(self):
         context_result = await self._call("study_get_current_context")

@@ -77,14 +77,35 @@ def get_current_slide(
             "The active slide no longer matches the owned PPT context.",
         )
 
-    sections = _owned_sections(owner_id, deck_id)
+    all_slide_rows = _owned_deck_slides(owner_id, deck_id)
+    sections, effective_slides, inferred_outline = _effective_deck_structure(
+        owner_id,
+        deck_id,
+        all_slide_rows or [slide],
+    )
+    effective_slide = next(
+        (row for row in effective_slides if int(row["id"]) == slide_id),
+        slide,
+    )
+    context_by_slide = ppt_context_service.build_slide_context_map(
+        _deck_payload(effective_slide),
+        effective_slides,
+        sections,
+    )
     fingerprint = chatgpt_explanation_task_service.deck_fingerprint(owner_id, deck_id)
+    deck_payload = _deck_payload(effective_slide)
+    if not deck_payload["outline"]:
+        deck_payload["outline"] = inferred_outline
     result: dict[str, Any] = {
-        "deck": _deck_payload(slide),
+        "deck": deck_payload,
         "deck_fingerprint": fingerprint,
-        "section": _section_for_slide(sections, slide),
-        **_slide_payload(slide),
+        "section": _section_for_slide(sections, effective_slide),
+        **_slide_payload(effective_slide),
         "latest_explanation": _latest_explanation(owner_id, slide_id),
+        "generation_profile": ppt_context_service.detailed_explanation_profile(),
+        "generation_context": ppt_context_service.format_slide_context_package(
+            context_by_slide.get(slide_number)
+        ),
         "neighbors": [],
     }
     if include_neighbor_context and radius:
@@ -115,29 +136,28 @@ def read_slide_range(
     deck = _get_owned_deck(owner_id, owned_deck_id)
     if not deck:
         raise _resource_not_found("PPT")
-    slide_rows = db.fetch_all(
-        """
-        SELECT
-            ps.id, ps.deck_id, ps.slide_number, ps.title, ps.slide_text,
-            ps.section_index, ps.page_type, ps.one_sentence_summary,
-            ps.slide_role, ps.key_points,
-            d.title AS deck_title, d.subject AS deck_subject,
-            d.slide_count AS deck_slide_count
-        FROM ppt_slides AS ps
-        JOIN ppt_decks AS d
-          ON d.id = ps.deck_id
-         AND d.user_id = ps.user_id
-        WHERE ps.user_id = ?
-          AND d.user_id = ?
-          AND ps.deck_id = ?
-          AND ps.slide_number BETWEEN ? AND ?
-        ORDER BY ps.slide_number ASC, ps.id ASC
-        """,
-        (owner_id, owner_id, owned_deck_id, start, end),
+    all_slide_rows = _owned_deck_slides(owner_id, owned_deck_id)
+    sections, effective_slides, inferred_outline = _effective_deck_structure(
+        owner_id,
+        owned_deck_id,
+        all_slide_rows,
     )
+    slide_rows = [
+        row
+        for row in effective_slides
+        if start <= int(row["slide_number"]) <= end
+    ]
     if len(slide_rows) != requested_count:
         raise _resource_not_found("slide range")
 
+    deck_payload = _deck_payload(deck)
+    if not deck_payload["outline"]:
+        deck_payload["outline"] = inferred_outline
+    context_by_slide = ppt_context_service.build_slide_context_map(
+        deck_payload,
+        effective_slides,
+        sections,
+    )
     latest = ppt_repository.latest_explanations_by_slide_ids(
         owner_id,
         [int(row["id"]) for row in slide_rows],
@@ -146,20 +166,24 @@ def read_slide_range(
     for row in slide_rows:
         slide_payload = _slide_payload(row)
         slide_payload["latest_explanation"] = _explanation_payload(latest.get(int(row["id"])))
+        slide_payload["generation_context"] = ppt_context_service.format_slide_context_package(
+            context_by_slide.get(int(row["slide_number"]))
+        )
         slides.append(slide_payload)
 
-    sections = [
+    range_sections = [
         section
-        for section in _owned_sections(owner_id, owned_deck_id)
+        for section in sections
         if int(section["start_slide"]) <= end and int(section["end_slide"]) >= start
     ]
     fingerprint = chatgpt_explanation_task_service.deck_fingerprint(owner_id, owned_deck_id)
     return {
-        "deck": _deck_payload(deck),
+        "deck": deck_payload,
         "deck_fingerprint": fingerprint,
         "start_slide": start,
         "end_slide": end,
-        "sections": sections,
+        "sections": range_sections,
+        "generation_profile": ppt_context_service.detailed_explanation_profile(),
         "slides": slides,
     }
 
@@ -358,7 +382,7 @@ def submit_review_result(user_id: int, task_id: int, result: str) -> dict[str, A
 def _get_owned_deck(user_id: int, deck_id: int) -> dict[str, Any] | None:
     return db.fetch_one(
         """
-        SELECT id AS deck_id, title, subject, slide_count
+        SELECT id AS deck_id, title, subject, slide_count, outline
         FROM ppt_decks
         WHERE id = ? AND user_id = ?
         """,
@@ -384,7 +408,7 @@ def _get_owned_slide(
             ps.section_index, ps.page_type, ps.one_sentence_summary,
             ps.slide_role, ps.key_points,
             d.title AS deck_title, d.subject AS deck_subject,
-            d.slide_count AS deck_slide_count
+            d.slide_count AS deck_slide_count, d.outline AS deck_outline
         FROM ppt_slides AS ps
         JOIN ppt_decks AS d
           ON d.id = ps.deck_id
@@ -430,6 +454,56 @@ def _owned_sections(user_id: int, deck_id: int) -> list[dict[str, Any]]:
     ]
 
 
+def _owned_deck_slides(user_id: int, deck_id: int) -> list[dict[str, Any]]:
+    return db.fetch_all(
+        """
+        SELECT
+            ps.id, ps.deck_id, ps.slide_number, ps.title, ps.slide_text,
+            ps.section_index, ps.page_type, ps.one_sentence_summary,
+            ps.slide_role, ps.key_points,
+            d.title AS deck_title, d.subject AS deck_subject,
+            d.slide_count AS deck_slide_count, d.outline AS deck_outline
+        FROM ppt_slides AS ps
+        JOIN ppt_decks AS d
+          ON d.id = ps.deck_id
+         AND d.user_id = ps.user_id
+        WHERE ps.user_id = ?
+          AND d.user_id = ?
+          AND ps.deck_id = ?
+        ORDER BY ps.slide_number ASC, ps.id ASC
+        """,
+        (int(user_id), int(user_id), int(deck_id)),
+    )
+
+
+def _effective_deck_structure(
+    user_id: int,
+    deck_id: int,
+    slides: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    sections = _owned_sections(user_id, deck_id)
+    if sections:
+        outline = str(slides[0].get("deck_outline") or "") if slides else ""
+        return sections, [dict(slide) for slide in slides], outline
+
+    structure = ppt_context_service.infer_document_structure_from_titles(slides)
+    inferred_sections = [_section_payload(section) for section in structure.get("sections") or []]
+    page_by_number = {
+        int(page["slide_number"]): page
+        for page in structure.get("pages") or []
+    }
+    effective_slides: list[dict[str, Any]] = []
+    for raw_slide in slides:
+        slide = dict(raw_slide)
+        page = page_by_number.get(int(slide["slide_number"]), {})
+        slide["section_index"] = int(page.get("section_index") or 0)
+        for field in ("page_type", "one_sentence_summary", "slide_role", "key_points"):
+            if not str(slide.get(field) or "").strip():
+                slide[field] = str(page.get(field) or "")
+        effective_slides.append(slide)
+    return inferred_sections, effective_slides, str(structure.get("outline") or "")
+
+
 def _neighbor_slides(
     user_id: int,
     deck_id: int,
@@ -472,6 +546,7 @@ def _deck_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         "title": str(row.get("deck_title") or row.get("title") or ""),
         "subject": str(row.get("deck_subject") or row.get("subject") or ""),
         "slide_count": int(row.get("deck_slide_count") or row.get("slide_count") or 0),
+        "outline": str(row.get("deck_outline") or row.get("outline") or ""),
     }
 
 

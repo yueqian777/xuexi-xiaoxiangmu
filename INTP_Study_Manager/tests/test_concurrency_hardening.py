@@ -1,4 +1,5 @@
 import io
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +26,45 @@ class ConcurrencyHardeningTest(unittest.TestCase):
             self.addCleanup(patcher.stop)
         db._INITIALIZED_DATABASE_PATH = None
         db.init_db()
+
+    def test_write_transaction_reconnects_after_transient_readonly_database(self):
+        class FakeConnection:
+            def __init__(self, begin_error=None):
+                self.begin_error = begin_error
+                self.commits = 0
+                self.rollbacks = 0
+                self.closed = 0
+
+            def execute(self, query):
+                if query == "BEGIN IMMEDIATE" and self.begin_error:
+                    error = self.begin_error
+                    self.begin_error = None
+                    raise error
+                return None
+
+            def commit(self):
+                self.commits += 1
+
+            def rollback(self):
+                self.rollbacks += 1
+
+            def close(self):
+                self.closed += 1
+
+        first = FakeConnection(sqlite3.OperationalError("attempt to write a readonly database"))
+        second = FakeConnection()
+        with patch.object(db, "get_connection", side_effect=[first, second]), patch.object(
+            db.time, "sleep"
+        ) as sleep:
+            with db.write_transaction(attempts=2) as conn:
+                self.assertIs(conn, second)
+
+        self.assertEqual(first.closed, 1)
+        self.assertEqual(first.commits, 0)
+        self.assertEqual(first.rollbacks, 0)
+        self.assertEqual(second.commits, 1)
+        self.assertEqual(second.closed, 1)
+        sleep.assert_called_once_with(0.05)
 
     def test_uploaded_deck_paths_are_local_user_scoped_and_unique(self):
         first = io.BytesIO(b"first")

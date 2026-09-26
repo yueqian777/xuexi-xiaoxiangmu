@@ -63,6 +63,44 @@ class CourseWriteIntegrationTest(unittest.TestCase):
         self.assertEqual(course, {"user_id": self.user_id, "name": "信号与系统"})
         self.assertNotEqual(deck["course_id"], other_course_id)
 
+    def test_regular_deck_import_seeds_local_document_structure_without_ai(self):
+        source = self.data_dir / "vector.pdf"
+        source.write_bytes(b"pdf")
+        slides = [
+            {"slide_number": 1, "title": "电磁场与电磁波", "slide_text": "第一章 矢量分析", "notes": ""},
+            {"slide_number": 2, "title": "引言", "slide_text": "本章内容", "notes": ""},
+            {"slide_number": 3, "title": "电磁场与电磁波", "slide_text": "1.1 矢量", "notes": ""},
+            {"slide_number": 4, "title": "矢量与标量", "slide_text": "定义", "notes": ""},
+            {"slide_number": 5, "title": "矢量运算", "slide_text": "点积和叉积", "notes": ""},
+            {"slide_number": 6, "title": "电磁场与电磁波", "slide_text": "1.2 场论", "notes": ""},
+            {"slide_number": 7, "title": "场的基本概念", "slide_text": "场的定义", "notes": ""},
+            {"slide_number": 8, "title": "三种坐标系", "slide_text": "坐标转换", "notes": ""},
+        ]
+
+        with patch.object(ppt_service, "require_login", return_value=SimpleNamespace(id=self.user_id)):
+            deck_id = ppt_service._save_deck_records(
+                source,
+                slides,
+                {},
+                subject="电磁场与微波",
+                title="矢量分析",
+            )
+
+        deck = db.fetch_one(
+            "SELECT outline FROM ppt_decks WHERE id = ? AND user_id = ?",
+            (deck_id, self.user_id),
+        )
+        sections = db.fetch_all(
+            "SELECT user_id, section_index, start_slide, end_slide FROM ppt_sections WHERE deck_id = ? ORDER BY section_index",
+            (deck_id,),
+        )
+        self.assertIn("第一章 矢量分析", deck["outline"])
+        self.assertEqual(
+            [(row["start_slide"], row["end_slide"]) for row in sections],
+            [(1, 2), (3, 5), (6, 8)],
+        )
+        self.assertTrue(all(row["user_id"] == self.user_id for row in sections))
+
     def test_deck_management_subject_edit_relinks_the_owned_course_atomically(self):
         original_course_id = course_service.ensure_course_for_subject(
             self.user_id,

@@ -597,19 +597,19 @@ def render() -> None:
     slide_by_id = {slide["id"]: slide for slide in slides}
     latest_by_slide_id = _latest_explanations_by_slide_ids(list(slide_by_id))
     sections = fetch_deck_sections(int(deck["id"]), user_id=user.id)
-    _render_chatgpt_web_bridge_shortcut(deck, slides, sections, last_position)
-
     st.divider()
     if workbench_mode == "资料准备":
         _render_source_preparation(deck, slides)
         _render_document_structure_controls(deck, slides, sections)
     elif workbench_mode == "生成讲解":
+        _render_chatgpt_web_bridge_shortcut(deck, slides, sections, last_position)
         _render_api_settings(user.id)
         _render_generation_controls(deck, slides, latest_by_slide_id, sections, user_id=user.id)
     elif workbench_mode == "学习沉淀":
         _render_question_to_knowledge_panel(deck, user_id=user.id)
         _render_study_asset_generator(deck, sections, slides, latest_by_slide_id)
     else:
+        _render_chatgpt_web_bridge_shortcut(deck, slides, sections, last_position)
         _render_question_to_knowledge_panel(deck, user_id=user.id)
         _render_synced_reader(deck, slides, latest_by_slide_id, last_position, sections, user_id=user.id)
 
@@ -1604,6 +1604,7 @@ def _handle_synced_reader_action(
         "save_explanation_edit",
         "save_question_answer_edit",
         "merge_question_thread",
+        "mark_question_understood",
     }:
         st.warning("历史课程为只读；请先在课程中心重新激活，再修改讲解或学习记录。")
         return
@@ -5037,16 +5038,14 @@ def _latest_explanations_by_slide_ids(slide_ids: list[int]) -> dict[int, dict]:
 
 
 def _question_learning_status(row: dict) -> str:
-    if bool(row.get("understood")):
-        return "已掌握"
     if bool(row.get("converted_to_knowledge")) or row.get("knowledge_id"):
         return "已转知识卡"
+    if bool(row.get("understood")):
+        return "已掌握"
     status = str(row.get("status") or "").strip()
-    if status in {"理解中", "待追问"} or bool(row.get("need_review")):
-        return "理解中"
     if status in {"已掌握", "已解决", "understood"}:
         return "已掌握"
-    return "未解决"
+    return "待理解"
 
 
 def _questions_by_slide_ids(slide_ids: list[int]) -> dict[int, list[dict]]:

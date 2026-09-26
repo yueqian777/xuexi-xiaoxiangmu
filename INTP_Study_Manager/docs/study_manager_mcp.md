@@ -44,8 +44,8 @@ python -m study_mcp.server --transport stdio --user-id <CURRENT_USER_ID>
 | Tool | 类型 | 本地权限 | 行为 |
 |---|---|---|---|
 | `study_get_current_context` | READ | `read_current_context` | 返回 Active Learning Context；无上下文时明确返回 `active: false` |
-| `study_get_current_slide` | READ | `read_current_context` + `read_ppt` | 读当前页、section、最新讲解与受限上下页 |
-| `study_read_slide_range` | READ | `read_ppt` | 读指定 deck 页码范围，每次最多 25 页 |
+| `study_get_current_slide` | READ | `read_current_context` + `read_ppt` | 读当前页、目录块、整章提纲、最新讲解、精讲规范与受限上下页 |
+| `study_read_slide_range` | READ | `read_ppt` | 读指定 deck 页码范围、目录结构及逐页生成上下文，每次最多 25 页 |
 | `study_get_question_tree` | READ | `read_question_tree` | 读真实 root/child/grandchild 插问树 |
 | `study_get_knowledge_card` | READ | `read_knowledge_cards` | 读单个当前用户知识卡 |
 | `study_search_knowledge` | READ | `read_knowledge_cards` | 受限条数搜索知识卡 |
@@ -110,6 +110,16 @@ target_type, target_id, success, permission_result, summary, created_at
 - 方式 B：JSON Bridge，不依赖 MCP，作为 fallback。
 
 两条路径最终追加不同 `model` 来源的 explanation 版本，不相互覆盖。
+
+## 逐页精讲质量协议
+
+API、MCP direct 与 JSON Bridge 统一遵循 `detailed_page_tutor_v2`，避免不同入口生成完全不同深度的内容：
+
+- 普通知识页目标为 900–1500 个中文字符，目录页或章节过渡页目标为 250–450 个中文字符；
+- 正文按“章节定位与本页任务、核心概念与物理图像、公式与推导逐步拆解、前后页连接、易错点与适用条件、闭卷自测”六块组织；
+- `study_get_current_slide` 和 `study_read_slide_range` 都返回 `generation_profile`；返回结果通过 `deck.outline` 与 `sections` 提供整章提纲和目录结构，每页另带 `generation_context`，其中包含当前目录块及跨读取批次的真实相邻页线索；
+- 批量生成仍必须逐页写入，不能把一个范围压缩成章节摘要；所有 MCP 写入继续追加为新版本，不覆盖历史讲解；
+- 新导入资料会在同一数据库事务中按标题和章节页保守推断本地目录。没有可靠分块信号时只建立一个连续目录块，不调用新 AI 接口，也不凭固定页数硬拆章节。
 
 ## 安全边界
 

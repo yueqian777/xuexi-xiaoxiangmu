@@ -31,7 +31,11 @@ def create_server(user_id: int) -> MCPServer:
         ),
         instructions=(
             "Read current state before writes. Never infer resource IDs. All writes are "
-            "subject to local permissions, ownership checks, and audit logging."
+            "subject to local permissions, ownership checks, and audit logging. When generating "
+            "PPT explanations, read the requested slide range first and strictly follow the "
+            "returned detailed_page_tutor_v2 generation_profile and each page's "
+            "generation_context. Preserve directory blocks and page order; append one complete "
+            "explanation per page instead of compressing a range into short summaries."
         ),
         version=__version__,
         log_level="WARNING",

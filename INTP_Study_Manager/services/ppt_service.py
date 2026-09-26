@@ -12,6 +12,7 @@ from db import DATA_DIR, execute_many, write_transaction
 from services.auth_service import require_login
 from services.course_service import ensure_course_for_subject
 from services.pdf_extraction_service import extract_pdf_pages as extract_pdf_pages_from_pdf
+from services.ppt_context_service import infer_document_structure_from_titles, save_deck_structure
 
 UPLOAD_DIR = DATA_DIR / "uploads"
 PAGE_IMAGE_DIR = DATA_DIR / "page_images"
@@ -111,6 +112,14 @@ def _save_deck_records(
                 for slide in slides
             ),
         )
+        structure = infer_document_structure_from_titles(slides)
+        if structure.get("sections"):
+            save_deck_structure(
+                deck_id,
+                structure,
+                user_id=user.id,
+                conn=conn,
+            )
     return deck_id
 
 
