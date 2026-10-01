@@ -4314,13 +4314,16 @@ def _build_reader_payload(
             image_data = ""
 
         animation_states = _animation_state_payloads(animation_by_slide_id.get(int(slide["id"]), []))
+        explanation = _repair_reader_math_escapes(
+            latest["explanation"] if latest else "本页还没有 AI 讲解。"
+        )
         payload.append(
             {
                 "slideNumber": slide_number,
                 "title": slide_title,
                 "image": image_data,
                 "imageAvailable": image_available,
-                "explanation": latest["explanation"] if latest else "本页还没有 AI 讲解。",
+                "explanation": explanation,
                 "hasExplanation": bool(latest),
                 "slideText": slide_text,
                 "model": latest["model"] if latest else "",
@@ -4340,6 +4343,18 @@ def _build_reader_payload(
             }
         )
     return payload
+
+
+def _repair_reader_math_escapes(value: str) -> str:
+    """Repair legacy ``\\nabla`` values stored as a newline plus ``abla``.
+
+    Some previously generated explanations interpreted ``\\nabla`` as a
+    Python newline escape before they were persisted. Repairing this at the
+    reader payload boundary keeps the database history intact and lets the
+    existing MathJax pipeline render the intended nabla operator.
+    """
+
+    return re.sub(r"\r?\nabla", r"\\nabla", str(value or ""))
 
 
 def _animation_state_payloads(states: list[dict]) -> list[dict]:
@@ -4399,6 +4414,11 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
   <script>
     window.MathJax = {{
       tex: {{
+        packages: {{"[+]": ["ams"]}},
+        macros: {{
+          oiint: "\\\\mathop{{∯}}",
+          oiiint: "\\\\mathop{{∰}}"
+        }},
         inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
         displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
         processEscapes: true

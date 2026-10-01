@@ -1839,6 +1839,50 @@ class SyncedReaderMarkdownTest(unittest.TestCase):
         self.assertIn('<details class="note-context">', source)
         self.assertIn('<summary class="note-context-summary">', source)
 
+    def test_mathjax_enables_ams_integral_commands_in_reader_and_slideshow(self):
+        reader_source = READER_HTML.read_text(encoding="utf-8")
+        tutor_source = (APP_ROOT / "pages" / "ppt_tutor.py").read_text(encoding="utf-8")
+
+        self.assertRegex(
+            reader_source,
+            r"packages\s*:\s*\{\s*['\"]\[\+\]['\"]\s*:\s*\[['\"]ams['\"]\]",
+        )
+        self.assertRegex(reader_source, r"oiint\s*:\s*['\"][^'\"]*∯")
+        self.assertIn('packages: {{"[+]": ["ams"]}},', tutor_source)
+        self.assertIn('oiint:', tutor_source)
+
+    def test_unsupported_closed_surface_integrals_are_normalized_inside_math_only(self):
+        self.run_js(
+            r"""
+            const rendered = normalizeMathDelimiters(
+              '说明 `\\oiint` 不应被改写；公式 $$\\oiint_S E\\cdot dS + \\oiiint_V f\\,dV$$。'
+            );
+            if (rendered.includes('$$')) {
+              throw new Error(rendered);
+            }
+            if (!rendered.includes('∯_S') || !rendered.includes('∰_V')) {
+              throw new Error(rendered);
+            }
+            if (!rendered.includes('`\\oiint`')) {
+              throw new Error(rendered);
+            }
+            """
+        )
+
+    def test_malformed_newline_nabla_is_repaired_inside_math_only(self):
+        self.run_js(
+            r"""
+            const source = '散度定义：\\(\nabla\\cdot D\\)。代码 `\nabla` 不应被改写。';
+            const rendered = normalizeMathDelimiters(source);
+            if (!rendered.includes('\\(\\nabla\\cdot D\\)')) {
+              throw new Error(rendered);
+            }
+            if (!rendered.includes('`' + String.fromCharCode(10) + 'abla`')) {
+              throw new Error(rendered);
+            }
+            """
+        )
+
     def test_learning_sidebar_defaults_expanded_and_remains_available_on_narrow_layouts(self):
         source = READER_HTML.read_text(encoding="utf-8")
 

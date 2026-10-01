@@ -5,6 +5,14 @@
   <script>
     window.MathJax = {
       tex: {
+        packages: { '[+]': ['ams'] },
+        // MathJax's bundled TeX extensions do not define closed surface
+        // integral commands in every runtime. Keep legacy explanations
+        // readable without changing the stored source formula.
+        macros: {
+          oiint: '\\mathop{∯}',
+          oiiint: '\\mathop{∰}'
+        },
         inlineMath: [['$', '$'], ['\\(', '\\)']],
         displayMath: [['$$', '$$'], ['\\[', '\\]']],
         processEscapes: true
@@ -2138,9 +2146,25 @@
     }
 
     function normalizeMathDelimiters(value) {
-      return normalizeDollarMathDelimiters(
+      const normalized = normalizeDollarMathDelimiters(
         repairSplitLeftRightMathSegments(String(value ?? '').replace(/\\\\([()[\]])/g, '\\$1'))
       );
+      let output = '';
+      let index = 0;
+      while (index < normalized.length) {
+        const math = findMathSegmentAt(normalized, index);
+        if (math) {
+          output += math.segment
+            .replace(/\r?\nabla/g, '\\nabla')
+            .replace(/\\oiiint(?![A-Za-z])/g, '∰')
+            .replace(/\\oiint(?![A-Za-z])/g, '∯');
+          index = math.end;
+          continue;
+        }
+        output += normalized[index];
+        index += 1;
+      }
+      return output;
     }
 
     function findMathSegmentAt(source, index) {

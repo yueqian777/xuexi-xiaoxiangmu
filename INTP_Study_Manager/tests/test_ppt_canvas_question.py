@@ -428,6 +428,28 @@ class PptCanvasQuestionTest(unittest.TestCase):
             result[0]["slideText"],
         )
 
+    def test_build_reader_payload_repairs_malformed_newline_nabla_in_explanations(self):
+        slides = [
+            {
+                "id": 9,
+                "slide_number": 15,
+                "title": "散度定理",
+                "slide_text": "",
+                "image_path": "",
+            }
+        ]
+        malformed = "散度：\\(" + "\nabla" + "\\cdot\\mathbf D\\)"
+
+        result = ppt_tutor._build_reader_payload(
+            slides,
+            {9: {"explanation": malformed, "model": "test", "created_at": ""}},
+            {},
+            image_slide_numbers=set(),
+        )
+
+        self.assertIn(r"\(\nabla\cdot\mathbf D\)", result[0]["explanation"])
+        self.assertNotIn("\nabla", result[0]["explanation"])
+
     def test_build_reader_payload_repairs_stored_mineru_left_right_fragments(self):
         slides = [
             {
